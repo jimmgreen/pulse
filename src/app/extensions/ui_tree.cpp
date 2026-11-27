@@ -742,12 +742,17 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                          path + ".kind")) {
             return false;
         }
-        if (!n.color.empty() && (n.color.size() != 7 || n.color[0] != '#' ||
-                                 !std::all_of(n.color.begin() + 1, n.color.end(), [](char c) {
-                                     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-                                            (c >= 'A' && c <= 'F');
-                                 }))) {
-            return fail(path + ".color", "expected #RRGGBB");
+        // #RRGGBB, or a theme colour token that follows light/dark and the accent.
+        static constexpr std::string_view kColorTokens[] = {"accent", "success", "warning", "danger",
+                                                            "secondary", "text"};
+        const bool color_token = std::find(std::begin(kColorTokens), std::end(kColorTokens),
+                                           std::string_view(n.color)) != std::end(kColorTokens);
+        if (!n.color.empty() && !color_token &&
+            (n.color.size() != 7 || n.color[0] != '#' ||
+             !std::all_of(n.color.begin() + 1, n.color.end(), [](char c) {
+                 return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+             }))) {
+            return fail(path + ".color", "expected #RRGGBB or accent/success/warning/danger/secondary/text");
         }
         if (const auto* options = v.find("options")) {
             if (!options->is_array() || options->size() == 0 || options->size() > 128) {

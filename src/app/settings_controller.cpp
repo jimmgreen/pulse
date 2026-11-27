@@ -1356,6 +1356,11 @@ void SettingsController::IntegrationAction(int index) {
 void SettingsController::ToggleUi(int index) {
     if (!prefs_ || !context_) return;
     if (index == 81) { ArrangeMinimized(prefs_->arrange_include_minimized ? 0 : 1); return; }
+    if (index == 84) {  // 滚动到最后一项之后
+        prefs_->list_scroll_past_end = !prefs_->list_scroll_past_end;
+        SaveAndApply(SettingsEffect::ListStyle);
+        return;
+    }
     // 修改时间提示 switches and sync status, kept out of the chain below.
     // 77, 78: 鼠标与选择 hover selection and item check boxes; 79: 滚动时固定上级.
     if (index >= 70 && index <= 79) {
@@ -1474,6 +1479,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 43) {
         prefs_->global_search_apps = !prefs_->global_search_apps;
         SaveAndApply(SettingsEffect::GlobalSearch);
+    } else if (index == 47) {
+        prefs_->global_search_apps_first = !prefs_->global_search_apps_first;
+        SaveAndApply(SettingsEffect::GlobalSearch);
     } else if (index == 42) {
         prefs_->dialog_jump_auto = !prefs_->dialog_jump_auto;
         SaveAndApply(SettingsEffect::GlobalSearch);
@@ -1521,10 +1529,14 @@ void SettingsController::ToggleUi(int index) {
         context_->Save();
     } else if (index >= 100) {
         const size_t item = static_cast<size_t>(index - 100);
-        if (item >= context_->seen.size()) {
+        // BuildVm excludes observed tree nodes; preserve the legacy row and
+        // builtin indices even when discovering children appends to seen.
+        const size_t legacy_count = static_cast<size_t>(std::count_if(context_->seen.begin(), context_->seen.end(),
+            [](const auto& seen) { return !seen.tree_node; }));
+        if (item >= legacy_count) {
             // Rows after the seen catalog are Pulse's own commands, in
             // BuiltinMenuItem order (app_runtime builds them the same way).
-            const size_t builtin = item - context_->seen.size();
+            const size_t builtin = item - legacy_count;
             if (builtin >= static_cast<size_t>(kBuiltinMenuItemCount)) return;
             const auto which = static_cast<BuiltinMenuItem>(builtin);
             context_->SetBuiltinVisible(which, !context_->BuiltinVisible(which));
@@ -1534,7 +1546,15 @@ void SettingsController::ToggleUi(int index) {
                 Apply(SettingsEffect::ListStyle);
             return;
         }
-        const auto& seen = context_->seen[item];
+        auto selected = context_->seen.begin();
+        size_t remaining = item;
+        for (; selected != context_->seen.end(); ++selected) {
+            if (selected->tree_node) continue;
+            if (remaining == 0) break;
+            --remaining;
+        }
+        if (selected == context_->seen.end()) return;
+        const auto& seen = *selected;
         // RowEnabled (#77): a slow-disabled handler shows as off, so one
         // toggle re-enables it and clears the timeout skip via SetItemEnabled.
         const bool enabled = context_->RowEnabled(seen.key, seen.category, seen.from_com);

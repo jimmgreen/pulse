@@ -38,6 +38,7 @@
 #include "window_arrange_ui.h"
 #include "app_updates.h"
 #include "app_internal.h"
+#include "button_press_hover.h"
 #include "global_search_controller.h"
 #include "selection_caps.h"
 #include "app_input.h"
@@ -106,6 +107,13 @@ using namespace pulse;
 
 namespace pulse {
 namespace {
+// Target cells already match hit geometry during view feedback. Input ends
+// only the contained artwork settle; it never reinterprets a travelling row.
+void FinishContentMotionForInput(AppState* state) {
+    if (state && state->renderer.FinishContentMotion() && state->hwnd)
+        RedrawWindow(state->hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+}
+
 constexpr int kTabListClose = 100000;   // + tab index + 1: the row's × (trailing_command)
 constexpr int kTabListNewTab = 200000;  // 新建标签
 constexpr int kTabListRestore = 200001; // 恢复关闭的标签 (Ctrl+Shift+T)
@@ -487,6 +495,84 @@ bool UpdateSplitterDrag(AppState& s, int mx, int my) {
     s.hoverControlIndex = s.splitterDragIndex;
     return true;
 }
+// 滚动到最后一项之后: the panes a drag scrolled remember where it found them;
+// once it moves on without dropping there, they glide back.
+static void ForgetDropScroll(app::Tab& tab) {
+    tab.drop_scroll_home = -1.0f;
+    tab.drop_scroll_home_path.clear();
+    tab.drop_scroll_returning = false;
+}
+
+static void ReturnDropScroll(AppState& s, const app::Tab* keep) {
+    bool started = false;
+    ForEachPane(s, [&](app::Pane& pane) {
+        app::Tab* tab = pane.ActiveTab();
+        if (!tab || tab == keep || tab->drop_scroll_home < 0.0f || tab->drop_scroll_returning) return;
+        // It went into another folder meanwhile (spring-open): nothing to return to.
+        if (tab->current_path != tab->drop_scroll_home_path) { ForgetDropScroll(*tab); return; }
+        tab->drop_scroll_returning = true;
+        started = true;
+    });
+    if (!started) return;
+    if (!s.dropScrollReturning) s.dropScrollReturnLast = std::chrono::steady_clock::now();
+    s.dropScrollReturning = true;
+    if (s.framePump.Running()) s.framePump.Arm();
+    if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+void ReturnDropScrolls(AppState& s) { ReturnDropScroll(s, nullptr); }
+
+bool TickDropScrollReturn(AppState& s) {
+    if (!s.dropScrollReturning) return false;
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::clamp(
+        std::chrono::duration<double, std::milli>(now - s.dropScrollReturnLast).count(), 0.0, 50.0);
+    s.dropScrollReturnLast = now;
+    // The same response as wheel scrolling (UpdateSmoothScroll).
+    const float response = ui::motion::SystemAnimationsEnabled()
+        ? 1.0f - static_cast<float>(std::exp(-elapsed / AppState::kScrollResponseMs)) : 1.0f;
+    bool moving = false;
+    bool focused_done = false;
+    ForEachPane(s, [&](app::Pane& pane) {
+        app::Tab* tab = pane.ActiveTab();
+        if (!tab || !tab->drop_scroll_returning) return;
+        if (tab->current_path != tab->drop_scroll_home_path) { ForgetDropScroll(*tab); return; }
+        const float remaining = tab->drop_scroll_home - tab->scroll_y;
+        if (std::abs(remaining) <= 0.35f || response >= 1.0f) {
+            tab->scroll_y = tab->drop_scroll_home;
+            ForgetDropScroll(*tab);
+            if (&pane == s.pane) focused_done = true;
+        } else {
+            tab->scroll_y += remaining * response;
+            moving = true;
+        }
+        if (&pane == s.pane) {
+            CancelScrollAnimation(s);
+            s.scrollTargetY = tab->scroll_y;
+        }
+    });
+    s.dropScrollReturning = moving;
+    // Back home: the list may have shrunk meanwhile.
+    if (focused_done) ClampScroll(s);
+    if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
+// A drop keeps the place of the pane it lands in; the others glide back.
+static void SettleDropScroll(AppState& s, POINT point) {
+    app::Tab* keep = nullptr;
+    const auto vm = BuildVm(s, false);
+    const auto bounds = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                  static_cast<float>(s.compositor.Height()));
+    const auto hit = s.renderer.HitTest(vm, bounds, static_cast<float>(point.x),
+                                      static_cast<float>(point.y));
+    if (hit.pane_index >= 0 && hit.pane_index < static_cast<int>(vm.pane_slots.size())) {
+        if (app::Pane* pane = PaneAtSlot(s, hit.pane_index)) keep = pane->ActiveTab();
+    }
+    if (keep) ForgetDropScroll(*keep);
+    ReturnDropScroll(s, keep);
+}
+
 bool TickDropEdgeScroll(AppState& s, POINT point) {
     const auto vm = BuildVm(s, false);
     const auto bounds = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
@@ -494,9 +580,11 @@ bool TickDropEdgeScroll(AppState& s, POINT point) {
     const auto hit = s.renderer.HitTest(vm, bounds, static_cast<float>(point.x),
                                       static_cast<float>(point.y));
     const int index = hit.pane_index;
-    if (index < 0 || index >= static_cast<int>(vm.pane_slots.size())) return false;
-    app::Pane* pane = PaneAtSlot(s, index);
+    const bool on_pane = index >= 0 && index < static_cast<int>(vm.pane_slots.size());
+    app::Pane* pane = on_pane ? PaneAtSlot(s, index) : nullptr;
     app::Tab* tab = pane ? pane->ActiveTab() : nullptr;
+    // Panes this drag scrolled and has left go back to where it found them.
+    ReturnDropScroll(s, tab);
     if (!tab) return false;
     const auto& slot = vm.pane_slots[static_cast<size_t>(index)];
     auto list = s.renderer.PaneListRect(slot.pane, slot.rect);
@@ -514,13 +602,22 @@ bool TickDropEdgeScroll(AppState& s, POINT point) {
     if (position < start + edge) penetration = -(start + edge - position) / edge;
     else if (position > end - edge) penetration = (position - end + edge) / edge;
     if (penetration == 0.0f) return false;
+    // 滚动到最后一项之后: past the last row the blank room below it opens up.
     const float maximum = horizontal ? s.renderer.MaxScrollXForPane(slot.pane, slot.rect)
-                                     : s.renderer.MaxScrollForPane(slot.pane, slot.rect);
+                                     : s.renderer.MaxScrollForPane(slot.pane, slot.rect) +
+                                       s.renderer.ScrollPastEndForPane(slot.pane, slot.rect);
     float& offset = horizontal ? tab->scroll_x : tab->scroll_y;
     const float step = std::copysign((4.0f + 20.0f * std::abs(penetration)) * s.scale, penetration);
     const float next = std::clamp(offset + step, 0.0f, maximum);
     if (next == offset) return false;
     if (pane == s.pane) CancelScrollAnimation(s);
+    if (!horizontal && s.appPrefs.list_scroll_past_end) {
+        if (tab->drop_scroll_home < 0.0f) {
+            tab->drop_scroll_home = offset;
+            tab->drop_scroll_home_path = tab->current_path;
+        }
+        tab->drop_scroll_returning = false;  // back over it: it scrolls again
+    }
     offset = next;
     if (pane == s.pane) {
         s.scrollTargetX = tab->scroll_x;
@@ -862,7 +959,10 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
     std::wstring destName;
     const bool file_row = hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
         tab->snapshot && hit.index < (int)tab->EntryCount() && !tab->EntryAt(hit.index).is_dir;
-    const std::wstring launch_program = file_row ? DropLaunchProgramAt(*tab, hit.index) : std::wstring();
+    // A program opens the items only when they land on its icon or name;
+    // the rest of its row takes them into the folder, like blank space.
+    const std::wstring launch_program = file_row && hit.on_name ? DropLaunchProgramAt(*tab, hit.index)
+                                                                : std::wstring();
     if (layout_drop) {
         if (layout_drop_path.empty() || fs::IsVirtualPath(layout_drop_path)) return RejectDropTarget(s);
         s.springRow = -1;
@@ -1318,6 +1418,7 @@ static DWORD FolderDropEffect(DWORD key_state, const std::vector<std::wstring>& 
 DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
                          POINT pt, DWORD key_state, DWORD allowed,
                          DWORD preferred_effect) {
+    SettleDropScroll(s, pt);
     // Resolve once more for the final position.
     // Tray drag-out is copy-only: the staged originals stay where they are.
     if (s.trayDragOut) allowed &= DROPEFFECT_COPY;
@@ -1745,6 +1846,8 @@ float MaxScrollForActivePane(AppState& s, ui::PaneViewModel* out) {
     float max_scroll = s.renderer.MaxScrollForPane(pane, FocusedPaneRect(s));
     // A rename card below the list's end made it taller for now.
     if (s.renameIndex >= 0) max_scroll += s.renameScrollRoom;
+    // 滚动到最后一项之后: the wheel and the bar go on into the room past the end.
+    max_scroll += s.renderer.ScrollPastEndForPane(pane, FocusedPaneRect(s));
     max_scroll += s.selectScrollRoom;
     if (out) *out = std::move(pane);
     return max_scroll;
@@ -2149,6 +2252,7 @@ void ApplyScrolledPosition(AppState& s, float& position, float next, const Hover
 } // namespace
 
 void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
+    FinishContentMotionForInput(&s);
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
 
@@ -2165,6 +2269,12 @@ void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
         s.scrollTargetX = tab->scroll_x;
         s.scrollLastUpdateTime = std::chrono::steady_clock::now();
     }
+
+    // Keep same-direction wheel distance, but discard queued travel when the
+    // user reverses. Otherwise an opposite pulse can still scroll forwards.
+    float& target = horizontal ? s.scrollTargetX : s.scrollTargetY;
+    const float presented_position = horizontal ? tab->scroll_x : tab->scroll_y;
+    if ((target - presented_position) * delta < 0.0f) target = presented_position;
 
     if (horizontal) {
         ui::PaneViewModel pane;
@@ -2440,6 +2550,20 @@ static ui::WindowViewModel ButtonHitTestVm(AppState& s, const app::ButtonPress* 
         vm.hover_region = static_cast<int>(ui::HitTestResult::TabClose);
         vm.hover_control_index = press->hit.index;
     }
+    if (press && press->active && press->context == ButtonContext(s, press->hit)) {
+        // Release clears capture/state before dispatch. Restore only the
+        // pressed target's hover-dependent geometry, never its hit result.
+        if (app::IsHoverRowAction(press->hit.region)) {
+            const int slot = press->hit.pane_index;
+            if (slot >= 0 && static_cast<size_t>(slot) < vm.pane_slots.size())
+                vm.pane_slots[static_cast<size_t>(slot)].pane.hover_index = press->hit.index;
+            else if (slot < 0)
+                vm.pane.hover_index = press->hit.index;
+        } else if (press->hit.region == ui::HitTestResult::UndoHistoryRow) {
+            vm.hover_region = static_cast<int>(press->hit.region);
+            vm.hover_control_index = press->hit.index;
+        }
+    }
     return vm;
 }
 
@@ -2455,6 +2579,7 @@ static void UpdateButtonPressHover(AppState& s, const ui::HitTestResult& hit) {
 }
 
 LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    FinishContentMotionForInput(s);
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
@@ -4157,8 +4282,13 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
             default: s->settings.FolderSort(hit.index); break;
             }
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsTrayIcon || hit.region == ui::HitTestResult::SettingsDoubleCtrlGap) {
+        } else if (hit.region == ui::HitTestResult::SettingsTrayIcon || hit.region == ui::HitTestResult::SettingsDoubleCtrlGap ||
+                   hit.region == ui::HitTestResult::SettingsShelfSensitivity ||
+                   hit.region == ui::HitTestResult::SettingsShelfPosition) {
+            // 暂存区: 晃动灵敏度 / 浮动架出现在 were hit-tested and drawn but never applied.
             if (hit.region == ui::HitTestResult::SettingsTrayIcon) s->settings.TrayIconSize(hit.index);
+            else if (hit.region == ui::HitTestResult::SettingsShelfSensitivity) s->settings.ShelfShakeSensitivity(hit.index);
+            else if (hit.region == ui::HitTestResult::SettingsShelfPosition) s->settings.ShelfSummonPosition(hit.index);
             else s->settings.DoubleCtrlGap(hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsWallpaperLook ||
@@ -4288,6 +4418,9 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
             // The trailing search segment edits the query instead of reloading it.
             const app::Tab* active = ActiveTab(*s);
             if (active && hit.path == active->current_path && IsAddressSearchResults(active)) ShowAddressSearch(*s);
+            // The current crumb remains an edit target when long names fill the bar.
+            else if (active && !active->current_path.empty() && !fs::IsVirtualPath(active->current_path) &&
+                     hit.path == ClipboardPath(active->current_path)) ShowAddressEditor(*s);
             // Empty path is the This PC segment; NavigateTo handles it.
             else NavigateTo(*s, hit.path);
         } else if (hit.region == ui::HitTestResult::Copy ||
@@ -4873,6 +5006,7 @@ static bool CustomFileDoublePress(AppState& s, LPARAM lParam, bool& file_hit) {
 }
 
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    FinishContentMotionForInput(s);
     if (s) {
         CancelButtonPress(*s);
         bool file_hit = false;
@@ -4883,6 +5017,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 }
 
 LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    FinishContentMotionForInput(s);
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         bool file_hit = false;
         if (s->appPrefs.double_click_interval_ms > 0 &&
@@ -5563,6 +5698,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
 }
 
 LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    FinishContentMotionForInput(s);
         if (s) CancelButtonPress(*s);
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         if (!s->workspaceRenameRoot.empty()) HideWorkspaceRenameOverlay(*s, true);
@@ -5612,6 +5748,7 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 }
 
 LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    FinishContentMotionForInput(s);
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {   // Pulse 助手
             AiAssistantContextMenu(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
@@ -5874,6 +6011,7 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 }
 
 LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    FinishContentMotionForInput(s);
         if (s && s->undoHistoryOpen) {
             const int count = static_cast<int>(s->ops.UndoHistoryCount());
             s->undoHistoryOffset = std::clamp(s->undoHistoryOffset + (GET_WHEEL_DELTA_WPARAM(wParam) < 0 ? 1 : -1), 0, std::max(0, count - 1));
@@ -6111,6 +6249,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 }
 
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, PaneFocusCycle cycle) {
+    FinishContentMotionForInput(s);
         if (s && s->buttonPress.active && wParam == VK_ESCAPE) {
             CancelButtonPress(*s);
             return 0;

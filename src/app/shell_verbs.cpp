@@ -109,6 +109,21 @@ std::wstring KnownVerbDisplay(const std::wstring& lower) {
 
 bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::wstring& verb,
                            bool allow_cascade, bool background, StaticVerb& out);
+std::vector<std::wstring> SubCommandTokens(const std::wstring& value) {
+    std::vector<std::wstring> tokens;
+    size_t start = 0;
+    while (start < value.size()) {
+        const size_t end = value.find(L';', start);
+        const auto part = value.substr(start, end == std::wstring::npos ? end : end - start);
+        const size_t first = part.find_first_not_of(L" \t\r\n");
+        if (first != std::wstring::npos)
+            tokens.push_back(part.substr(first, part.find_last_not_of(L" \t\r\n") - first + 1));
+        if (end == std::wstring::npos) break;
+        start = end + 1;
+    }
+    return tokens;
+}
+
 void CollectCascadeChildren(HKEY parent_root, const std::wstring& verb_key,
                             bool has_subcommands, const std::wstring& subcommands,
                             const std::wstring& ext_key, bool background,
@@ -204,23 +219,16 @@ void CollectCascadeChildren(HKEY parent_root, const std::wstring& verb_key,
                             const std::wstring& ext_key, bool background,
                             std::vector<StaticVerb>& children) {
     if (!subcommands.empty()) {
-        std::wstring cur;
-        auto flush = [&] {
-            if (cur.empty()) return;
+        // SubCommands is semicolon-delimited; spaces can belong to a verb key.
+        for (const auto& token : SubCommandTokens(subcommands)) {
             StaticVerb child;
             const std::wstring store =
                 L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CommandStore\\shell\\" +
-                cur;
-            if (FillStaticVerbFromKey(HKEY_LOCAL_MACHINE, store, cur, true, background, child) ||
-                FillStaticVerbFromKey(HKEY_CURRENT_USER, store, cur, true, background, child))
+                token;
+            if (FillStaticVerbFromKey(HKEY_LOCAL_MACHINE, store, token, true, background, child) ||
+                FillStaticVerbFromKey(HKEY_CURRENT_USER, store, token, true, background, child))
                 children.push_back(std::move(child));
-            cur.clear();
-        };
-        for (wchar_t c : subcommands) {
-            if (c == L' ' || c == L';' || c == L'\t') flush();
-            else cur += c;
         }
-        flush();
     } else if (has_subcommands && !verb_key.empty()) {
         // SubCommands="" means inline sub-verbs under <verb>\shell\<child>.
         CollectVerbsFrom(parent_root, verb_key + L"\\shell", children, true, background, nullptr);

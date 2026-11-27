@@ -4,6 +4,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -15,7 +16,8 @@ enum class HandoffState { Pending, Ready, Cancelled, Expired, Closed, Closing };
 
 // Shared across the UI and the Explorer STA; it never owns COM interfaces.
 struct ExplorerHandoff {
-    explicit ExplorerHandoff(uint64_t deadline) : deadline_tick(deadline) {}
+    explicit ExplorerHandoff(uint64_t deadline, std::function<void()> ready_notification = {})
+        : deadline_tick(deadline), ready_notification_(std::move(ready_notification)) {}
     const uint64_t deadline_tick;
     HandoffDiagnostics diagnostics;
     std::atomic<HandoffState> state{HandoffState::Pending};
@@ -32,7 +34,10 @@ struct ExplorerHandoff {
         if (now >= deadline_tick) { Cancel(HandoffState::Expired); return false; }
         auto expected = HandoffState::Pending;
         const bool changed = state.compare_exchange_strong(expected, HandoffState::Ready);
-        if (changed) diagnostics.Emit(HandoffPhase::Prepared);
+        if (changed) {
+            diagnostics.Emit(HandoffPhase::Prepared);
+            if (ready_notification_) ready_notification_();
+        }
         return changed;
     }
     void Cancel(HandoffState reason = HandoffState::Cancelled) {
@@ -65,6 +70,9 @@ struct ExplorerHandoff {
         if (changed) diagnostics.Emit(HandoffPhase::CloseFailed, static_cast<uint64_t>(reason));
         return changed;
     }
+private:
+    // Installed before publication; notification only queues work on the STA.
+    const std::function<void()> ready_notification_;
 };
 
 // A tab owns the lease: closing it or replacing its navigation cancels a

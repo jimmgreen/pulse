@@ -393,8 +393,30 @@ struct DialogManagementController::State {
                     desired.emplace_back(Architecture::X86,companion.Directory()+L"\\"+dialog_auto::DllNameFor(Architecture::X86));
                 }
             }
+            if (installed_default) {
+                std::vector<Architecture> architectures;
+                // Reject a live, unrelated installation before repairing another
+                // architecture's journal. Conflicting snapshots are checked by
+                // the stricter missing-journal witness below, never bypassed.
+                for (const auto& [architecture, target_dll] : desired) {
+                    const auto status = dialog_auto::Inspect(architecture);
+                    if (status.error) return status.error;
+                    if (!status.conflict && !status.dll_path.empty() &&
+                        _wcsicmp(status.dll_path.c_str(), target_dll.c_str()) != 0 &&
+                        !dialog_auto::IsOwnedDialogAutoDll(base, installed_default, architecture, status.dll_path) &&
+                        !dialog_auto::IsOrphanedMissingPulseDialogDll(architecture, status) &&
+                        !dialog_auto::IsRetiredDisabledPulseDialogDll(architecture, status)) return ERROR_ALREADY_EXISTS;
+                    architectures.push_back(architecture);
+                }
+                const auto repaired = dialog_auto::RepairMissingRegistrationJournals(architectures);
+                if (repaired.error) {
+                    result.auto_rollback_error = repaired.rollback_error;
+                    return repaired.error;
+                }
+            }
             std::vector<dialog_auto::RegistrationTarget> stale_enabled;
             std::vector<std::pair<Architecture,std::wstring>> reclaimed_orphans;
+            std::vector<std::pair<Architecture,std::wstring>> retired_disabled;
             auto is_reclaimed=[&](Architecture target_arch,const std::wstring& path) {
                 return std::any_of(reclaimed_orphans.begin(),reclaimed_orphans.end(),[&](const auto& item){
                     return item.first==target_arch && _wcsicmp(item.second.c_str(),path.c_str())==0;
@@ -407,8 +429,11 @@ struct DialogManagementController::State {
                 if(!status.dll_path.empty() && _wcsicmp(status.dll_path.c_str(),target_dll.c_str())!=0) {
                     const bool owned=dialog_auto::IsOwnedDialogAutoDll(base,installed_default,desired_arch,status.dll_path);
                     const bool orphaned=!owned && installed_default && dialog_auto::IsOrphanedMissingPulseDialogDll(desired_arch,status);
-                    if(!owned && !orphaned) return ERROR_ALREADY_EXISTS;
+                    const bool retired=!owned && !orphaned && installed_default &&
+                        dialog_auto::IsRetiredDisabledPulseDialogDll(desired_arch,status);
+                    if(!owned && !orphaned && !retired) return ERROR_ALREADY_EXISTS;
                     if(orphaned) reclaimed_orphans.emplace_back(desired_arch,status.dll_path);
+                    if(retired) retired_disabled.emplace_back(desired_arch,status.dll_path);
                     if(status.enabled) stale_enabled.push_back({desired_arch,status.dll_path});
                 }
             }
@@ -424,15 +449,26 @@ struct DialogManagementController::State {
                 if(current.error) return current.error;
                 if(current.conflict) return ERROR_ALREADY_EXISTS;
                 dialog_auto::RegistrationTarget target{desired_arch,target_dll};
+                const auto retired=std::find_if(retired_disabled.begin(),retired_disabled.end(),[&](const auto& item){
+                    return item.first==desired_arch;
+                });
+                if(retired!=retired_disabled.end()) {
+                    if(_wcsicmp(retired->second.c_str(),current.dll_path.c_str())!=0 ||
+                        !dialog_auto::IsRetiredDisabledPulseDialogDll(desired_arch,current)) return ERROR_REVISION_MISMATCH;
+                    target.require_retired_disabled=true;
+                }
                 if(!current.dll_path.empty() && _wcsicmp(current.dll_path.c_str(),target_dll.c_str())!=0) {
                     if(!dialog_auto::IsOwnedDialogAutoDll(base,installed_default,desired_arch,current.dll_path) &&
-                        !is_reclaimed(desired_arch,current.dll_path)) return ERROR_ALREADY_EXISTS;
+                        !is_reclaimed(desired_arch,current.dll_path) && !target.require_retired_disabled) return ERROR_ALREADY_EXISTS;
                     target.expected_old_dll_path=current.dll_path;
                 }
                 targets.push_back(std::move(target));
             }
             auto changed=dialog_auto::ExecuteRegistrationChange(targets,true);
             if((changed.error==ERROR_FILE_NOT_FOUND || changed.error==ERROR_ALREADY_EXISTS) && !changed.rollback_error &&
+                // Retired cross-install journals require typed zero flags. Never manufacture
+                // those preconditions by normalizing a rejected migration through DisableFor.
+                std::none_of(targets.begin(),targets.end(),[](const auto& t){return t.require_retired_disabled;}) &&
                 std::any_of(targets.begin(),targets.end(),[](const auto& t){return !t.expected_old_dll_path.empty();})) {
                 std::vector<dialog_auto::RegistrationTarget> normalize_targets;
                 for(auto& t:targets) {

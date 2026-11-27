@@ -84,6 +84,9 @@ public:
     std::vector<ui::FluentMenuItem> ReconcileDisplay(ContextMenuPrefs& prefs, bool& prefs_changed,
                                                      uint64_t now);
     void CommitDisplay(std::vector<ui::FluentMenuItem> shown);
+    bool TryReplaceBaseFlyout(const std::wstring& text,
+        std::vector<ui::FluentMenuItem> children, ContextMenuPrefs& prefs,
+        const std::function<bool(std::vector<ui::FluentMenuItem>)>& accept);
     // True while shell rows can still arrive that the first frame could not
     // predict: no stored layout for the key, a handler that never finished
     // under it, or static verbs still being read for the first time. Such
@@ -125,6 +128,9 @@ public:
     static constexpr uint32_t kPredictedIdFirst = 0x7F00;
     static constexpr uint32_t kPredictedIdLast = 0x7FFF;
     bool SeedComItemsFromCache();
+    // Fills com_items_ for a file type with no layout yet from the rows every
+    // file shows (an extensionless file's layout, or what all types share).
+    bool BorrowComRows(bool multi);
 
     // Persistent layout (ctx_layout_cache.h). Rows are kept with the item
     // names templated; SeedComItemsFromCache fills in the current names.
@@ -258,6 +264,7 @@ private:
     std::unordered_map<std::wstring, uint64_t> static_read_at_; // last enumeration request
     uint32_t cache_generation_ = 0;  // bumped by InvalidateCaches()
     uint64_t query_started_at_ = 0;
+    uint32_t query_cache_generation_ = 0;
     CtxMenuTiming timing_;
     bool timing_active_ = false;
     uint64_t opened_at_ = 0;

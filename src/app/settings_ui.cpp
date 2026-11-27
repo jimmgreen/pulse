@@ -13,6 +13,8 @@
 #include "../ui/folder_picker_dialog.h"
 #include "../common/preview_packs.h"
 #include "system_ctx_model.h"
+#include "settings_context_tree.h"
+#include "settings_context_extension.h"
 #include "shortcut_page.h"
 #include "content_scope_mode.h"
 #include "content_pack_ui.h"
@@ -77,7 +79,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsDoubleClickInterval,9,0},{I::SettingsClickOpen,9,0},{I::SettingsItemCheckboxes,9,0},{I::SettingsBlankClickBack,9,0},
     {I::SettingsShowHidden,9,0},{I::SettingsShowProtected,9,0},{I::SettingsFolderSort,9,0},
     {I::SettingsRowHeight,9,0},{I::ListZebraRows,9,0},{I::ListSmartDate,9,0},{I::ListSizeBar,9,0},{I::ListTagNameColor,9,0},
-    {I::ListSelectionOutline,9,0},{I::ListThumbnailBadges,9,0},{I::MediaColumnsTitle,9,0},{I::ThumbCache,9,0},{I::AliasMark,9,0},{I::SettingsTreeSticky,9,0},
+    {I::ListSelectionOutline,9,0},{I::ListThumbnailBadges,9,0},{I::MediaColumnsTitle,9,0},{I::ThumbCache,9,0},{I::AliasMark,9,0},{I::SettingsTreeSticky,9,0},{I::SettingsScrollPastEnd,9,0},
     {I::ListMtimeHint,9,0},{I::ListMtimeRange,9,0},{I::ListMtimePalette,9,0},{I::SyncOneDrive,9,0},{I::SyncSvn,9,0},
     // 10 标签页与窗口
     {I::SettingsOpenPulseIcon,10,0},
@@ -95,7 +97,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsConfirmDelete,12,0},{I::SettingsShelfShake,12,0},{I::SettingsShelfSensitivity,12,0},{I::SettingsShelfPosition,12,0},{I::SettingsShelfAutoHide,12,0},{I::SettingsTrayIcon,12,0},{I::TrayHideWhenEmpty,12,0},
     {I::SettingsLanDiscovery,12,0},{I::SettingsLanCache,12,0},{I::SettingsNetworkRecent,12,0},{I::NetworkShowHiddenShares,12,0},
     {I::SettingsClearNetwork,12,0},{I::SettingsChangeTracking,12,0},
-    {I::GlobalSearch,1,0},{I::GlobalSearchHotkey,1,0},{I::GlobalSearchDoubleCtrl,1,0},{I::GlobalSearchDoubleCtrlGap,1,0},{I::GlobalSearchApps,1,0},{I::DialogJumpBar,11,0},{I::DialogJumpAuto,11,0},{I::SearchPinyin,1,0},{I::JumpHistory,1,0},{I::ContentIndexManage,1,0},{I::IndexLocation,1,2},{I::LocalDrives,1,2},
+    {I::GlobalSearch,1,0},{I::GlobalSearchHotkey,1,0},{I::GlobalSearchDoubleCtrl,1,0},{I::GlobalSearchDoubleCtrlGap,1,0},{I::GlobalSearchApps,1,0},{I::GlobalSearchAppsFirst,1,0},{I::DialogJumpBar,11,0},{I::DialogJumpAuto,11,0},{I::SearchPinyin,1,0},{I::JumpHistory,1,0},{I::ContentIndexManage,1,0},{I::IndexLocation,1,2},{I::LocalDrives,1,2},
     {I::Exclusions,1,2},{I::ServerFolders,1,2},{I::SettingsContextMenu,2,0},{I::SettingsDuplicates,4,0},{I::QuickPreview,5,4},{I::PreviewPacks,8,0},{I::DownloadSourceTitle,8,0},
     {I::SettingsAboutDiagnostics,3,0},{I::SettingsShowPerformance,3,0},{I::SettingsHints,3,0},{I::SettingsHintsReset,3,0},{I::SettingsTransfer,3,0},{I::SettingsAutoUpdate,3,0},
 };
@@ -147,6 +149,7 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::ThumbCache: haystack += L" " + l10n::Get(I::ThumbCacheDesc); break;
         case I::AliasMark: haystack += L" " + l10n::Get(I::AliasMarkDesc); break;
         case I::SettingsTreeSticky: haystack += L" " + l10n::Get(I::SettingsTreeStickyDesc); break;
+        case I::SettingsScrollPastEnd: haystack += L" " + l10n::Get(I::SettingsScrollPastEndDesc); break;
         case I::ListMtimeHint: haystack += L" " + l10n::Get(I::ListMtimeHintDesc); break;
         case I::ListMtimeRange: haystack += L" " + l10n::Get(I::ListMtimeRangeDesc); break;
         case I::ListMtimePalette: haystack += L" " + l10n::Get(I::ListMtimePaletteDesc); break;
@@ -194,6 +197,7 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::GlobalSearchDoubleCtrl: haystack += L" " + l10n::Get(I::GlobalSearchDoubleCtrlDesc); break;
         case I::GlobalSearchDoubleCtrlGap: haystack += L" " + l10n::Get(I::GlobalSearchDoubleCtrlGapDesc); break;
         case I::GlobalSearchApps: haystack += L" " + l10n::Get(I::GlobalSearchAppsDesc); break;
+        case I::GlobalSearchAppsFirst: haystack += L" " + l10n::Get(I::GlobalSearchAppsFirstDesc); break;
         case I::DialogJumpBar: haystack += L" " + l10n::Get(I::DialogJumpBarDesc); break;
         case I::DialogJumpAuto: haystack += L" " + l10n::Get(I::DialogJumpAutoDesc); break;
         case I::SearchPinyin: haystack += L" " + l10n::Get(I::SearchPinyinDesc); break;
@@ -297,6 +301,39 @@ void SysCtxApply(AppState& s) {
     }
     model.ApplyPending();
 }
+// The observed submenu editor changes only Pulse preferences, independently
+// of the queued Windows switches. Keep the popup anchor stable while browsing.
+void SysCtxOrganizeTree(AppState& s, const std::wstring& root_key = {}) {
+    const HWND owner = s.hwnd;
+    POINT anchor{}; GetCursorPos(&anchor);
+    std::wstring parent;
+    std::wstring notice;
+    for (;;) {
+        auto page = app::BuildSettingsContextTreePage(s.ctxMenuPrefs, parent, root_key);
+        if (!notice.empty()) {
+            ui::FluentMenuItem row; row.text = notice; row.enabled = false; row.separator_after = true;
+            page.items.insert(page.items.begin(), std::move(row));
+        }
+        if (!EnsureMenu(s)) return;
+        s.menu->SetTheme(s.darkMode, s.accentColor);
+        const int command = s.menu->TrackPopup(anchor, std::move(page.items));
+        if (!IsWindow(owner) || GetAppState(owner) != &s || command == 0) return;
+        const auto found = page.actions.find(command);
+        if (found == page.actions.end()) return;
+        auto previous = s.ctxMenuPrefs;
+        const auto result = app::ApplySettingsContextTreeAction(s.ctxMenuPrefs, found->second, parent);
+        notice.clear();
+        if (result == app::ContextTreeActionResult::Changed) {
+            if (!s.ctxMenuPrefs.Save()) {
+                s.ctxMenuPrefs = std::move(previous);
+                notice = l10n::Get(I::ContextTreeSaveFailed);
+            }
+            InvalidateRect(owner, nullptr, FALSE);
+        } else if (result == app::ContextTreeActionResult::Rejected) {
+            notice = l10n::Get(I::ContextTreeChanged);
+        }
+    }
+}
 // 系统右键菜单 row "…": copy the registry path, open the program's folder,
 // hide it in Pulse only, delete a leftover (queued like the switches).
 // row -1: the selected entry (details panel).
@@ -304,6 +341,7 @@ void SysCtxRowMenu(AppState& s,int row) {
     auto& model=s.settings.SystemCtx();
     const std::wstring key=model.RowRegistryPath(row),file=model.RowFile(row);
     const std::wstring pulse_key=model.RowPulseKey(row);
+    const std::wstring tree_root=model.RowPulseTreeRoot(row);
     std::vector<ui::FluentMenuItem> items;
     auto add=[&](int command,const wchar_t* text,bool enabled) {
         ui::FluentMenuItem item;item.command=command;item.text=text;item.enabled=enabled;items.push_back(std::move(item));
@@ -313,10 +351,14 @@ void SysCtxRowMenu(AppState& s,int row) {
     add(1,l10n::Get(l10n::StringId::CopyRegistryPath).c_str(),!key.empty());
     add(2,l10n::Get(l10n::StringId::CopyProgramPath).c_str(),!file.empty());
     add(3,l10n::Get(l10n::StringId::OpenItsFolderInANewTab).c_str(),!folder.empty());
+    if(!tree_root.empty()) {
+        items.back().separator_after=true;
+        add(6,l10n::Get(I::ContextTreeRowEntry).c_str(),true);
+    }
     if(!pulse_key.empty()) {
         items.back().separator_after=true;
-        add(4,l10n::Get(l10n::StringId::HideInPulseSMenuOnly).c_str(),true);
-        items.back().checked=model.RowPulseHidden(row);
+        add(4,l10n::Get(model.RowPulseHidden(row) ? l10n::StringId::SysCtxRestoreInPulse
+                                               : l10n::StringId::SysCtxHideInPulse).c_str(),true);
     }
     if(model.RowDeletable(row)) {
         items.back().separator_after=true;
@@ -330,6 +372,7 @@ void SysCtxRowMenu(AppState& s,int row) {
     else if(command==3 && GetFileAttributesW(folder.c_str())!=INVALID_FILE_ATTRIBUTES) NewTab(s,folder);
     else if(command==4) SysCtxTogglePulse(s,row);
     else if(command==5) {model.DeleteRow(row);InvalidateRect(s.hwnd,nullptr,FALSE);}
+    else if(command==6) SysCtxOrganizeTree(s,tree_root);
 }
 void SysCtxOpenFolder(AppState& s,const std::wstring& file) {
     const size_t slash=file.find_last_of(L"\\/");
@@ -348,6 +391,8 @@ void SysCtxRestoreAll(AppState& s) {
 }
 void SysCtxAction(AppState& s,int index) {
     auto& model=s.settings.SystemCtx();
+    if(index==ui::kSysCtxOtherType) {ShowSystemContextExtension(s);return;}
+    if(index==ui::kSysCtxTree) {SysCtxOrganizeTree(s);return;}
     if(index==ui::kSysCtxLocalLayer) {OpenSettingsTab(s,2);return;}
     if(index==ui::kSysCtxDetailPulse) {SysCtxTogglePulse(s,-1);return;}
     if(index==ui::kSysCtxLog) {
@@ -355,6 +400,7 @@ void SysCtxAction(AppState& s,int index) {
         if(!dir.empty() && SHCreateDirectoryExW(nullptr,dir.c_str(),nullptr)<=ERROR_ALREADY_EXISTS) NewTab(s,dir);
         return;
     }
+    if(index>=ui::kSysCtxPulseBase) {SysCtxTogglePulse(s,index-ui::kSysCtxPulseBase);return;}
     if(index>=ui::kSysCtxRemoveBase) {
         // A leftover row's own 删除 / 撤回 button: queued like its switch.
         model.DeleteRow(index-ui::kSysCtxRemoveBase);

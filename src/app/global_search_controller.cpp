@@ -2,6 +2,10 @@
 #include "../common/picker_places_snapshot.h"
 #include "../common/dialog_auto_registration.h"
 #include "global_search_controller.h"
+#include "picker_selection_source.h"
+#include "picker_archive_runtime.h"
+#include "picker_tag_catalog.h"
+#include "hot_entry_data_dir.h"
 #include "global_search_handoff.h"
 #include "shortcut_page.h"
 #include "app_internal.h"
@@ -23,7 +27,7 @@
 
 namespace pulse {
 namespace {
-// Test instances leave the hotkey to the installed Pulse. Selftest builds can
+// Test instances leave the hotkey to the installed Pulse. Isolated instances can
 // opt in (PULSE_TEST_GLOBAL_HOTKEY) to drive the popup with the hotkey stored
 // in their own isolated data dir.
 bool HotkeyAllowed(const AppState& s) {
@@ -32,10 +36,12 @@ bool HotkeyAllowed(const AppState& s) {
     if (GetEnvironmentVariableW(L"PULSE_TEST_DOUBLE_CTRL_SETTINGS", nullptr, 0) &&
         GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) return true;
 #endif
+    if (!GetEnvironmentVariableW(L"PULSE_TEST_GLOBAL_HOTKEY", nullptr, 0) ||
+        !GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) return false;
 #ifdef PULSE_WITH_SELFTEST
-    return GetEnvironmentVariableW(L"PULSE_TEST_GLOBAL_HOTKEY", nullptr, 0) > 0;
+    return true;
 #else
-    return false;
+    return !VerifiedHotEntryDataDirectory().empty();
 #endif
 }
 
@@ -102,6 +108,11 @@ GlobalSearchContext MakeGlobalSearchContext(const AppState& s) {
     std::stable_sort(order.begin(), order.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     for (const auto& [score, i] : order) context.jump_folders.push_back({std::move(folders[i].path), std::move(folders[i].label)});
     context.show_apps = s.appPrefs.global_search_apps;
+    context.apps_first = s.appPrefs.global_search_apps_first;
+    context.sort = s.appPrefs.global_search_sort;
+    context.sort_desc = s.appPrefs.global_search_sort_desc;
+    context.folders = s.appPrefs.global_search_folders;
+    context.group = s.appPrefs.global_search_group;
     context.history = s.core.jumpHistory;
     context.width = s.appPrefs.global_search_width;
     context.height = s.appPrefs.global_search_height;
@@ -185,6 +196,17 @@ GlobalSearchEvents MakeGlobalSearchEvents(AppState& s) {
         window->appPrefs.global_search_y = y;
         window->appPrefs.Save();
     };
+    events.order_changed = [core](int sort, bool sort_desc, int folders, int group, bool apps_first) {
+        AppState* window = core->windows.MostRecent();
+        if (!window) return;
+        auto& prefs = window->appPrefs;
+        prefs.global_search_sort = std::clamp(sort, 0, 5);
+        prefs.global_search_sort_desc = sort_desc;
+        prefs.global_search_folders = std::clamp(folders, 0, 2);
+        prefs.global_search_group = std::clamp(group, 0, 5);
+        prefs.global_search_apps_first = apps_first;
+        prefs.Save();
+    };
     events.pin_folder = [core](const std::wstring& path) {
         AppState* window = core->windows.MostRecent();
         if (!window) return;
@@ -239,6 +261,9 @@ void ApplyGlobalSearchSettings(AppState& s) {
     const bool double_ctrl = enabled && s.appPrefs.global_search_double_ctrl;
     s.core.doubleCtrl.Update(ServiceWindow(s), WM_DOUBLE_CTRL, double_ctrl,
         static_cast<uint32_t>(s.appPrefs.global_search_double_ctrl_ms));
+    diagnostics::runtime::Event("search_input_listener", {{"requested", double_ctrl},
+        {"running", s.core.doubleCtrl.Running()}, {"error", s.core.doubleCtrl.LastError()},
+        {"hotkey_registered", s.globalSearchHotkey.Registered()}});
     if (!enabled || (!ok && !double_ctrl)) s.globalSearchWindow.Hide();
     else s.globalSearchWindow.Prewarm(3000, [core = &s.core] {
         if (AppState* window = core->windows.MostRecent()) PrepareGlobalSearchWindow(*window);
@@ -313,11 +338,16 @@ void PublishPickerPlaces(AppState& s, bool force) {
     if (!window) window = &s;
     picker_places::Snapshot snapshot;
     snapshot.jump_policy_available = true;
+    snapshot.save_followup_available = true;
     snapshot.auto_jump = window->appPrefs.dialog_jump_auto;
     snapshot.remember = window->appPrefs.jump_history;
     snapshot.pinyin = window->appPrefs.search_pinyin;
     snapshot.index = window->appPrefs.search_enabled;
     snapshot.endpoint = s.core.host.Hwnd();
+    snapshot.archive_worker = app::PickerArchiveWorker();
+    picker_places::CaptureTray(s.core.tray.active_shelf(), s.core.tray.ActiveShelfName(), snapshot.endpoint, snapshot);
+    snapshot.selection_source = window->hwnd;
+    app::CapturePickerSelection(ActiveTab(*window), snapshot, EntryFullPath);
     for (const auto& w : window->places.workspaces)
         snapshot.workspaces.push_back({w.root, w.name, w.color_rgb});
     for (const auto& entry : window->places.networks)
@@ -331,6 +361,7 @@ void PublishPickerPlaces(AppState& s, bool force) {
     if (const auto* tab = ActiveTab(*window); tab && !fs::IsVirtualPath(tab->current_path)) snapshot.current = tab->current_path;
     for (const auto& folder : KnownFolders(*window)) snapshot.folders.push_back({folder.path, folder.label, folder.open, folder.pinned});
     picker_places::Publish(snapshot);
+    app::PublishPickerTagCatalog();
 }
 
 void SendDialogJumpContext(AppState& s) {
@@ -365,23 +396,25 @@ bool HandleGlobalSearchHotkeyCapture(AppState& s, unsigned key) {
     return consumed;
 }
 
-void ToggleGlobalSearch(AppState& s, bool double_ctrl) {
+void ToggleGlobalSearch(AppState& s, bool double_ctrl, WPARAM trigger_token) {
     diagnostics::runtime::Event("search_summon", {{"double_ctrl", double_ctrl},
         {"visible", s.globalSearchWindow.Visible()}});
     if (!s.appPrefs.global_search_enabled || !s.appPrefs.search_enabled) return;
     // Queued input may arrive after the setting was disabled.
-    if (double_ctrl && !s.appPrefs.global_search_double_ctrl) return;
+    if (double_ctrl && (!s.appPrefs.global_search_double_ctrl || !s.core.doubleCtrl.IsCurrentTrigger(trigger_token))) return;
     if (double_ctrl ? !s.core.doubleCtrl.Running() : !s.globalSearchHotkey.Registered()) return;
+    if (double_ctrl && DoubleCtrlWatcher::QuietMoment()) return;
     // Two Ctrl taps over an Open / Save dialog go to its jump bar.
     if (double_ctrl && s.core.dialogJump.FocusSearch()) return;
-    if (s.globalSearchWindow.Visible()) {
+    if (s.globalSearchWindow.Visibility() != app::SearchVisibility::Hidden) {
         s.globalSearchWindow.Hide();
         return;
     }
     std::wstring folder;
     if (const auto* tab = ActiveTab(s); tab && !fs::IsVirtualPath(tab->current_path)) folder = tab->current_path;
     PrepareGlobalSearchWindow(s);
-    if (!s.globalSearchWindow.Show(s.hwnd, s.darkMode, s.scale, folder, s.appPrefs.search_pinyin)) {
+    if (!s.globalSearchWindow.Show(s.hwnd, s.darkMode, s.scale, folder, s.appPrefs.search_pinyin, {},
+        double_ctrl ? app::SearchTrigger::DoubleCtrl : app::SearchTrigger::Hotkey)) {
         RevealWindow(s);
         s.notification_toast.ShowError(s.hwnd, l10n::Get(l10n::StringId::GlobalSearch),
             l10n::Get(l10n::StringId::GlobalSearchOpenFailed));
@@ -392,7 +425,7 @@ bool ShowGlobalSearchWithQuery(AppState& s, const std::wstring& query) {
     if (!s.appPrefs.search_enabled) return false;
     diagnostics::runtime::Event("search_summon_external", {{"visible", s.globalSearchWindow.Visible()}});
     PrepareGlobalSearchWindow(s);
-    return s.globalSearchWindow.Show(s.hwnd, s.darkMode, s.scale, std::wstring{}, s.appPrefs.search_pinyin, query);
+    return s.globalSearchWindow.Show(s.hwnd, s.darkMode, s.scale, std::wstring{}, s.appPrefs.search_pinyin, query, app::SearchTrigger::External);
 }
 
 void ShutdownGlobalSearch(AppState& s) {

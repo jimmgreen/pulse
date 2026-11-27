@@ -9,7 +9,7 @@
 
 namespace pulse::app {
 
-enum class NameMatchHow : uint8_t { Contains, StartsWith, Exact };
+enum class NameMatchHow : uint8_t { Contains, StartsWith, Exact, Regex };
 enum class LocationScope : uint8_t { Indexed, CurrentFolder, CustomFolder };
 enum class SizePreset : uint8_t { Any, Empty, Lt1MB, From1To10MB, Gt10MB, Gt100MB, Gt1GB, Custom };
 enum class DatePreset : uint8_t { Any, Today, Yesterday, ThisWeek, ThisMonth, ThisYear, Custom };

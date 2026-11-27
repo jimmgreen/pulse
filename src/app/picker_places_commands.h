@@ -3,10 +3,57 @@
 #include "app_runtime.h"
 #include "global_search_controller.h"
 #include "picker_places_catalog.h"
+#include "picker_tray_consume.h"
 #include "quick_access.h"
 #include "../common/picker_places_snapshot.h"
 
 namespace pulse {
+inline LRESULT HandlePickerConsumeTray(AppState& s, const COPYDATASTRUCT* data) {
+    picker_places::TrayConsumeRequest request;
+    if (!picker_places::DecodeConsumeTray(data, request)) return 0;
+    if (request.source != s.core.host.Hwnd()) return 0;
+    const auto result = app::ApplyPickerTrayConsume(s.tray, request, GetCurrentProcessId(), s.core.host.Hwnd());
+    if (result.removed) {
+        std::unordered_set<uint64_t> retained, consumed;
+        if (const auto* shelf = s.tray.FindShelf(request.shelf_id))
+            for (const auto& batch : shelf->batches)
+                for (const auto& item : batch.items) retained.insert(item.id);
+        for (const auto& item : request.items) if (!retained.contains(item.item_id)) consumed.insert(item.item_id);
+        app::ForEachWindowSharingCore(s, [&](AppState& window) {
+            auto& checked = window.trayView.checked;
+            checked.erase(std::remove_if(checked.begin(), checked.end(), [&](uint64_t id) {
+                return consumed.contains(id);
+            }), checked.end());
+            InvalidateRect(window.hwnd, nullptr, FALSE);
+        });
+        // Existing shelf/session timers persist the shared model and refresh the shelf.
+        // Publication queues immutable metadata; this dispatch performs no file I/O.
+        PublishPickerPlaces(s, true);
+    }
+    return picker_places::EncodeConsumeTrayResult(result);
+}
+inline LRESULT HandlePickerStageTray(AppState& s, const COPYDATASTRUCT* data) {
+    picker_places::TrayStageRequest request;
+    if (!picker_places::DecodeStageTray(data, request)) return 0;
+    if (request.publisher_pid != GetCurrentProcessId() || request.source != s.core.host.Hwnd()) return 0;
+    std::vector<app::TrayItem> items;
+    items.reserve(request.paths.size());
+    for (const auto& path : request.paths) {
+        app::TrayItem item;
+        item.path = path;
+        item.content_kind = 0;
+        item.owned_snippet = false;
+        items.push_back(std::move(item));
+    }
+    const size_t added = s.tray.CollectRichToShelf(request.shelf_id, items, false, nullptr, true);
+    if (added > 0) {
+        app::ForEachWindowSharingCore(s, [](AppState& window) {
+            InvalidateRect(window.hwnd, nullptr, FALSE);
+        });
+        PublishPickerPlaces(s, true);
+    }
+    return static_cast<LRESULT>(added);
+}
 inline bool HandlePickerManagePlaces(AppState& s, const COPYDATASTRUCT* data) {
     picker_places::ManagePlacesRequest request;
     if (!picker_places::DecodeManagePlaces(data, request) || s.places.load_failed) return false;

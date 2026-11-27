@@ -16,6 +16,7 @@
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "app_internal.h"
+#include "button_press_hover.h"
 #include "staging_shelf_controller.h"
 #include "workspace_sidebar.h"
 #include "app_network_page.h"
@@ -711,6 +712,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_jump_history = s.appPrefs.jump_history;
             vm.settings_jump_history_empty = s.core.jumpHistory->Size() == 0;
             vm.settings_global_search_apps = s.appPrefs.global_search_apps;
+            vm.settings_global_search_apps_first = s.appPrefs.global_search_apps_first;
             vm.settings_global_search_capturing = s.settings.global_search_hotkey_capturing();
             vm.settings_global_search_hotkey = s.settings.GlobalSearchHotkeyText();
             vm.settings_global_search_error = s.settings.global_search_error();
@@ -1126,6 +1128,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_items.clear();
             vm.settings_items.reserve(s.ctxMenuPrefs.seen.size() + app::kBuiltinMenuItemCount);
             for (const auto& seen : s.ctxMenuPrefs.seen) {
+                if (seen.tree_node) continue;
                 ui::SettingsRowView row;
                 row.key = seen.key;
                 // Pulse's own compress row is stored in Simplified; shell rows
@@ -1349,10 +1352,10 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             if (static_cast<int>(i) == s.hoverPaneIndex) slot.pane.hover_index = s.hoverRow;
             // Hover shots stage the row on "the focused pane" (-1).
             else if (s.shot.active && s.hoverPaneIndex < 0 && slot.focused) slot.pane.hover_index = s.hoverRow;
-            // Capture may send WM_MOUSELEAVE before the release. Keep the
-            // pressed outline star drawn until the button's gesture ends.
+            // Keep hover-only row actions stable through capture/reentry.
+            // The press identity still guards against a replaced pane/tab/view.
             const auto& press = s.buttonPress;
-            if (press.active && press.hit.region == ui::HitTestResult::RowStar &&
+            if (press.active && app::IsHoverRowAction(press.hit.region) &&
                 press.hit.pane_index == static_cast<int>(i) && press.context.pane == p) {
                 if (const auto* active = p->ActiveTab(); active && press.context.tab == active &&
                     press.context.generation == active->view_generation)
@@ -3040,6 +3043,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_list_zebra_rows = s.appPrefs.list_zebra_rows;
     FillUiLayoutSettingsVm(s, vm);
     vm.settings_list_tree_sticky = s.appPrefs.list_tree_sticky;
+    vm.settings_list_scroll_past_end = s.appPrefs.list_scroll_past_end;
     vm.settings_menu_acrylic = s.appPrefs.menu_acrylic;
     vm.settings_list_size_bar = s.appPrefs.list_size_bar;
     vm.settings_list_tag_names = s.appPrefs.list_tag_name_color;

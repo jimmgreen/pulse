@@ -371,20 +371,26 @@ std::shared_ptr<const TagCatalogSnapshot> CurrentTagCatalog() {
 }
 
 std::shared_ptr<const TagGroupMap> TagGroupsForFolder(const std::wstring& folder) {
+    return TagGroupsForFolder(folder, CurrentTagCatalog());
+}
+
+std::shared_ptr<const TagGroupMap> TagGroupsForFolder(const std::wstring& folder,
+    const std::shared_ptr<const TagCatalogSnapshot>& catalog) {
     auto map = std::make_shared<TagGroupMap>();
-    const auto catalog = CurrentTagCatalog();
     if (!catalog) return map;
     map->untagged = static_cast<int>(catalog->tags.size());
     // Callers pass tab / work paths, already normalized like the catalog keys.
     if (folder.empty() || folder.starts_with(L"pulse:")) return map;
-    std::wstring parent = folder;
+    std::wstring parent = path::StripExtendedPathPrefix(folder);
+    std::replace(parent.begin(), parent.end(), L'/', L'\\');
     for (auto& ch : parent) ch = static_cast<wchar_t>(std::towlower(ch));
     while (!parent.empty() && parent.back() == L'\\') parent.pop_back();
-    for (const auto& [path, rank] : catalog->paths) {
-        const size_t slash = path.find_last_of(L'\\');
+    for (const auto& [catalog_path, rank] : catalog->paths) {
+        const auto key = path::StripExtendedPathPrefix(catalog_path);
+        const size_t slash = key.find_last_of(L'\\');
         if (slash == std::wstring::npos || slash != parent.size() ||
-            path.compare(0, slash, parent) != 0) continue;
-        map->rank_by_name.emplace(path.substr(slash + 1), rank);
+            key.compare(0, slash, parent) != 0) continue;
+        map->rank_by_name.emplace(key.substr(slash + 1), rank);
     }
     return map;
 }
@@ -407,6 +413,11 @@ ScopedEntryGrouping::ScopedEntryGrouping(int group_by, const std::wstring& folde
     if (state_.by == GroupBy::Date) state_.clock = MakeGroupClock();
     if (state_.by == GroupBy::Tag) state_.clock.tags = TagGroupsForFolder(folder);
     if (IsMediaGroup(state_.by)) state_.clock.media = MediaGroupsForFolder(folder, state_.by);
+    t_grouping = &state_;
+}
+
+ScopedEntryGrouping::ScopedEntryGrouping(EntryGrouping grouping)
+    : state_(std::move(grouping)), previous_(t_grouping) {
     t_grouping = &state_;
 }
 

@@ -130,7 +130,6 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         if (!app || !ValidateCallerBinding(caller)) return {PULSE_ERROR_STATE, {}};
         ui::FolderPickerSpec spec;
         app::ApplyPickerAppearanceToSpec(app::PickerAppearanceFromPrefs(app->appPrefs), spec);
-        spec.show_hidden = app->appPrefs.show_hidden_files;
         spec.initial_path = initial;
         const bool isolated = app->isolatedTest;
         spec.on_dialog_event = [isolated](HWND window, ui::PickerDialogEvent event, const ui::PickerDialogSnapshot&, const std::wstring&) {

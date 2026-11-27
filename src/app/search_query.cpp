@@ -191,9 +191,11 @@ std::wstring CompileSearchQuery(const AdvancedSearchSpec& spec) {
         q.append(token);
     };
     std::wstring name = spec.name;
-    Trim(name);
+    if (spec.name_how != NameMatchHow::Regex) Trim(name);
     if (!name.empty()) {
-        if (spec.name_how == NameMatchHow::Exact) {
+        if (spec.name_how == NameMatchHow::Regex) {
+            append(index::RegexQueryToken(name));
+        } else if (spec.name_how == NameMatchHow::Exact) {
             append(L"\"" + name + L"\"");
         } else if (spec.name_how == NameMatchHow::StartsWith) {
             if (name.find_first_of(L"*?") == std::wstring::npos) name += L"*";
@@ -350,7 +352,8 @@ AdvancedSearchSpec ParseSearchQuery(std::wstring_view raw, std::wstring_view cur
                     spec.exclude_name = term.name;
                 } else if (!saw_name) {
                     spec.name = term.name;
-                    if (term.name_how == index::NameHow::Exact) spec.name_how = NameMatchHow::Exact;
+                    if (term.name_how == index::NameHow::Regex) spec.name_how = NameMatchHow::Regex;
+                    else if (term.name_how == index::NameHow::Exact) spec.name_how = NameMatchHow::Exact;
                     else if (term.name_how == index::NameHow::Wildcard &&
                              !term.name.empty() && term.name.back() == L'*' &&
                              term.name.find(L'?') == std::wstring::npos &&

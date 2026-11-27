@@ -35,7 +35,15 @@ std::vector<std::vector<Token>> TokenGroups(std::wstring_view raw) {
             while (i < raw.size() && raw[i] != L' ' && raw[i] != L'\t' && raw[i] != L'|') {
                 const auto ch = raw[i++];
                 if ((ch == L':' || ch == L'：') && i < raw.size() && raw[i] == L'"') {
-                    ++i; while (i < raw.size() && raw[i] != L'"') ++i;
+                    const bool regex = index::Fold(raw.substr(body, i - body - 1)) == L"regex";
+                    ++i;
+                    while (i < raw.size()) {
+                        if (raw[i] == L'"') {
+                            if (!regex || i + 1 == raw.size() || raw[i + 1] != L'"') break;
+                            ++i;
+                        }
+                        ++i;
+                    }
                     if (i < raw.size()) ++i;
                     break;
                 }
@@ -95,7 +103,8 @@ void Append(std::wstring& target, std::wstring_view value) {
 }
 std::wstring NamePredicate(const index::Term& term) {
     std::wstring value = term.name;
-    if (term.name_how == index::NameHow::Exact) value = L"\"" + value + L"\"";
+    if (term.name_how == index::NameHow::Regex) value = index::RegexQueryToken(value);
+    else if (term.name_how == index::NameHow::Exact) value = L"\"" + value + L"\"";
     else if (term.name_how == index::NameHow::Substring && value.find_first_of(L" :：|!") != std::wstring::npos)
         value = QuoteQueryValue(L"*" + value + L"*");
     else value = QuoteQueryValue(value);

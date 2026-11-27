@@ -1,32 +1,42 @@
 #include "double_ctrl.h"
 #include <shellapi.h>
+#include <system_error>
 
 namespace pulse {
 namespace {
-constexpr UINT kRefreshInputDevices = WM_APP + 1;
-constexpr UINT_PTR kInputPollTimer = 1;
-constexpr UINT kInputPollIntervalMs = 32;
+constexpr UINT kTrigger = WM_APP + 1;
+bool IsCtrl(UINT key) { return key == VK_LCONTROL || key == VK_RCONTROL; }
 }
-bool DoubleCtrlDetector::Key(bool ctrl, bool down, uint64_t now) {
-    if (!ctrl) {
-        // Ctrl+anything is a shortcut, not a tap; a key typed between the taps
-        // starts over. Releases of keys pressed earlier do not matter.
-        if (down) phase_ = held_ ? Phase::Spoiled : Phase::Idle;
+bool DoubleCtrlDetector::Blocked(UINT except) const {
+    for (UINT key = 0; key < pressed_.size(); ++key)
+        if ((key != except && pressed_[key]) || injected_[key]) return true;
+    return false;
+}
+
+bool DoubleCtrlDetector::PhysicalKey(UINT key, bool down, uint64_t now, bool injected) {
+    if (key >= pressed_.size()) { Interrupt(); return false; }
+    if (injected) {
+        injected_[key] = down;
+        Interrupt();
         return false;
     }
+    const bool was_down = pressed_[key];
+    pressed_[key] = down;
+    if (!IsCtrl(key)) { Interrupt(); return false; }
     if (down) {
-        if (held_) {  // auto-repeat while held
-            if (now - down_at_ > kHoldMs) phase_ = Phase::Spoiled;
+        if (Blocked(key)) { Interrupt(); return false; }
+        if (was_down) {
+            if (now - down_at_ > kHoldMs) Interrupt();
             return false;
         }
-        held_ = true;
-        if (phase_ == Phase::FirstUp && now - up_at_ <= gap_) phase_ = Phase::SecondDown;
-        else phase_ = Phase::FirstDown;
+        // A different side starts a new pair; two overlapping Ctrl keys spoil it.
+        phase_ = phase_ == Phase::FirstUp && tap_key_ == key && now - up_at_ <= gap_ ? Phase::SecondDown : Phase::FirstDown;
+        tap_key_ = key;
         down_at_ = now;
         return false;
     }
-    if (!held_) return false;
-    held_ = false;
+    if (!was_down) return false;
+    if (Blocked(key)) { Interrupt(); return false; }
     const bool tap = now - down_at_ <= kHoldMs;
     if (phase_ == Phase::FirstDown && tap) {
         phase_ = Phase::FirstUp;
@@ -39,7 +49,7 @@ bool DoubleCtrlDetector::Key(bool ctrl, bool down, uint64_t now) {
 }
 
 void DoubleCtrlDetector::Interrupt() {
-    phase_ = held_ ? Phase::Spoiled : Phase::Idle;
+    phase_ = pressed_[VK_LCONTROL] || pressed_[VK_RCONTROL] ? Phase::Spoiled : Phase::Idle;
 }
 
 bool DoubleCtrlWatcher::QuietMoment() {
@@ -49,143 +59,140 @@ bool DoubleCtrlWatcher::QuietMoment() {
 }
 
 void DoubleCtrlWatcher::Update(HWND target, UINT message, bool enabled, uint32_t gap_ms) {
+    std::lock_guard lock(lifecycle_);
+    if (enabled && target && Running() && target_ == target && message_ == message && gap_ == gap_ms) return;
+    StopLocked();
     target_ = target;
     message_ = message;
     gap_ = gap_ms;
-    enabled_ = enabled && target;
-    if (!enabled_.load() && !observer_.load()) { Stop(); return; }
-    if (!thread_.joinable()) thread_ = std::thread([this] { Run(); });
-}
-
-void DoubleCtrlWatcher::SetInputObserver(InputObserver observe, InputPoll poll) {
-    observer_.store(observe ? std::make_shared<const Observer>(Observer{std::move(observe), std::move(poll)})
-                            : nullptr);
-    if (!enabled_.load() && !observer_.load()) { Stop(); return; }
-    if (!thread_.joinable()) thread_ = std::thread([this] { Run(); });
-    else if (const auto id = thread_id_.load()) PostThreadMessageW(id, kRefreshInputDevices, 0, 0);
+    error_ = ERROR_SUCCESS;
+    if (!enabled || !target) return;
+    ready_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ready_) {
+        error_ = GetLastError();
+        StopLocked();
+        return;
+    }
+    stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!stop_) {
+        error_ = GetLastError();
+        StopLocked();
+        return;
+    }
+    try { thread_ = std::thread([this] { Run(); }); }
+    catch (const std::system_error&) {
+        error_ = ERROR_NOT_ENOUGH_MEMORY;
+        StopLocked();
+        return;
+    }
+    // Run publishes readiness on both success and failure. No thread-ID polling.
+    WaitForSingleObject(ready_, INFINITE);
+    if (!Running()) StopLocked();
 }
 
 void DoubleCtrlWatcher::Stop() {
-    if (!thread_.joinable()) return;
-    // The thread publishes its id before it can receive messages; spin until
-    // then so the quit message is never lost.
-    DWORD id = 0;
-    while ((id = thread_id_.load()) == 0) Sleep(1);
-    while (!PostThreadMessageW(id, WM_QUIT, 0, 0)) {
-        if (GetLastError() != ERROR_INVALID_THREAD_ID) break;
-        Sleep(1);
-    }
-    thread_.join();
-    thread_id_ = 0;
+    std::lock_guard lock(lifecycle_);
+    StopLocked();
 }
 
-LRESULT CALLBACK DoubleCtrlWatcher::WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
-    if (msg == WM_NCCREATE) {
-        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lparam);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
-    } else if (msg == WM_INPUT) {
-        if (auto* self = reinterpret_cast<DoubleCtrlWatcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA)))
-            self->OnInput(reinterpret_cast<HRAWINPUT>(lparam));
-    } else if (msg == WM_TIMER && wparam == kInputPollTimer) {
-        if (auto* self = reinterpret_cast<DoubleCtrlWatcher*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))) {
-            const auto observer = self->observer_.load();
-            if (observer && observer->poll) observer->poll();
+void DoubleCtrlWatcher::StopLocked() {
+    running_ = false;
+    if (++generation_ == 0) ++generation_;
+    if (stop_) SetEvent(stop_);
+    if (thread_.joinable()) thread_.join();
+    if (ready_) CloseHandle(ready_);
+    if (stop_) CloseHandle(stop_);
+    ready_ = stop_ = nullptr;
+}
+
+thread_local DoubleCtrlWatcher* DoubleCtrlWatcher::current_ = nullptr;
+
+LRESULT CALLBACK DoubleCtrlWatcher::KeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
+    if (code == HC_ACTION && current_) {
+        const auto& event = *reinterpret_cast<const KBDLLHOOKSTRUCT*>(lparam);
+        UINT key = event.vkCode;
+        if (key == VK_CONTROL) key = (event.flags & LLKHF_EXTENDED) ? VK_RCONTROL : VK_LCONTROL;
+        const bool down = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+        if (current_->detector_.PhysicalKey(key, down, GetTickCount64(),
+                (event.flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0))
+            PostThreadMessageW(GetCurrentThreadId(), kTrigger, current_->generation_.load(), 0);
+    }
+    return CallNextHookEx(nullptr, code, wparam, lparam);
+}
+
+LRESULT CALLBACK DoubleCtrlWatcher::MouseProc(int code, WPARAM wparam, LPARAM lparam) {
+    if (code == HC_ACTION && current_ && wparam != WM_MOUSEMOVE) {
+        UINT key = 0;
+        bool down = false;
+        switch (wparam) {
+        case WM_LBUTTONDOWN: down = true; [[fallthrough]];
+        case WM_LBUTTONUP: key = VK_LBUTTON; break;
+        case WM_RBUTTONDOWN: down = true; [[fallthrough]];
+        case WM_RBUTTONUP: key = VK_RBUTTON; break;
+        case WM_MBUTTONDOWN: down = true; [[fallthrough]];
+        case WM_MBUTTONUP: key = VK_MBUTTON; break;
+        case WM_XBUTTONDOWN: down = true; [[fallthrough]];
+        case WM_XBUTTONUP:
+            key = HIWORD(reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam)->mouseData) == XBUTTON1 ? VK_XBUTTON1 : VK_XBUTTON2;
+            break;
+        default: break;
         }
-        return 0;
+        // Track buttons outside a gesture too: an already held button blocks Ctrl.
+        // Injected mouse input contaminates, but can never create a Ctrl tap.
+        if (key) current_->detector_.PhysicalKey(key, down, GetTickCount64(),
+            (reinterpret_cast<const MSLLHOOKSTRUCT*>(lparam)->flags & (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED)) != 0);
+        else current_->detector_.Interrupt();
     }
-    return DefWindowProcW(hwnd, msg, wparam, lparam);
-}
-
-void DoubleCtrlWatcher::WatchMouse(bool on) {
-    if (on == mouse_) return;
-    RAWINPUTDEVICE device{};
-    device.usUsagePage = 0x01;
-    device.usUsage = 0x02;  // mouse
-    device.dwFlags = on ? RIDEV_INPUTSINK : RIDEV_REMOVE;
-    device.hwndTarget = on ? window_ : nullptr;
-    if (RegisterRawInputDevices(&device, 1, sizeof(device)) || !on) mouse_ = on;
-}
-
-void DoubleCtrlWatcher::RefreshInputDevices() {
-    const auto observer = observer_.load();
-    WatchMouse(observer || (enabled_.load() && detector_.Pending(GetTickCount64())));
-    const bool want_poll = observer && observer->poll;
-    if (want_poll == polling_) return;
-    if (want_poll) polling_ = SetTimer(window_, kInputPollTimer, kInputPollIntervalMs, nullptr) != 0;
-    else {
-        KillTimer(window_, kInputPollTimer);
-        polling_ = false;
-    }
-}
-
-void DoubleCtrlWatcher::OnInput(HRAWINPUT input) {
-    RAWINPUT raw{};
-    UINT size = sizeof(raw);
-    if (GetRawInputData(input, RID_INPUT, &raw, &size, sizeof(RAWINPUTHEADER)) == static_cast<UINT>(-1)) return;
-    const auto observer = observer_.load();
-    if (observer) observer->on_input(raw);
-    const bool ctrl_enabled = enabled_.load();
-    if (!ctrl_enabled) {
-        detector_ = {};
-        WatchMouse(observer != nullptr);
-        return;
-    }
-    detector_.SetGap(gap_.load());
-    const uint64_t now = GetTickCount64();
-    if (raw.header.dwType == RIM_TYPEMOUSE) {
-        if (raw.data.mouse.usButtonFlags) detector_.Interrupt();
-    } else if (raw.header.dwType == RIM_TYPEKEYBOARD) {
-        const auto& key = raw.data.keyboard;
-        if (key.VKey == 0xFF || key.VKey == 0) return;  // fake keys from escaped scan sequences
-        const bool ctrl = key.VKey == VK_CONTROL || key.VKey == VK_LCONTROL || key.VKey == VK_RCONTROL;
-        const bool down = (key.Flags & RI_KEY_BREAK) == 0;
-        if (detector_.Key(ctrl, down, now)) {
-            const HWND target = target_.load();
-            if (target && !QuietMoment()) PostMessageW(target, message_.load(), 0, 0);
-        }
-    }
-    WatchMouse(observer || detector_.Pending(now));
+    return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
 void DoubleCtrlWatcher::Run() {
+    current_ = this;
+    detector_ = {};
+    detector_.SetGap(gap_);
     MSG msg{};
-    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // create the queue
-    thread_id_ = GetCurrentThreadId();
-    WNDCLASSEXW wc{sizeof(wc)};
-    wc.lpfnWndProc = WindowProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = L"PulseDoubleCtrl";
-    RegisterClassExW(&wc);  // fails harmlessly when already registered
-    window_ = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, wc.hInstance, this);
-    if (window_) {
-        RAWINPUTDEVICE device{};
-        device.usUsagePage = 0x01;
-        device.usUsage = 0x06;  // keyboard
-        device.dwFlags = RIDEV_INPUTSINK;
-        device.hwndTarget = window_;
-        RegisterRawInputDevices(&device, 1, sizeof(device));
-        RefreshInputDevices();
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    const auto module = GetModuleHandleW(nullptr);
+    const HHOOK keyboard = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardProc, module, 0);
+    HHOOK mouse = nullptr;
+    if (!keyboard) error_ = GetLastError();
+    else {
+        // Install together, not lazily from a callback: no gap can miss a click
+        // or wheel between taps, and callbacks never install hooks.
+        mouse = SetWindowsHookExW(WH_MOUSE_LL, MouseProc, module, 0);
+        if (!mouse) error_ = GetLastError();
     }
-    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (msg.message == kRefreshInputDevices && !msg.hwnd) {
-            if (window_) RefreshInputDevices();
-            continue;
+    // Seed after installation; callbacks run only when this thread pumps.
+    // GetAsyncKeyState in a hook cannot report the current event's new state.
+    for (UINT key = 1; key < 256; ++key) {
+        if (key == VK_CONTROL || key == VK_SHIFT || key == VK_MENU) continue;
+        if (GetAsyncKeyState(static_cast<int>(key)) & 0x8000) detector_.Prime(key);
+    }
+    running_ = keyboard && mouse;
+    SetEvent(ready_);
+    if (Running()) {
+        const auto generation = generation_.load();
+        bool done = false;
+        while (!done) {
+            const DWORD wait = MsgWaitForMultipleObjectsEx(1, &stop_, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            if (wait == WAIT_OBJECT_0) break;
+            if (wait == WAIT_FAILED) { error_ = GetLastError(); break; }
+            for (int count = 0; count < 64 && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE); ++count) {
+                if (msg.message == WM_QUIT) { done = true; break; }
+                if (msg.message == kTrigger && !msg.hwnd) {
+                    if (Running() && generation == generation_.load() && msg.wParam == generation)
+                        PostMessageW(target_, message_, generation, 0);
+                } else {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
         }
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
     }
-    if (window_) {
-        if (polling_) KillTimer(window_, kInputPollTimer);
-        polling_ = false;
-        WatchMouse(false);
-        RAWINPUTDEVICE device{};
-        device.usUsagePage = 0x01;
-        device.usUsage = 0x06;
-        device.dwFlags = RIDEV_REMOVE;
-        RegisterRawInputDevices(&device, 1, sizeof(device));
-        DestroyWindow(window_);
-        window_ = nullptr;
-    }
-    detector_ = DoubleCtrlDetector{};
+    running_ = false;
+    if (mouse) UnhookWindowsHookEx(mouse);
+    if (keyboard) UnhookWindowsHookEx(keyboard);
+    current_ = nullptr;
+    detector_ = {};
 }
 }

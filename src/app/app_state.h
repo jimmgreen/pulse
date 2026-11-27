@@ -760,6 +760,9 @@ struct AppState : AppCoreOwner {
     // The single selected icon-grid item's whole name glides into view once,
     // right after the selection lands on it (RevealExpandedName).
     float selectScrollRoom = 0.0f;  // list made taller for it while it stays selected
+    // 滚动到最后一项之后: panes a drag scrolled glide back to where it found them.
+    bool dropScrollReturning = false;
+    std::chrono::steady_clock::time_point dropScrollReturnLast{};
     const void* revealTab = nullptr;
     int revealIndex = -1;
     uint64_t revealSince = 0;

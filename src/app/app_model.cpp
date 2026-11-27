@@ -1373,7 +1373,7 @@ void StagingTray::AllReferencedSnippetPaths(std::vector<std::wstring>& out) cons
 }
 
 size_t StagingTray::CollectRichToShelf(uint64_t shelf_id, const std::vector<TrayItem>& proto_items,
-                                       bool move_intent, size_t* out_skipped) {
+                                       bool move_intent, size_t* out_skipped, bool prepend) {
     if (out_skipped) *out_skipped = 0;
     if (proto_items.empty()) return 0;
     TrayShelfRecord* target = shelf_id ? FindShelfMut(shelf_id) : &ActiveShelf();
@@ -1441,7 +1441,8 @@ size_t StagingTray::CollectRichToShelf(uint64_t shelf_id, const std::vector<Tray
         // A mixed intake keeps its file intent; snippets are always copied on release.
         batch.move_intent = move_intent && std::any_of(batch.items.begin(), batch.items.end(),
             [](const TrayItem& item) { return !IsTraySnippet(item); });
-        target->batches.push_back(std::move(batch));
+        if (prepend) target->batches.insert(target->batches.begin(), std::move(batch));
+        else target->batches.push_back(std::move(batch));
     }
     return added;
 }
@@ -1487,6 +1488,27 @@ size_t StagingTray::MoveItemsBetweenShelves(uint64_t from_shelf_id, uint64_t to_
         else ++b;
     }
     return moved_count;
+}
+
+bool StagingTray::RemoveReferenceByIdentity(uint64_t shelf_id, uint64_t batch_id,
+                                          uint64_t item_id, const std::wstring& path) {
+    auto* shelf = FindShelfMut(shelf_id);
+    if (!shelf) return false;
+    auto& batches = shelf->batches;
+    for (size_t b = 0; b < batches.size(); ++b) {
+        auto& batch = batches[b];
+        if (batch.id != batch_id) continue;
+        for (size_t i = 0; i < batch.items.size(); ++i) {
+            const auto& item = batch.items[i];
+            if (item.id != item_id) continue;
+            if (item.path != path || item.inflight_task || IsTraySnippet(item)) return false;
+            batch.total_size -= std::min(batch.total_size, item.size);
+            batch.items.erase(batch.items.begin() + static_cast<std::ptrdiff_t>(i));
+            if (batch.items.empty()) batches.erase(batches.begin() + static_cast<std::ptrdiff_t>(b));
+            return true;
+        }
+    }
+    return false;
 }
 
 bool StagingTray::RemoveItemById(uint64_t item_id, std::wstring* out_owned_snippet) {

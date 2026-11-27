@@ -20,6 +20,7 @@ struct InstalledSnapshot {
     std::string registry_revision; // SHA-256 of exact registry bytes; empty if absent.
     std::vector<InstalledEntry> entries;
     bool missing = false; // Root absent; reading never creates it.
+    bool policy_allows_unsigned = false; // True only when signature-policy.json is valid with requireSigned:false.
 };
 enum class StoreChangeAction { Enable, Disable, Uninstall, Rollback };
 struct StoreChangeReview {

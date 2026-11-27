@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include "global_search_trigger.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -40,6 +41,10 @@ struct GlobalSearchContext {
     // 应用 group: Start menu programs right after the best matches, the
     // most started first among equal matches (history: may be null).
     bool show_apps = true;
+    bool apps_first = false;  // 应用 above 跳转 / 最佳匹配
+    // Result order (global_search_arrange.h values), remembered between summons.
+    int sort = 0, folders = 0, group = 0;
+    bool sort_desc = false;
     std::shared_ptr<app::JumpHistory> history;
     bool positioned = false;
     int x = 0, y = 0;                         // screen pixels; negative monitor coordinates are valid
@@ -56,6 +61,8 @@ struct GlobalSearchEvents {
     std::function<void()> clear_search_history;
     std::function<void(int x, int y, int width, int height)> placement_changed; // screen pixels + DIP size
     std::function<void(const std::wstring& path)> pin_folder;     // 添加常用位置…
+    // The user changed the result order or 应用排在最前 in the popup.
+    std::function<void(int sort, bool sort_desc, int folders, int group, bool apps_first)> order_changed;
     std::function<void(const GlobalSearchHandoff& search, const std::wstring& path, bool directory)> opened;
 };
 
@@ -67,7 +74,7 @@ public:
     GlobalSearchWindow& operator=(const GlobalSearchWindow&) = delete;
     // initial_query: text typed elsewhere (the desktop) that the box starts with, caret at the end.
     bool Show(HWND owner, bool dark, float scale, const std::wstring& current_folder, bool search_pinyin = true,
-              const std::wstring& initial_query = {});
+              const std::wstring& initial_query = {}, app::SearchTrigger trigger = app::SearchTrigger::Hotkey);
     void SetAppearance(bool dark, ui::WindowEffect effect, const std::wstring& background_image, D2D1_COLOR_F accent);
     // Called on the UI thread after the popup has hidden itself.
     void SetHandoffHandler(GlobalSearchHandoffHandler handler);
@@ -80,6 +87,9 @@ public:
     void Prewarm(uint32_t delay_ms, std::function<void()> prepare);
     void Shutdown();
     bool Visible() const;
+    app::SearchVisibility Visibility() const;
+    // Diagnostic readback only: requires an already captured submitted frame.
+    bool SavePresentedSnapshot(const std::wstring& path) const;
 private:
     friend struct GlobalSearchWindowTestPeer;
     struct Impl;

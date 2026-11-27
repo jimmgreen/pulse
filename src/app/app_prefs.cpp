@@ -74,6 +74,7 @@ void AppPrefs::ResetToDefaults() {
     list_smart_date = true;
     list_zebra_rows = true;
     list_tree_sticky = true;
+    list_scroll_past_end = true;
     list_size_bar = false;
     folder_size_auto = true;
     photo_wall_hint = true;
@@ -127,6 +128,11 @@ void AppPrefs::ResetToDefaults() {
     dialog_adaptive_legacy = true;
     jump_history = true;
     global_search_apps = true;
+    global_search_apps_first = false;
+    global_search_sort = 0;
+    global_search_sort_desc = false;
+    global_search_folders = 0;
+    global_search_group = 0;
     show_hidden_files = false;
     show_file_extensions = true;
     show_protected_os_files = false;
@@ -144,6 +150,7 @@ void AppPrefs::ResetToDefaults() {
     preview_prefer_system = false;
     preview_volume_percent = 100;
     preview_muted = false;
+    preview_immersive = true;
     change_tracking_enabled = false;
     change_tracking_days = 7;
     theme_mode = -1;
@@ -250,6 +257,8 @@ std::wstring AppPrefs::ToJson() const {
     out += list_zebra_rows ? L"true" : L"false";
     out += L",\n  \"list_tree_sticky\":";
     out += list_tree_sticky ? L"true" : L"false";
+    out += L",\n  \"list_scroll_past_end\":";
+    out += list_scroll_past_end ? L"true" : L"false";
     out += L",\n  \"list_size_bar\":";
     out += list_size_bar ? L"true" : L"false";
     out += L",\n  \"folder_size_auto\":";
@@ -386,6 +395,13 @@ std::wstring AppPrefs::ToJson() const {
     out += jump_history ? L"true" : L"false";
     out += L",\n  \"global_search_apps\":";
     out += global_search_apps ? L"true" : L"false";
+    out += L",\n  \"global_search_apps_first\":";
+    out += global_search_apps_first ? L"true" : L"false";
+    out += L",\n  \"global_search_sort\":" + std::to_wstring(global_search_sort);
+    out += L",\n  \"global_search_sort_desc\":";
+    out += global_search_sort_desc ? L"true" : L"false";
+    out += L",\n  \"global_search_folders\":" + std::to_wstring(global_search_folders);
+    out += L",\n  \"global_search_group\":" + std::to_wstring(global_search_group);
     out += L",\n  \"double_click_interval_ms\":" + std::to_wstring(NormalizeDoubleClickInterval(double_click_interval_ms));
     out += L",\n  \"blank_click_action\":";
     out += std::to_wstring(blank_click_action);
@@ -412,6 +428,8 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"preview_volume_percent\":" + std::to_wstring(std::clamp(preview_volume_percent, 0, 100));
     out += L",\n  \"preview_muted\":";
     out += preview_muted ? L"true" : L"false";
+    out += L",\n  \"preview_immersive\":";
+    out += preview_immersive ? L"true" : L"false";
     out += L",\n  \"change_tracking_enabled\":";
     out += change_tracking_enabled ? L"true" : L"false";
     out += L",\n  \"change_tracking_days\":";
@@ -639,6 +657,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     list_smart_date = pulse::json::ExtractBool(json, L"list_smart_date", true);
     list_zebra_rows = pulse::json::ExtractBool(json, L"list_zebra_rows", true);
     list_tree_sticky = pulse::json::ExtractBool(json, L"list_tree_sticky", true);
+    list_scroll_past_end = pulse::json::ExtractBool(json, L"list_scroll_past_end", true);
     list_size_bar = pulse::json::ExtractBool(json, L"list_size_bar", false);
     folder_size_auto = pulse::json::ExtractBool(json, L"folder_size_auto", true);
     photo_wall_hint = pulse::json::ExtractBool(json, L"photo_wall_hint", true);
@@ -737,6 +756,11 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     dialog_adaptive_legacy = pulse::json::ExtractBool(json, L"dialog_adaptive_legacy", true);
     jump_history = pulse::json::ExtractBool(json, L"jump_history", true);
     global_search_apps = pulse::json::ExtractBool(json, L"global_search_apps", true);
+    global_search_apps_first = pulse::json::ExtractBool(json, L"global_search_apps_first", false);
+    global_search_sort = std::clamp(pulse::json::ExtractInt(json, L"global_search_sort", 0), 0, 5);
+    global_search_sort_desc = pulse::json::ExtractBool(json, L"global_search_sort_desc", false);
+    global_search_folders = std::clamp(pulse::json::ExtractInt(json, L"global_search_folders", 0), 0, 2);
+    global_search_group = std::clamp(pulse::json::ExtractInt(json, L"global_search_group", 0), 0, 5);
     {
         const int gap = pulse::json::ExtractInt(json, L"global_search_double_ctrl_ms", 300);
         global_search_double_ctrl_ms = gap == 200 || gap == 400 ? gap : 300;
@@ -766,6 +790,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     preview_prefer_system = pulse::json::ExtractBool(json, L"preview_prefer_system", false);
     preview_volume_percent = std::clamp(pulse::json::ExtractInt(json, L"preview_volume_percent", 100), 0, 100);
     preview_muted = pulse::json::ExtractBool(json, L"preview_muted", false);
+    preview_immersive = pulse::json::ExtractBool(json, L"preview_immersive", true);
     change_tracking_enabled = pulse::json::ExtractBool(json, L"change_tracking_enabled", false);
     change_tracking_days = pulse::json::ExtractInt(json, L"change_tracking_days", 7);
     if (change_tracking_days != 1 && change_tracking_days != 3 && change_tracking_days != 7)

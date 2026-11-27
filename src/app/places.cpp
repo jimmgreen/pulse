@@ -2029,6 +2029,16 @@ private:
 };
 }  // namespace
 
+std::vector<std::wstring> PlacesCatalog::TaggedPathsUnder(const std::vector<std::wstring>& roots) const {
+    std::vector<std::wstring> paths;
+    for (const auto& tag : tags)
+        for (const auto& assigned : tag.paths)
+            if (std::any_of(roots.begin(), roots.end(), [&](const auto& root) {
+                    return PathIsOrDescendant(assigned, root);
+                })) paths.push_back(assigned);
+    return paths;
+}
+
 void PlacesCatalog::RemapPaths(const std::wstring& old_path, const std::wstring& new_path) {
     RemapPaths(std::vector<std::pair<std::wstring, std::wstring>>{{old_path, new_path}});
 }
@@ -2110,6 +2120,10 @@ void PlacesCatalog::RemapPaths(const std::vector<std::pair<std::wstring, std::ws
         QueueTagSave();
         Save();
     }
+}
+
+void PlacesCatalog::CloneAssignments(const std::vector<std::pair<std::wstring, std::wstring>>& copies) {
+    for (const auto& [source, destination] : copies) CloneAssignments(source, destination);
 }
 
 void PlacesCatalog::CloneAssignments(const std::wstring& source,

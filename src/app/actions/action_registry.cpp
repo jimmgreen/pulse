@@ -947,7 +947,7 @@ constexpr std::pair<std::string_view, const wchar_t*> kSettingGlyphs[] = {
     {"theme", L"\xE706"}, {"window_effect", L"\xE81E"}, {"text_rendering", L"\xE8D2"},
     {"font_size", L"\xE8E9"}, {"language", L"\xE774"}, {"row_height", L"\xECE7"},
     {"click_to_open", L"\xE8B0"}, {"name_highlight", L"\xE7E6"}, {"blank_double_click", L"\xE72B"},
-    {"folders_first", L"\xE8CB"}, {"alias_mark", L"\xE8AC"}, {"tree_sticky", L"\xE840"}, {"mtime_marks", L"\xEC92"},
+    {"folders_first", L"\xE8CB"}, {"alias_mark", L"\xE8AC"}, {"tree_sticky", L"\xE840"}, {"scroll_past_end", L"\xE74B"}, {"mtime_marks", L"\xEC92"},
     {"mtime_range", L"\xEC92"}, {"startup_open", L"\xE81C"}, {"new_tab_open", L"\xECCD"},
     {"external_open", L"\xE8AD"}, {"tray_icon", L"\xECAA"}, {"open_folders_with_pulse", L"\xEC50"},
     {"staging_icon_size", L"\xED1E"}, {"change_days", L"\xE9D5"},

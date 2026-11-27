@@ -63,8 +63,11 @@ constexpr BuiltinMenuInfo kItems[] = {
     { BuiltinMenuItem::NewTemplates, L"new_templates", l10n::StringId::New },
     { BuiltinMenuItem::Git, L"git", l10n::StringId::Git },
     { BuiltinMenuItem::ConnectServer, L"connect_server", l10n::StringId::ConnectServerMenu },
-    { BuiltinMenuItem::CopyToWindow, L"copy_to_window", l10n::StringId::CopyToWindow },
-    { BuiltinMenuItem::MoveToWindow, L"move_to_window", l10n::StringId::MoveToWindow },
+    // 复制到 / 移动到 (other panes, other windows, 选择文件夹…); the keys stay.
+    { BuiltinMenuItem::CopyToWindow, L"copy_to_window", l10n::StringId::TransferCopyTo },
+    { BuiltinMenuItem::MoveToWindow, L"move_to_window", l10n::StringId::TransferMoveTo },
+    { BuiltinMenuItem::OpenNativeExplorer, L"open_native_explorer", l10n::StringId::OpenNativeExplorer },
+    { BuiltinMenuItem::OpenInOtherPane, L"open_in_other_pane", l10n::StringId::OpenInOtherPane },
 };
 static_assert(sizeof(kItems) / sizeof(kItems[0]) == kBuiltinMenuItemCount,
               "every built-in item needs a key and a label");
@@ -92,11 +95,13 @@ constexpr BuiltinMenuRow kItemRows[] = {
     { B::DissolveFolder, F::None, L"\xED25", L"Ctrl+Shift+G", false, false },
     { B::OpenPath, F::None, ui::command_icons::kGlyphOpenPath, nullptr, false, false },
     { B::OpenInNewTab, F::None, L"\xE8A7", nullptr, false, false },
+    { B::OpenInOtherPane, F::None, ui::command_icons::kGlyphMoveToPane, nullptr, false, false },
+    { B::OpenNativeExplorer, F::None, ui::command_icons::kGlyphOpenPath, nullptr, false, false },
     { B::CopyPath, F::None, ui::command_icons::kGlyphCopyPath, L"Ctrl+Shift+C", false, false },
     { B::SetAlias, F::None, L"\xE8EC", L"Shift+F2", false, false },
     { B::StageToTray, F::None, L"\xE8A1", L"Ctrl+Shift+S", false, false },
-    { B::CopyToTarget, F::None, ui::command_icons::kGlyphCopyToPane, L"Ctrl+Alt+C", false, false },
-    { B::MoveToTarget, F::None, ui::command_icons::kGlyphMoveToPane, L"Ctrl+Alt+X", false, false },
+    // 复制到 / 移动到目标栏 left the menu (Ctrl+Alt+C / X and the toolbar keep
+    // them); 复制到 / 移动到 ▸ lists the other panes first instead.
     { B::CopyToWindow, F::None, L"\xE8C8", nullptr, false, true },
     { B::MoveToWindow, F::None, L"\xE8C6", nullptr, false, true },
     { B::Terminal, F::None, L"\xE756", nullptr, false, false },
@@ -129,6 +134,8 @@ constexpr BuiltinMenuRow kBackgroundRows[] = {
     { B::Paste, F::None, L"\xE77F", L"Ctrl+V", false, false },
     { B::CopyPath, F::None, ui::command_icons::kGlyphCopyPath, L"Ctrl+Shift+C", true, false },
     { B::SelectCommands, F::None, L"\xE8B3", L"Ctrl+A", true, false },
+    { B::OpenInOtherPane, F::None, ui::command_icons::kGlyphMoveToPane, nullptr, false, false },
+    { B::OpenNativeExplorer, F::None, ui::command_icons::kGlyphOpenPath, nullptr, false, false },
     { B::Terminal, F::None, L"\xE756", nullptr, true, false },
     { B::Git, F::None, L"\xE8B7", nullptr, false, true },
     { B::QuickAccess, F::None, ui::command_icons::kGlyphPinQuickAccess, nullptr, false, false },

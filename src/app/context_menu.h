@@ -10,6 +10,9 @@
 #include "../ui/view_layout.h"
 #include "../ui/ui_view_model.h"
 #include "context_menu_prefs.h"
+#include "native_explorer.h"
+#include <optional>
+#include <utility>
 #include "../index/index_types.h"
 #include <string>
 
@@ -138,6 +141,10 @@ enum MenuCmd : int {
     CmdImportAliases = 3918,
     CmdVfsExtractSelected = 3919, // archive-as-folder items: 解压所选到… (app_vfs_ops)
     CmdAliasBase = 3920,        // omnibar: +0..15 aliased folders matching the query
+    CmdOpenNativeExplorer = 3936, // single selected filesystem item: folder open / file reveal
+    CmdOpenNativeExplorerHere = 3937, // background folder, never the retained selection
+    CmdOpenInOtherPane = 3938,     // one folder: 在另一栏打开 (the target pane, else the next one)
+    CmdOpenInOtherPaneHere = 3939, // background: the folder shown, in the other pane
     CmdAliasOpenBase = 3940,    // 管理别名: +0..29 open the item
     CmdAliasRemoveBase = 3970,  // 管理别名: +0..29 remove the alias (row's trailing ×)
     CmdIndexBase = 1000,
@@ -149,6 +156,9 @@ enum MenuCmd : int {
     CmdShellNewBase = 4000,
     CmdCopyToWindowBase = 5000,
     CmdMoveToWindowBase = 5032,
+    // 复制到 / 移动到 ▸ 选择文件夹…: any folder, picked.
+    CmdCopyToPicked = 5064,
+    CmdMoveToPicked = 5065,
     // Selection chip ⋯: 用 <pinned app> 打开 (+ index into AppPrefs::toolbar_apps)
     // and 固定到工具栏 ▸ <suggested app> (+ index into the suggestions listed).
     CmdToolbarAppBase = 5100,
@@ -192,6 +202,9 @@ struct ShellMenuEntry {
     std::wstring handler;   // handler display name for the settings catalog
     wchar_t mnemonic = 0;   // access key from the Explorer label ("&X"), 0 = none
     common::MenuIconRef icon;  // app icon (handler bitmap / verb Icon value)
+    std::wstring source_identity; // Registry hive/path or inherited COM handler identity.
+    std::wstring node_key; // Derived only from source/ancestry/verb or label, never command.
+    bool node_configurable = true;
 };
 
 // Explorer's access keys for the built-in rows that mirror its own verbs
@@ -220,7 +233,12 @@ inline wchar_t BuiltinMenuMnemonic(int command) {
 // rename) + built-in verbs + undo. Explorer rows are appended afterwards via
 // AppendShellSection (they grow the menu downward so open rows never move).
 std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
-                                              bool folder = false);
+                                              bool folder = false, bool native_explorer = false);
+
+// Pure request selection shared by menu visibility and dispatch. Multiple selected
+// items are intentionally unsupported; background ignores the selection entirely.
+std::optional<native_explorer::Request> NativeExplorerMenuRequest(int command,
+    const std::wstring& directory, const std::vector<std::pair<std::wstring, bool>>& selected);
 
 // Which settings switch owns a built-in row (BuiltinMenuItem::Count: none,
 // the row always stays).
@@ -263,12 +281,16 @@ static_assert(CmdCopyToWindowBase + kMaxWindowTransferTargets <= CmdMoveToWindow
 // Two flyouts, "复制到窗口" and "移动到窗口", one row per folder (its name, then
 // the full path, also its tooltip), right before 复制路径. Nothing without targets; 移动到窗口
 // stays visible but disabled when the selection cannot move.
+// 复制到 / 移动到: the first `pane_count` folders are the other panes of this
+// window (a separator after them), then the other windows' folders; with
+// `choose_folder` a last 选择文件夹… row (CmdCopyToPicked / CmdMoveToPicked).
 void AppendWindowTransferCommands(std::vector<ui::FluentMenuItem>& items,
-                                  const std::vector<std::wstring>& folders, bool can_move);
+                                  const std::vector<std::wstring>& folders, bool can_move,
+                                  size_t pane_count = 0, bool choose_folder = false);
 
 // Context menu for empty list space (creation / paste / terminal / undo).
 std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
-                                                    const std::wstring& undo_label);
+                                                    const std::wstring& undo_label, bool native_explorer = false);
 struct BackgroundViewOptions {
     ui::ViewMode view_mode = ui::ViewMode::Details;
     ui::SortColumn sort_column = ui::SortColumn::Name;

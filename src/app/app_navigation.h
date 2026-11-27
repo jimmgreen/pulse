@@ -107,6 +107,13 @@ void TransferToTarget(AppState& s, bool move);
 // is in; and sending the selection to one of them.
 std::vector<std::wstring> WindowTransferFolders(AppState& s);
 void TransferSelectionToFolder(AppState& s, const std::wstring& folder, bool move);
+// 复制到 / 移动到 ▸ this window's other panes: the target pane (or the other
+// one of two) first, then screen order; the same folders WindowTransferFolders
+// would take.
+std::vector<std::wstring> PaneTransferFolders(AppState& s);
+// 在另一栏打开: the target pane, the other one of two, or the next one.
+app::Pane* OtherPaneForOpen(AppState& s);
+bool OpenInOtherPane(AppState& s, const std::wstring& path);
 void CycleFocus(AppState& s);
 void MarkTargetPane(AppState& s);
 void SortBy(AppState& s, ui::SortColumn col);

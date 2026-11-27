@@ -255,9 +255,7 @@ public:
 
     void Close(AppState& s, AppState* next) {
         if (!next) {
-            watcher_->Update(nullptr, 0, false, 1);
-            core_.doubleCtrl.SetInputObserver({});
-            input_observer_installed_ = false;
+            watcher_->Stop();
             window_.Shutdown();
             Save();
             core_.tray.ClearTempShelf();
@@ -388,13 +386,7 @@ private:
     void UpdateWatcher() {
         const bool shake = core_.appPrefs.shelf_shake_enabled;
         watcher_->Update(listener_, WM_STAGING_SHELF_SUMMON, shake, core_.appPrefs.shelf_shake_sensitivity);
-        if (input_observer_installed_ && pointer_polling_enabled_ == shake) return;
-        DoubleCtrlWatcher::InputPoll poll;
-        if (shake) poll = [watcher = watcher_] { watcher->PollPointer(); };
-        core_.doubleCtrl.SetInputObserver([watcher = watcher_](const RAWINPUT& raw) { watcher->OnInput(raw); },
-                                          std::move(poll));
-        input_observer_installed_ = true;
-        pointer_polling_enabled_ = shake;
+
     }
 
     void Save() {
@@ -503,8 +495,6 @@ private:
     AppCore& core_;
     ui::FloatingShelfWindow window_;
     std::shared_ptr<app::DragShakeWatcher> watcher_ = std::make_shared<app::DragShakeWatcher>();
-    bool input_observer_installed_ = false;
-    bool pointer_polling_enabled_ = false;
     HWND owner_ = nullptr;
     HWND listener_ = nullptr;
     HWND dock_hot_ = nullptr;

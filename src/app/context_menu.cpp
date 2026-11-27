@@ -83,7 +83,7 @@ ui::FluentMenuItem UndoItem(bool can_undo, const std::wstring& undo_label) {
 } // namespace
 
 std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
-                                              bool folder) {
+                                              bool folder, bool native_explorer) {
     std::vector<ui::FluentMenuItem> items;
     items.push_back(Item(CmdOpen, l10n::Get(l10n::StringId::Open).c_str(), kGlyphOpen));
 
@@ -104,6 +104,8 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
 
     if (folder)
         items.push_back(Item(CmdOpenInNewTab, l10n::Get(l10n::StringId::OpenNewTab).c_str(), kGlyphOpenInNewTab));
+    if (native_explorer)
+        items.push_back(Item(CmdOpenNativeExplorer, l10n::Get(l10n::StringId::OpenNativeExplorer).c_str(), ui::command_icons::kGlyphOpenPath));
     items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphCopyPath, L"Ctrl+Shift+C"));
     items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
     items.push_back(Item(CmdProperties, l10n::Get(l10n::StringId::Properties).c_str(), kGlyphProperties, L"Alt+Enter"));
@@ -117,8 +119,22 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
     return items;
 }
 
+std::optional<native_explorer::Request> NativeExplorerMenuRequest(int command,
+    const std::wstring& directory, const std::vector<std::pair<std::wstring, bool>>& selected) {
+    if (command == CmdOpenNativeExplorerHere) {
+        if (!native_explorer::IsFilesystemPath(directory)) return std::nullopt;
+        return native_explorer::Request{directory, native_explorer::Intent::OpenFolder};
+    }
+    if (command != CmdOpenNativeExplorer || selected.size() != 1 ||
+        !native_explorer::IsFilesystemPath(selected.front().first)) return std::nullopt;
+    return native_explorer::Request{selected.front().first, selected.front().second
+        ? native_explorer::Intent::OpenFolder : native_explorer::Intent::SelectFile};
+}
+
 BuiltinMenuItem BuiltinItemForCommand(int command) {
     switch (command) {
+    case CmdOpenNativeExplorer:
+    case CmdOpenNativeExplorerHere: return BuiltinMenuItem::OpenNativeExplorer;
     case CmdOpenPath: return BuiltinMenuItem::OpenPath;
     case CmdGroupIntoFolder: return BuiltinMenuItem::GroupIntoFolder;
     case CmdDissolveFolder: return BuiltinMenuItem::DissolveFolder;
@@ -142,6 +158,10 @@ BuiltinMenuItem BuiltinItemForCommand(int command) {
     case CmdForgetNetworkRecent: return BuiltinMenuItem::ForgetNetworkRecent;
     case CmdUnpinNetwork: return BuiltinMenuItem::PinNetwork;
     case CmdOpenInNewTab: return BuiltinMenuItem::OpenInNewTab;
+    case CmdOpenInOtherPane:
+    case CmdOpenInOtherPaneHere: return BuiltinMenuItem::OpenInOtherPane;
+    case CmdCopyToPicked: return BuiltinMenuItem::CopyToWindow;
+    case CmdMoveToPicked: return BuiltinMenuItem::MoveToWindow;
     case CmdCopyPath: return BuiltinMenuItem::CopyPath;
     case CmdOpenTerminal: return BuiltinMenuItem::Terminal;
     case CmdPinQuickAccess:
@@ -171,9 +191,11 @@ BuiltinMenuItem BuiltinItemForRow(const ui::FluentMenuItem& item) {
     if (item.command != CmdNone) return BuiltinItemForCommand(item.command);
     if (item.children.empty()) return BuiltinMenuItem::Count;
     const int child = item.children.front().command;
-    if (child >= CmdCopyToWindowBase && child < CmdCopyToWindowBase + kMaxWindowTransferTargets)
+    if ((child >= CmdCopyToWindowBase && child < CmdCopyToWindowBase + kMaxWindowTransferTargets) ||
+        child == CmdCopyToPicked)
         return BuiltinMenuItem::CopyToWindow;
-    if (child >= CmdMoveToWindowBase && child < CmdMoveToWindowBase + kMaxWindowTransferTargets)
+    if ((child >= CmdMoveToWindowBase && child < CmdMoveToWindowBase + kMaxWindowTransferTargets) ||
+        child == CmdMoveToPicked)
         return BuiltinMenuItem::MoveToWindow;
     if (item.glyph == L"\xE710") return BuiltinMenuItem::NewTemplates;
     if (item.glyph == L"\xE8B7" || item.glyph == L"\xF003") return BuiltinMenuItem::Git;
@@ -264,9 +286,10 @@ void ApplyBuiltinMenuPrefs(std::vector<ui::FluentMenuItem>& items,
 }
 
 void AppendWindowTransferCommands(std::vector<ui::FluentMenuItem>& items,
-                                  const std::vector<std::wstring>& folders, bool can_move) {
+                                  const std::vector<std::wstring>& folders, bool can_move,
+                                  size_t pane_count, bool choose_folder) {
     if (folders.empty()) return;
-    const auto flyout = [&](int base, l10n::StringId label, const wchar_t* glyph) {
+    const auto flyout = [&](int base, int picked, l10n::StringId label, const wchar_t* glyph) {
         ui::FluentMenuItem header = Item(CmdNone, l10n::Get(label).c_str(), glyph);
         for (size_t i = 0; i < folders.size() && i < kMaxWindowTransferTargets; ++i) {
             const std::wstring shown = path::FriendlyPathText(folders[i]);
@@ -277,12 +300,18 @@ void AppendWindowTransferCommands(std::vector<ui::FluentMenuItem>& items,
             row.shortcut = shown;
             row.shortcut_inline = true;
             row.tooltip = shown;  // the inline path is elided when long
+            // This window's other panes first, set apart from the other windows.
+            row.separator_after = i + 1 == pane_count && pane_count < folders.size();
             header.children.push_back(std::move(row));
+        }
+        if (choose_folder && !header.children.empty()) {
+            header.children.back().separator_after = true;
+            header.children.push_back(Item(picked, l10n::Get(l10n::StringId::QuickAccessChooseFolder).c_str(), kGlyphFolder));
         }
         return header;
     };
-    auto copy = flyout(CmdCopyToWindowBase, l10n::StringId::CopyToWindow, kGlyphCopy);
-    auto move = flyout(CmdMoveToWindowBase, l10n::StringId::MoveToWindow, kGlyphCut);
+    auto copy = flyout(CmdCopyToWindowBase, CmdCopyToPicked, l10n::StringId::TransferCopyTo, kGlyphCopy);
+    auto move = flyout(CmdMoveToWindowBase, CmdMoveToPicked, l10n::StringId::TransferMoveTo, kGlyphCut);
     move.enabled = can_move;
     auto at = std::find_if(items.begin(), items.end(), [](const ui::FluentMenuItem& row) {
         return row.command == CmdCopyPath;
@@ -366,7 +395,7 @@ std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty) {
 
 
 std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
-                                                    const std::wstring& undo_label) {
+                                                    const std::wstring& undo_label, bool native_explorer) {
     std::vector<ui::FluentMenuItem> items;
     items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"Ctrl+Shift+N"));
     items.push_back(Item(CmdNewTextFile, l10n::Get(l10n::StringId::NewTextDocument).c_str(), kGlyphNewFile));
@@ -378,6 +407,8 @@ std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_und
     items.push_back(Item(CmdInvertSelection, l10n::Get(l10n::StringId::InvertSelection).c_str(), kGlyphInvert, L"Ctrl+I"));
     items.push_back(Item(CmdSelectWildcard, l10n::Get(l10n::StringId::SelectWildcard).c_str(), kGlyphSelectWild, L"Ctrl+Shift+A"));
     items.back().separator_after = true;
+    if (native_explorer)
+        items.push_back(Item(CmdOpenNativeExplorerHere, l10n::Get(l10n::StringId::OpenNativeExplorer).c_str(), ui::command_icons::kGlyphOpenPath));
     items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
     items.back().separator_after = true;
     items.push_back(Item(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphPinWorkspace));

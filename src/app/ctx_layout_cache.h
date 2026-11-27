@@ -96,8 +96,9 @@ struct CtxLayoutRecord {
 };
 using CtxLayoutRecords = std::unordered_map<std::wstring, CtxLayoutRecord>;
 
-// `build` identifies the writer; a file from another build is ignored (the
-// handler row parsing may have changed with it).
+// `build` records the writer for diagnostics. A file from another build is
+// still read: the rows are predictions the live answer corrects, and a change
+// to the stored row format bumps kCtxLayoutVersion instead.
 std::vector<uint8_t> SerializeCtxLayout(const CtxLayoutRecords& records, std::wstring_view build);
 bool ParseCtxLayout(const uint8_t* data, size_t size, std::wstring_view build,
                     CtxLayoutRecords& out);
@@ -111,7 +112,7 @@ uint64_t CtxLayoutFingerprint(const std::wstring& base_key);
 std::wstring CtxLayoutCachePath();
 
 // Reads the file and keeps the keys whose fingerprint still matches.
-// False when there is no usable file (missing, damaged, another build).
+// False when there is no usable file (missing, damaged, another format).
 bool LoadCtxLayoutFile(const std::wstring& path, std::wstring_view build,
                        const CtxFingerprintFn& fingerprint, CtxLayoutMap& out);
 // Fingerprints every key now and replaces the file atomically. `keep_going`

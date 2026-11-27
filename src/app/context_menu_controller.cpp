@@ -59,6 +59,30 @@ std::vector<ops::ShellMenuItem> OverlayLiveRows(std::vector<ops::ShellMenuItem> 
     return predicted;
 }
 
+// Shell replies decode new buffers even when the software icon is unchanged.
+// Reuse pixels only, never IDs/state: the renderer can retain its device bitmap.
+// Position is just a cheap candidate lookup; exact pixel equality makes reuse
+// valid even when a provider reorders rows. Changed/removed icons stay changed.
+void ReuseIconPixels(common::MenuIconRef& fresh, const common::MenuIconRef& previous) {
+    if (fresh != previous && fresh && previous && fresh->Valid() && previous->Valid() &&
+        fresh->width == previous->width && fresh->height == previous->height &&
+        fresh->bgra == previous->bgra)
+        fresh = previous;
+}
+
+void ReuseComIcons(std::vector<ops::ShellMenuItem>& fresh,
+                   const std::vector<ops::ShellMenuItem>& previous) {
+    for (size_t i = 0, count = (std::min)(fresh.size(), previous.size()); i < count; ++i)
+        ReuseIconPixels(fresh[i].icon, previous[i].icon);
+}
+
+void ReuseStaticIcons(std::vector<StaticVerb>& fresh, const std::vector<StaticVerb>& previous) {
+    for (size_t i = 0, count = (std::min)(fresh.size(), previous.size()); i < count; ++i) {
+        ReuseIconPixels(fresh[i].icon_pixels, previous[i].icon_pixels);
+        ReuseStaticIcons(fresh[i].children, previous[i].children);
+    }
+}
+
 bool SameStaticVerbs(const std::vector<StaticVerb>& a, const std::vector<StaticVerb>& b) {
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
@@ -207,8 +231,89 @@ std::vector<ui::FluentMenuItem> ReconcileCtxDisplay(
     return out;
 }
 
-std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
-                                               const std::vector<ShellMenuEntry>& entries) {
+namespace {
+std::wstring NodePart(const std::wstring& value) {
+    return std::to_wstring(value.size()) + L":" + value;
+}
+
+void IdentifyMenuNodes(std::vector<ShellMenuEntry>& rows, const std::wstring& parent,
+                       const std::wstring& inherited_source, bool inherited_configurable, unsigned depth = 0) {
+    std::unordered_map<std::wstring, size_t> counts;
+    for (auto& row : rows) {
+        if (row.source_identity.empty()) row.source_identity = !row.clsid.empty()
+            ? L"com:" + ipc::ToLowerVerb(row.clsid) : !inherited_source.empty()
+            ? inherited_source : row.from_com ? L"com:unknown" : L"static:unknown";
+        const auto identity = !row.verb.empty() ? L"v:" + ipc::ToLowerVerb(row.verb)
+            : L"t:" + ipc::NormalizeCatalogText(row.text);
+        const bool compression_parent = parent.empty() && row.source_identity == L"synthetic:compression";
+        row.node_key = compression_parent ? L"n:synthetic:compression" :
+            L"n:" + NodePart(parent) + NodePart(row.source_identity) +
+            NodePart(identity) + (row.children.empty() ? L":v" : L":f");
+        ++counts[row.node_key];
+    }
+    for (auto& row : rows) {
+        const bool known_source = row.source_identity != L"com:unknown" && row.source_identity != L"static:unknown" &&
+            row.source_identity != L"registry:0:" && row.source_identity != L"registry:1:" && row.source_identity != L"registry:2:";
+        row.node_configurable = inherited_configurable && known_source && counts[row.node_key] == 1 && depth <= 16;
+        if (depth < 16) IdentifyMenuNodes(row.children, row.node_key, row.source_identity, row.node_configurable, depth + 1);
+        else for (auto& child : row.children) child.node_configurable = false;
+    }
+}
+
+void ApplyNodeChoices(const ContextMenuPrefs& prefs, std::vector<ShellMenuEntry>& rows,
+                      const std::unordered_set<std::wstring>& ambiguous,
+                      const std::wstring& parent = L"", bool ancestors_configurable = true) {
+    const auto configurable = [&](const auto& row) {
+        return row.node_configurable && !row.node_key.empty() && !ambiguous.contains(row.node_key);
+    };
+    std::erase_if(rows, [&](auto& row) {
+        row.node_configurable = row.node_configurable && ancestors_configurable;
+        if (configurable(row) && !prefs.NodeEnabled(row.node_key)) return true;
+        const bool had_children = !row.children.empty();
+        ApplyNodeChoices(prefs, row.children, ambiguous, row.node_key, configurable(row));
+        return had_children && row.children.empty();
+    });
+    const auto found = prefs.node_order.find(parent);
+    if (found == prefs.node_order.end() || found->second.empty()) return;
+    std::unordered_map<std::wstring, size_t> ranks;
+    for (size_t i = 0; i < found->second.size(); ++i) ranks.emplace(found->second[i], i);
+    const auto rank = [&](const auto& row) {
+        const auto at = ranks.find(row.node_key); return at == ranks.end() ? ranks.size() : at->second;
+    };
+    // Ambiguous occurrences keep their slots; only stable siblings move.
+    std::vector<ShellMenuEntry> movable;
+    for (const auto& row : rows) if (configurable(row)) movable.push_back(row);
+    std::stable_sort(movable.begin(), movable.end(), [&](const auto& a, const auto& b) { return rank(a) < rank(b); });
+    size_t next = 0;
+    for (auto& row : rows) if (configurable(row)) row = std::move(movable[next++]);
+}
+
+void RecordMenuNodes(std::vector<SeenMenuItem>& catalog, const std::vector<ShellMenuEntry>& rows, const std::wstring& parent = L"",
+                     const std::wstring& root_key = L"", unsigned depth = 0) {
+    if (depth > 16) return;
+    uint32_t position = 0;
+    for (const auto& row : rows) {
+        SeenMenuItem item;
+        item.default_order = position++;
+        item.key = row.node_key; item.text = row.text; item.flyout = !row.children.empty();
+        item.from_com = row.from_com; item.category = ipc::ClassifyExplorerItem(row.verb, row.text, item.flyout);
+        item.parent_key = parent; item.source = row.source_identity; item.depth = depth;
+        item.configurable = row.node_configurable;
+        item.root_key = !root_key.empty() ? root_key : !row.clsid.empty() ? ipc::HandlerCatalogKey(row.clsid)
+            : ipc::IsCompressVendorFlyout(row.text) ? ipc::CompressCatalogKey() : ipc::CatalogKey(row.text, item.flyout);
+        const auto child_root = item.root_key;
+        catalog.push_back(std::move(item));
+        RecordMenuNodes(catalog, row.children, row.node_key, child_root, depth + 1);
+    }
+}
+bool HasNodeChoices(const ContextMenuPrefs& prefs) {
+    return !prefs.node_order.empty() || std::any_of(prefs.item_enabled.begin(), prefs.item_enabled.end(),
+        [](const auto& choice) { return !choice.second && choice.first.starts_with(L"n:"); });
+}
+} // namespace
+
+static std::vector<ShellMenuEntry> ApplyExplorerPrefsImpl(const ContextMenuPrefs& prefs,
+    const std::vector<ShellMenuEntry>& entries, bool identify_nodes) {
     context_diagnostics::Batch diagnostic(L"preferences");
     std::vector<ShellMenuEntry> compress_top;
     struct Ranked {
@@ -281,6 +386,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
         ShellMenuEntry group;
         group.text = l10n::Cn(ipc::CompressFlyoutText());
         group.from_com = true;
+        group.source_identity = L"synthetic:compression";
         append_compress_children(group);
         if (!group.children.empty())
             kept.insert(kept.begin(), { std::move(group), 0 });
@@ -294,7 +400,20 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
     std::vector<ShellMenuEntry> out;
     out.reserve(kept.size());
     for (auto& row : kept) out.push_back(std::move(row.entry));
+    if (identify_nodes) {
+        IdentifyMenuNodes(out, L"", L"", true);
+        if (HasNodeChoices(prefs)) {
+            std::unordered_set<std::wstring> ambiguous;
+            for (const auto& row : prefs.seen) if (row.tree_node && !row.configurable) ambiguous.insert(row.key);
+            ApplyNodeChoices(prefs, out, ambiguous);
+        }
+    }
     return out;
+}
+
+std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
+                                               const std::vector<ShellMenuEntry>& entries) {
+    return ApplyExplorerPrefsImpl(prefs, entries, true);
 }
 
 std::wstring ContextMenuController::CacheKey(bool background,
@@ -317,7 +436,8 @@ void ContextMenuController::StartQuery(
     }
     auto disabled_handlers = prefs.DisabledHandlerClsids();
     std::sort(disabled_handlers.begin(), disabled_handlers.end());
-    if (token_ != 0 && CanReuseContextSession(query_started_at_, GetTickCount64()) &&
+    if (token_ != 0 && query_cache_generation_ == cache_generation_ &&
+        CanReuseContextSession(query_started_at_, GetTickCount64()) &&
         background_ == background && paths_ == paths &&
         extended_ == extended && disabled_handlers_ == disabled_handlers) {
         if (prefetch_static) prefetch_static(extension);
@@ -344,6 +464,7 @@ void ContextMenuController::StartQuery(
     diagnostic.Number(L"token", token);
     diagnostic.Number(L"selection-count", paths.size());
     token_ = token;
+    query_cache_generation_ = cache_generation_;
     com_ready_ = false;
     com_predicted_ = false;
     com_items_.clear();
@@ -361,7 +482,7 @@ void ContextMenuController::Close() {
     Draining next;
     if (drain) {
         next = { live, CacheKey(background_, extension_, paths_.size() > 1), names_,
-                 cache_generation_, GetTickCount64() };
+                 query_cache_generation_, GetTickCount64() };
     }
     display_snapshot_valid_ = false;
     menu_com_items_.clear();
@@ -433,7 +554,10 @@ std::vector<ui::FluentMenuItem> ContextMenuController::BuildDisplay(
         for (const auto& entry : entries) if (IsNativeNewEntry(entry)) diagnostic.Row(L"drop-native-new-duplicate", entry.text);
         std::erase_if(entries, IsNativeNewEntry);
     }
-    AppendShellSection(display, ApplyExplorerPrefs(prefs, std::move(entries)));
+    // Compose already discovers identities. A default display needs only the
+    // legacy filtering/grouping; do not allocate the same node keys twice.
+    // Read choices on every build so a new hide/order takes effect immediately.
+    AppendShellSection(display, ApplyExplorerPrefsImpl(prefs, entries, HasNodeChoices(prefs)));
     ui::FluentMenuItem manage;
     manage.command = CmdSettingsContextMenu;
     manage.text = pulse::l10n::Get(pulse::l10n::StringId::ManageContext);
@@ -493,6 +617,29 @@ std::vector<ui::FluentMenuItem> ContextMenuController::ReconcileDisplay(
     // More answers are coming: patch the shown rows, keep the late ones for
     // a single growth step.
     return ReconcileCtxDisplay(shown_, fresh, &pending_stats_, false);
+}
+
+bool ContextMenuController::TryReplaceBaseFlyout(const std::wstring& text,
+    std::vector<ui::FluentMenuItem> children, ContextMenuPrefs& prefs,
+    const std::function<bool(std::vector<ui::FluentMenuItem>)>& accept) {
+    if (!menu_open_ || shown_.empty() || !accept) return false;
+    auto next_base = base_items_;
+    const auto found = std::find_if(next_base.begin(), next_base.end(), [&](const auto& row) {
+        return row.command == 0 && row.text == text;
+    });
+    if (found == next_base.end()) return false;
+    found->children = std::move(children);
+    bool prefs_changed = false;
+    const auto fresh = BuildDisplay(prefs, next_base, prefs_changed);
+    CtxReconcileStats next_stats;
+    auto next_shown = ReconcileCtxDisplay(shown_, fresh, &next_stats);
+    // An open descendant can reject a structural replacement. Keep the base
+    // command mapping and committed display unchanged until it accepts.
+    if (!accept(next_shown)) return false;
+    base_items_ = std::move(next_base);
+    pending_stats_ = next_stats;
+    CommitDisplay(std::move(next_shown));
+    return true;
 }
 
 void ContextMenuController::CommitDisplay(std::vector<ui::FluentMenuItem> shown) {
@@ -699,6 +846,7 @@ bool ContextMenuController::CompleteStaticVerbs(const std::wstring& extension,
     static_pending_.erase(extension);
     static_seeded_.erase(extension);
     auto& cached = static_cache_[extension];
+    ReuseStaticIcons(verbs, cached);
     const bool same = SameStaticVerbs(cached, verbs);
     if (!same) cached = std::move(verbs);
     if (extension_ != extension) return false;
@@ -722,10 +870,14 @@ void ContextMenuController::InvalidateCaches() {
 
 bool ContextMenuController::SeedComItemsFromCache() {
     if (com_ready_ || !com_items_.empty()) return false;
-    const auto found = com_cache_.find(CacheKey(background_, extension_, paths_.size() > 1));
-    if (found == com_cache_.end() || found->second.rows.empty()) return false;
-    found->second.used = ++com_use_clock_;
-    com_items_ = found->second.rows;
+    const bool multi = paths_.size() > 1;
+    const auto found = com_cache_.find(CacheKey(background_, extension_, multi));
+    if (found != com_cache_.end() && !found->second.rows.empty()) {
+        found->second.used = ++com_use_clock_;
+        com_items_ = found->second.rows;
+    } else if (!BorrowComRows(multi)) {
+        return false;
+    }
     uint32_t next = kPredictedIdFirst;
     for (auto& item : com_items_) {
         item.text = ExpandCtxLabel(item.text, names_);
@@ -734,6 +886,44 @@ bool ContextMenuController::SeedComItemsFromCache() {
     }
     com_predicted_ = true;
     return true;
+}
+
+// A file type without a layout of its own (its first right-click, or its
+// registry keys changed): most of its rows come from the handlers every file
+// runs (* and AllFilesystemObjects: Send to, Share, cloud and chat tools), and
+// an extensionless file runs only those. Painting them makes the first menu of
+// a type grow by its own handlers' rows at most instead of by all of them; the
+// live answer replaces them like any predicted rows. Without an extensionless
+// layout, the rows every cached file type agrees on stand in.
+bool ContextMenuController::BorrowComRows(bool multi) {
+    if (background_ || extension_.size() < 2 || extension_[0] != L'.') return false;
+    if (const auto plain = com_cache_.find(CacheKey(false, std::wstring(), multi));
+        plain != com_cache_.end() && !plain->second.rows.empty()) {
+        com_items_ = plain->second.rows;
+        return true;
+    }
+    std::vector<const ComLayout*> types;
+    for (const auto& [key, layout] : com_cache_) {
+        if (key.size() < 2 || key[0] != L'.' || layout.rows.empty()) continue;
+        if ((key.find(L'|') != std::wstring::npos) != multi) continue;
+        types.push_back(&layout);
+    }
+    if (types.size() < 2) return false;
+    const ComLayout* newest = *std::max_element(
+        types.begin(), types.end(),
+        [](const ComLayout* a, const ComLayout* b) { return a->used < b->used; });
+    const auto same = [](const ops::ShellMenuItem& a, const ops::ShellMenuItem& b) {
+        return a.depth == b.depth && a.child == b.child && a.has_children == b.has_children &&
+               a.verb == b.verb && a.text == b.text && _wcsicmp(a.clsid.c_str(), b.clsid.c_str()) == 0;
+    };
+    for (const auto& row : newest->rows) {
+        const bool everywhere = std::all_of(types.begin(), types.end(), [&](const ComLayout* t) {
+            return std::any_of(t->rows.begin(), t->rows.end(),
+                               [&](const ops::ShellMenuItem& other) { return same(row, other); });
+        });
+        if (everywhere) com_items_.push_back(row);
+    }
+    return !com_items_.empty();
 }
 
 void ContextMenuController::StoreLayout(const std::wstring& key,
@@ -747,10 +937,11 @@ void ContextMenuController::StoreLayout(const std::wstring& key,
         rows = MergeCtxHandlerShards(stored.rows, rows, handlers);
         if (MergeCtxHandlerStats(stored.handlers, handlers)) com_layout_dirty_ = true;
     }
-    if (!SameLayoutRows(stored.rows, rows)) {
-        stored.rows = std::move(rows);
-        com_layout_dirty_ = true;
-    }
+    ReuseComIcons(rows, stored.rows);
+    if (!SameLayoutRows(stored.rows, rows)) com_layout_dirty_ = true;
+    // Pixels are intentionally absent from the disk layout, but a later live
+    // answer must refresh them in memory even when labels and structure match.
+    stored.rows = std::move(rows);
     stored.used = ++com_use_clock_;
 }
 
@@ -849,6 +1040,9 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
     result.accepted = true;
     result.partial = partial;
     result.cache_key = CacheKey(background_, extension_, paths_.size() > 1);
+    ReuseComIcons(items, com_items_);
+    if (const auto cached = com_cache_.find(result.cache_key); cached != com_cache_.end())
+        ReuseComIcons(items, cached->second.rows);
     // Without handler states a partial snapshot only holds the handlers that
     // finished inside the host's fast budget, so it must feed this session
     // and nothing else: caching an incomplete list made packaged verbs
@@ -856,8 +1050,11 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
     // With them the unfinished handlers keep their stored rows, so partial
     // answers are stored too.
     const bool shards = !handlers.empty();
+    // A registry change does not reinterpret commands already on screen, but
+    // its old session must not repopulate the invalidated cache or be reused.
+    const bool cache_current = query_cache_generation_ == cache_generation_;
     if (shards) {
-        StoreLayout(result.cache_key, items, names_, handlers);
+        if (cache_current) StoreLayout(result.cache_key, items, names_, handlers);
         if (partial) {
             com_items_ = MergeCtxHandlerShards(com_items_, items, handlers);
         } else {
@@ -871,7 +1068,7 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
         com_predicted_ = false;
     }
     if (!partial) {
-        if (!shards) StoreLayout(result.cache_key, com_items_, names_);
+        if (!shards && cache_current) StoreLayout(result.cache_key, com_items_, names_);
         com_ready_ = true;
         if (timing_active_ && menu_open_ && completed_at >= opened_at_) {
             timing_.live_after_open_ms = static_cast<int32_t>(std::min<uint64_t>(
@@ -910,6 +1107,14 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
         entry.text = verb.display;
         entry.mnemonic = verb.mnemonic;
         entry.verb = verb.verb;
+        entry.source_identity = L"registry:" + std::to_wstring(verb.reg_root) + L":" + ipc::ToLowerVerb(verb.reg_key);
+        if (ipc::ToLowerVerb(verb.verb) == L"__openwith" && !verb.app_path.empty()) {
+            // MRU shortcuts have no shell verb key. Scope their identity to
+            // file type and application, not the mutable label or MRU slot.
+            auto application = ipc::ToLowerVerb(verb.app_path);
+            std::replace(application.begin(), application.end(), L'/', L'\\');
+            entry.source_identity = L"openwith:" + ipc::ToLowerVerb(extension_) + L"|" + application;
+        }
         entry.icon = verb.icon_pixels;
         int ordinal = 0;
         auto children = [&](auto&& self, const std::vector<StaticVerb>& source) -> std::vector<ShellMenuEntry> {
@@ -921,6 +1126,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
                 row.text = child.display;
                 row.mnemonic = child.mnemonic;
                 row.verb = child.verb;
+                if (!child.reg_key.empty()) row.source_identity = L"registry:" + std::to_wstring(child.reg_root) + L":" + ipc::ToLowerVerb(child.reg_key);
                 row.icon = child.icon_pixels;
                 row.children = self(self, child.children);
                 if (multi && child.multi_select_model == 2) continue;
@@ -994,6 +1200,14 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
             prefs_changed = true;
         }
     }
+    // Discover the same compression grouping/ranking users actually receive,
+    // before applying their hides. Hidden descendants remain recoverable.
+    ContextMenuPrefs discovery;
+    discovery.persist = false;
+    const auto discovered = ApplyExplorerPrefs(discovery, entries);
+    std::vector<SeenMenuItem> catalog;
+    RecordMenuNodes(catalog, discovered);
+    prefs_changed = prefs.RecordSeenNodes(std::move(catalog)) || prefs_changed;
     return entries;
 }
 

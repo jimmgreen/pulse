@@ -60,6 +60,12 @@ struct Tab {
     std::unordered_set<int> selected;
     float scroll_y = 0.0f;
     float scroll_x = 0.0f;
+    // 滚动到最后一项之后: where a drag passing over this pane found the list
+    // (-1 = untouched) and in which folder. Moving on without dropping here
+    // glides it back (TickDropScrollReturn); a drop here keeps the place.
+    float drop_scroll_home = -1.0f;
+    std::wstring drop_scroll_home_path;
+    bool drop_scroll_returning = false;
     ui::ViewMode view_mode = ui::ViewMode::Details;
     // Icon size the header's icon button and the first Ctrl+wheel step out of
     // Details return to (session only; ui::IsZoomIconMode values).
@@ -634,11 +640,13 @@ public:
 
     // Collect rich items (files or snippets) into a specific shelf (0 = active).
     size_t CollectRichToShelf(uint64_t shelf_id, const std::vector<TrayItem>& proto_items,
-                              bool move_intent, size_t* out_skipped = nullptr);
+                              bool move_intent, size_t* out_skipped = nullptr, bool prepend = false);
     // Move existing items from `from_shelf_id` into `to_shelf_id` ("换架").
     size_t MoveItemsBetweenShelves(uint64_t from_shelf_id, uint64_t to_shelf_id,
                                    const std::vector<uint64_t>& item_ids);
     bool RemoveItemById(uint64_t item_id, std::wstring* out_owned_snippet = nullptr);
+    // Exact, non-active-shelf reference removal; never removes content backing files.
+    bool RemoveReferenceByIdentity(uint64_t shelf_id, uint64_t batch_id, uint64_t item_id, const std::wstring& path);
     void AllReferencedSnippetPaths(std::vector<std::wstring>& out) const;
 
     // Collect selected full paths into the active shelf. move_intent = true for Ctrl+X.

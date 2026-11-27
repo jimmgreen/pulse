@@ -73,7 +73,7 @@ const char* RunActionsDescription() {
         "|zh-CN|zh-TW|en-US, menu_acrylic, row_height compact|standard|roomy, click_to_open double|single, name_highlig"
         "ht hover|always, hover_select, item_checkboxes, blank_double_click nothing|back|up, show_hidden, show_protecte"
         "d, folders_first top|follow|mixed, smart_dates, zebra_rows, size_bars, tag_name_color, selection_outline, thum"
-        "bnail_app_badges, alias_mark, tree_sticky, mtime_marks off|dots|bars|text, mtime_range today|3|7|30, mtime_dim_older, mtime"
+        "bnail_app_badges, alias_mark, tree_sticky, scroll_past_end, mtime_marks off|dots|bars|text, mtime_range today|3|7|30, mtime_dim_older, mtime"
         "_bold_today, mtime_folders, mtime_other_views, mtime_flash, onedrive_status, svn_status, startup_open last_tab"
         "s|default_location, new_tab_open current|default_location, external_open smart|tab|window, vertical_tabs, pinn"
         "ed_tab_names, double_click_closes_tab, close_window_with_last_tab, launch_at_signin (Windows), start_in_tray, "

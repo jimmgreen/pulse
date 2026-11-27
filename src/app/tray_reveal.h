@@ -7,8 +7,27 @@
 // with "restore last tabs" it comes back unchanged. Pinned tabs stay.
 #pragma once
 #include <string>
+#include <windows.h>
 
 namespace pulse {
+namespace app {
+// Win32 visibility only, not a first-paint or current-virtual-desktop guarantee.
+struct WindowRevealState {
+    bool valid = false, visible = false, minimized = false, foreground = false;
+    // Foreground activation can be denied by Windows; it is not a visibility failure.
+    bool Restored() const noexcept { return valid && visible && !minimized; }
+};
+inline WindowRevealState InspectWindowRevealState(HWND window) noexcept {
+    WindowRevealState state;
+    state.valid = window && IsWindow(window);
+    if (state.valid) {
+        state.visible = IsWindowVisible(window) != FALSE;
+        state.minimized = IsIconic(window) != FALSE;
+        state.foreground = GetForegroundWindow() == window;
+    }
+    return state;
+}
+} // namespace app
 struct AppState;
 
 // The close button / WM_CLOSE path: hide to the tray and remember why.

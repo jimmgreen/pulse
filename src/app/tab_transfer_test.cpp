@@ -687,18 +687,27 @@ bool RunTabTransferTest() {
                           "the two flyouts come right before 复制路径")) {
                     const ui::FluentMenuItem& copy = menu[at - 2];
                     const ui::FluentMenuItem& move = menu[at - 1];
-                    check(copy.command == CmdNone && copy.enabled && copy.text == l10n::Get(l10n::StringId::CopyToWindow) &&
+                    check(copy.command == CmdNone && copy.enabled && copy.text == l10n::Get(l10n::StringId::TransferCopyTo) &&
                               copy.children.size() == 2 && copy.children[0].command == CmdCopyToWindowBase &&
                               copy.children[1].command == CmdCopyToWindowBase + 1,
-                          "复制到窗口 lists one row per folder");
+                          "复制到 lists one row per folder");
                     check(copy.children[0].text == L"c" && copy.children[0].shortcut == folder_c &&
                               copy.children[1].text == L"D:\\" && copy.children[1].shortcut == L"D:\\" &&
                               copy.children[0].tooltip == folder_c,
                           "a row shows the folder name and its full path (a drive by its root)");
-                    check(move.text == l10n::Get(l10n::StringId::MoveToWindow) && !move.enabled &&
+                    check(move.text == l10n::Get(l10n::StringId::TransferMoveTo) && !move.enabled &&
                               move.children.size() == 2 && move.children[1].command == CmdMoveToWindowBase + 1,
-                          "移动到窗口 is there but disabled when the selection cannot move");
+                          "移动到 is there but disabled when the selection cannot move");
                 }
+                auto panes_menu = BuildItemMenu(false, L"");
+                AppendWindowTransferCommands(panes_menu, {folder_b, folder_c}, true, 1, true);
+                const auto copy_to = std::find_if(panes_menu.begin(), panes_menu.end(), [](const ui::FluentMenuItem& row) {
+                    return row.children.size() == 3 && row.children[0].command == CmdCopyToWindowBase;
+                });
+                check(copy_to != panes_menu.end() && copy_to->children[0].separator_after &&
+                          copy_to->children[1].separator_after && copy_to->children[2].command == CmdCopyToPicked &&
+                          copy_to->children[2].text == l10n::Get(l10n::StringId::QuickAccessChooseFolder),
+                      "复制到: the other pane, a rule, the other window, a rule, 选择文件夹…");
                 core->windows.Remove(third->hwnd);
                 DestroyWindow(third->hwnd);
                 third->hwnd = nullptr;

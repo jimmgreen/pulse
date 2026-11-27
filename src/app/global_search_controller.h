@@ -1,12 +1,13 @@
 #pragma once
 #include <string>
+#include <windows.h>
 namespace pulse {
 struct AppState;
 struct GlobalSearchEvents;
 GlobalSearchEvents MakeGlobalSearchEvents(AppState& s);
 void ApplyGlobalSearchSettings(AppState& s);
 // double_ctrl: summoned by two Ctrl taps rather than the registered hotkey.
-void ToggleGlobalSearch(AppState& s, bool double_ctrl = false);
+void ToggleGlobalSearch(AppState& s, bool double_ctrl = false, WPARAM trigger_token = 0);
 // Opens quick search with text typed elsewhere (the desktop pack). Independent of the summon hotkey;
 // false when search is turned off or the window cannot open.
 bool ShowGlobalSearchWithQuery(AppState& s, const std::wstring& query);

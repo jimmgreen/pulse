@@ -5,6 +5,7 @@
 // writes, so items disabled by either tool show up correctly in the other.
 
 #include <windows.h>
+#include <cstdint>
 
 #include <string>
 #include <string_view>
@@ -30,6 +31,9 @@ struct Roots {
     std::wstring machine_trash = L"Software\\Pulse\\SystemContextMenu\\Deleted";
     bool resolve_strings = true; // SHLoadIndirectString / CLSID names
     bool check_owner = true;     // TrustedInstaller lookups (slow on big scans)
+    // Not under Classes. Tests must redirect these too when exercising cascades.
+    std::wstring user_command_store = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CommandStore\\shell";
+    std::wstring machine_command_store = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CommandStore\\shell";
 };
 
 // Static verbs accept Position = Top / Bottom; Explorer orders everything
@@ -74,6 +78,15 @@ struct Item {
     bool trusted_installer = false;
     bool missing = false;          // command/handler points at a file that is gone
     Source source = Source::Registry;
+    // Registry occurrence identity, not a Pulse live-command preference key.
+    // A shared CommandStore item can occur below several different parents.
+    std::wstring tree_id;
+    std::wstring parent_id;
+    std::wstring registry_path; // actual path below the reported root
+    uint16_t depth = 0;
+    bool has_children = false;
+    bool children_incomplete = false; // cycle, unresolved reference or scan limit
+    bool registry_read_only = false; // descendants are inspect-only in Windows
 };
 
 std::vector<Item> Enumerate(const Roots& roots, const Scene& scene);

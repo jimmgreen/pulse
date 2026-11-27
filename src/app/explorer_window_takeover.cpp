@@ -1,5 +1,7 @@
 // explorer_window_takeover.cpp — see explorer_window_takeover.h.
 #include "explorer_window_takeover.h"
+#include "../common/native_browse_intent.h"
+#include "native_explorer.h"
 #include "explorer_source_lifetime.h"
 #include "../common/runtime_log.h"
 #include "explorer_source_scope.h"
@@ -32,7 +34,7 @@ namespace pulse::app {
 
 using Microsoft::WRL::ComPtr;
 
-struct ExplorerWindowTakeover::Shared {
+struct ExplorerWindowTakeover::Shared : std::enable_shared_from_this<ExplorerWindowTakeover::Shared> {
     std::shared_ptr<const ExplorerSourceScope> scope;
     std::shared_ptr<ExplorerSubmissionPort> port;
     std::atomic<bool> stopping{false};
@@ -46,6 +48,7 @@ namespace {
 
 constexpr UINT kStopMessage = WM_APP + 1;   // thread messages
 constexpr UINT kScanMessage = WM_APP + 2;
+constexpr UINT kPollMessage = WM_APP + 3;
 constexpr UINT kPollMs = 50;
 constexpr UINT kDiscoveryMs = 1000;
 // A new Explorer window stays invisible at most this long while undecided or
@@ -197,6 +200,11 @@ public:
     Watcher& operator=(const Watcher&) = delete;
 
     bool Start() {
+        const DWORD retention_error = native_intents_.Start();
+        if (retention_error) {
+            diagnostics::runtime::Event("native_retention_start_failed", {{"error", retention_error}});
+            return false;
+        }
         TraceExplorerScope(shared_.scope, "start-shellwindows");
         HRESULT hr = CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&windows_));
         TraceExplorerScope(shared_.scope, "start-shellwindows-result", hr);
@@ -270,6 +278,7 @@ public:
     }
 
     void Scan(bool keep_new_windows = false) {
+        const size_t previous_candidates = candidates_.size();
         TraceExplorerScope(shared_.scope, "scan-enter");
         for (auto it = known_.begin(); it != known_.end();) it = IsWindow(*it) ? std::next(it) : known_.erase(it);
         std::erase_if(shift_windows_, [](const auto& entry) { return !entry.second->Matches(); });
@@ -285,6 +294,8 @@ public:
                     {"window", reinterpret_cast<uintptr_t>(hwnd)}, {"source_pid", pid}, {"reason", 3}});
                 TraceExplorerScope(shared_.scope, "scan-reject-process", E_ACCESSDENIED); return;
             }
+            if (native_explorer::IsExplicitNativeWindow(hwnd)) return;
+            if (KeepNative(hwnd)) return;
             // Shift held: File Explorer is wanted this time.
             const auto retained = shift_windows_.find(hwnd);
             if (keep_new_windows || (GetAsyncKeyState(VK_SHIFT) & 0x8000) ||
@@ -334,6 +345,10 @@ public:
         }
         ReconcileVeils();
         UpdateTimer();
+        // Start the stability observation now, rather than after the first
+        // timer period. COM stays outside registration/WinEvent callbacks.
+        if (candidates_.size() > previous_candidates)
+            PostThreadMessageW(GetCurrentThreadId(), kPollMessage, 0, 0);
     }
 
     void Poll() {
@@ -366,6 +381,11 @@ public:
                 if (it->submitted.handoff) it->submitted.handoff->Cancel();
                 it = candidates_.erase(it);
                 continue;
+            }
+            if (native_explorer::IsExplicitNativeWindow(it->hwnd)) {
+                if (it->submitted.handoff) it->submitted.handoff->Cancel();
+                UnveilExplorerWindow(it->hwnd); veiled_.erase(it->hwnd);
+                it = candidates_.erase(it); continue;
             }
             if (it->submitted.handoff) {
                 const auto handoff = it->submitted.handoff;
@@ -403,6 +423,11 @@ public:
                 it = candidates_.erase(it);
                 continue;
             }
+            if (native_explorer::IsExplicitNativeWindow(it->hwnd)) {
+                if (it->submitted.handoff) it->submitted.handoff->Cancel();
+                UnveilExplorerWindow(it->hwnd); veiled_.erase(it->hwnd);
+                it = candidates_.erase(it); continue;
+            }
             if (it->submitted.handoff) {
                 const auto handoff = it->submitted.handoff;
                 if (shared_.stopping || GetTickCount64() >= handoff->deadline_tick)
@@ -421,6 +446,21 @@ public:
             ExplorerWindowProbe probe;
             ExplorerTakeoverRequest request;
             Read(*it, probe, request);
+            if (KeepNative(it->hwnd, request)) {
+                if (it->submitted.handoff) it->submitted.handoff->Cancel();
+                UnveilExplorerWindow(it->hwnd); veiled_.erase(it->hwnd);
+                it = candidates_.erase(it); continue;
+            }
+            if (WaitNative(it->hwnd, request.folder, request.selection_read)) {
+                UnveilExplorerWindow(it->hwnd); veiled_.erase(it->hwnd);
+                ++it; continue;
+            }
+            if (native_explorer::RetainRequestedWindow(it->hwnd, request.folder, request.names, request.selection_read)) {
+                UnveilExplorerWindow(it->hwnd); veiled_.erase(it->hwnd);
+                it = candidates_.erase(it); continue;
+            }
+            // Explorer can report Home or an empty selection during /select.
+            if (native_explorer::ShouldWaitForRequest(it->hwnd, request.folder)) { ++it; continue; }
             const ULONGLONG now = GetTickCount64();
             probe.age_ms = static_cast<unsigned>(now - it->registered_at);
             probe.selection_read = request.selection_read;
@@ -469,9 +509,15 @@ private:
         auto* watcher = event_watcher_;
         if (!watcher || !hwnd || object != OBJID_WINDOW || child != CHILDID_SELF) return;
         if (event == EVENT_OBJECT_DESTROY) {
+            watcher->native_intents_.ForgetWindow(hwnd);
             watcher->shift_windows_.erase(hwnd);
             watcher->known_.erase(hwnd);
             watcher->veiled_.erase(hwnd);
+            // The callback can run during a COM call. Defer confirmation to
+            // the message loop; Poll still verifies the original lifetime.
+            if (std::any_of(watcher->candidates_.begin(), watcher->candidates_.end(),
+                    [hwnd](const Candidate& candidate) { return candidate.hwnd == hwnd; }))
+                PostThreadMessageW(GetCurrentThreadId(), kPollMessage, 0, 0);
             return;
         }
         // Hide a new window before its first frame; the takeover decides next.
@@ -501,11 +547,13 @@ private:
     // Out-of-context events arrive asynchronously, but Explorer creates the
     // frame well before it first shows it; the style change is synchronous.
     void VeilNewWindow(HWND hwnd) {
+        if (native_explorer::ShouldDelayVeil(hwnd)) return;
         if (shared_.scope || shared_.stopping || veiled_.contains(hwnd) || known_.contains(hwnd) ||
             !HasClass(hwnd, L"CabinetWClass") || GetAncestor(hwnd, GA_ROOT) != hwnd) return;
         DWORD pid = 0;
         GetWindowThreadProcessId(hwnd, &pid);
         if (!pid || pid == GetCurrentProcessId() || !IsExplorerProcess(pid)) return;
+        if (WaitNative(hwnd)) return;
         // Claim the entry before the cross-thread call can dispatch more events.
         veiled_[hwnd] = GetTickCount64();
         const bool was_visible = IsWindowVisible(hwnd) != FALSE;
@@ -730,10 +778,23 @@ private:
     }
 
     SourceCloseStep FinishClose(Candidate& candidate) {
+        if (KeepNative(candidate.hwnd, candidate.submitted) ||
+            WaitNative(candidate.hwnd, candidate.submitted.folder, candidate.submitted.selection_read)) {
+            candidate.submitted.handoff->Cancel();
+            UnveilExplorerWindow(candidate.hwnd); veiled_.erase(candidate.hwnd);
+            return SourceCloseStep::Abort;
+        }
+        if (native_explorer::IsExplicitNativeWindow(candidate.hwnd)) {
+            candidate.submitted.handoff->Cancel(); return SourceCloseStep::Abort;
+        }
         // Re-read immediately before claiming close: preparation may have
         // completed long after admission, and COM calls can pump messages.
         ExplorerTakeoverRequest current;
+        const ULONGLONG probe_started = GetTickCount64();
         const auto step = DecideSourceClose(CloseProbe(candidate, current));
+        diagnostics::runtime::Event("explorer_close_probe", {
+            {"request_id", candidate.submitted.handoff->diagnostics.id},
+            {"elapsed_ms", GetTickCount64() - probe_started}, {"decision", static_cast<uint64_t>(step)}});
         if (step == SourceCloseStep::Wait) return step;
         if (step != SourceCloseStep::Close) {
             if (step == SourceCloseStep::SelectAndKeep)
@@ -748,7 +809,7 @@ private:
             DWORD pid = 0;
             const DWORD tid = GetWindowThreadProcessId(candidate.hwnd, &pid);
             const int tabs = CountTabs(GetAncestor(candidate.hwnd, GA_ROOT));
-            if (shared_.stopping || !candidate.identity->Matches() ||
+            if (shared_.stopping || native_explorer::IsExplicitNativeWindow(candidate.hwnd) || !candidate.identity->Matches() ||
                 pid != candidate.process_id || tid != candidate.thread_id ||
                 (tabs != 1 && (tabs != 0 || IsWindows11())) ||
                 !candidate.submitted.handoff->ClaimClose(GetTickCount64())) {
@@ -765,6 +826,15 @@ private:
             }
             TraceExplorerScope(shared_.scope, "handoff-close-authorized", S_OK);
         }
+        if (native_explorer::IsExplicitNativeWindow(candidate.hwnd)) {
+            candidate.submitted.handoff->FailClose(); return SourceCloseStep::Abort;
+        }
+        if (KeepNative(candidate.hwnd) ||
+            WaitNative(candidate.hwnd, candidate.submitted.folder, candidate.submitted.selection_read)) {
+            candidate.submitted.handoff->FailClose();
+            UnveilExplorerWindow(candidate.hwnd); veiled_.erase(candidate.hwnd);
+            return SourceCloseStep::Abort;
+        }
         const HRESULT hr = candidate.browser->Quit();
         candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::QuitResult, static_cast<uint32_t>(hr));
         if (shared_.scope) shared_.scope->evidence->quit = SUCCEEDED(hr);
@@ -779,8 +849,16 @@ private:
     }
 
     bool Take(Candidate& candidate, ExplorerTakeoverRequest request) {
-        if (!request.selection_read || shared_.stopping) return false;
-        request.handoff = std::make_shared<ExplorerHandoff>(GetTickCount64() + 10000);
+        if (KeepNative(candidate.hwnd, request) || WaitNative(candidate.hwnd, request.folder, request.selection_read)) return false;
+        if (!request.selection_read || shared_.stopping || native_explorer::IsExplicitNativeWindow(candidate.hwnd) ||
+            native_explorer::ShouldWaitForRequest(candidate.hwnd, request.folder)) return false;
+        const std::weak_ptr<ExplorerWindowTakeover::Shared> weak = shared_.weak_from_this();
+        request.handoff = std::make_shared<ExplorerHandoff>(GetTickCount64() + 10000, [weak] {
+            const auto shared = weak.lock();
+            if (!shared || shared->stopping) return;
+            // No watcher/COM capture: requests can outlive the worker's Stop.
+            PostThreadMessageW(shared->thread_id, kPollMessage, 0, 0);
+        });
         candidate.submitted = request;
         diagnostics::runtime::Event("explorer_candidate_link", {{"candidate_id", candidate.diagnostic_id},
             {"window", reinterpret_cast<uintptr_t>(candidate.hwnd)}, {"source_pid", candidate.process_id},
@@ -822,6 +900,33 @@ private:
         }
     }
 
+    bool KeepNative(HWND window) {
+        const auto query = native_intents_.IsRetained(window);
+        if (query.state == native_browse_intent::State::Unavailable) {
+            diagnostics::runtime::Event("native_retention_unavailable", {{"window", reinterpret_cast<uintptr_t>(window)}, {"error", query.error}});
+            return true;
+        }
+        return query.state == native_browse_intent::State::Retained;
+    }
+    bool KeepNative(HWND window, const ExplorerTakeoverRequest& request) {
+        const auto query = native_intents_.MatchAndRetain(window, request.folder, request.names, request.selection_read);
+        if (query.state == native_browse_intent::State::Unavailable) {
+            diagnostics::runtime::Event("native_retention_unavailable", {{"window", reinterpret_cast<uintptr_t>(window)}, {"error", query.error}});
+            return true;
+        }
+        if (query.state == native_browse_intent::State::Retained) {
+            diagnostics::runtime::Event("native_fallback_retained", {{"window", reinterpret_cast<uintptr_t>(window)}, {"error", query.error}});
+            return true;
+        }
+        return false;
+    }
+    bool WaitNative(HWND window, const std::wstring& folder = {}, bool ready = false) {
+        const auto query = native_intents_.ShouldWait(window, folder, ready);
+        // Uncertain ledger state never authorizes hiding or closing a window.
+        return query.state != native_browse_intent::State::None;
+    }
+
+    native_browse_intent::Observer native_intents_;
     ExplorerWindowTakeover::Shared& shared_;
     ComPtr<IShellWindows> windows_;
     ComPtr<IConnectionPoint> point_;
@@ -879,6 +984,7 @@ DWORD WINAPI TakeoverThread(void* param) {
                     diagnostics::runtime::Event("explorer_watcher_ready", {{"attempt", attempt}});
                     while (!shared->stopping && GetMessageW(&msg, nullptr, 0, 0) > 0) {
                         if (!msg.hwnd && msg.message == kScanMessage) watcher.Scan(msg.wParam != 0);
+                        else if (!msg.hwnd && msg.message == kPollMessage) watcher.Poll();
                         else if (!msg.hwnd && msg.message == WM_TIMER) watcher.Timer(static_cast<UINT_PTR>(msg.wParam));
                         else if (msg.hwnd || msg.message != kStopMessage) {
                             TranslateMessage(&msg);

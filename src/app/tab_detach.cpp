@@ -1,6 +1,7 @@
 // tab_detach.cpp - Multi-window M6a: drags a tab off the strip into its own
 // window (plan §8.2).
 #include "tab_detach.h"
+#include "animation_integration_hooks.h"
 #include "../ui/ui_renderer.h"
 
 #include "app_internal.h"
@@ -24,6 +25,14 @@
 
 namespace pulse {
 namespace {
+const AnimationIntegrationDragInput* g_integration_input = nullptr;
+const AnimationIntegrationDragInput* IntegrationInput(const AppState& s) {
+    return s.isolatedTest ? g_integration_input : nullptr;
+}
+void DragCursor(const AppState& s, POINT* point) {
+    if (const auto* input = IntegrationInput(s)) *point = input->cursor();
+    else GetCursorPos(point);
+}
 // Esc inside the system move loop: the loop reads the key itself, but a
 // thread keyboard hook still sees it. Only one move loop runs at a time.
 HHOOK g_escape_hook = nullptr;
@@ -427,7 +436,8 @@ LRESULT CALLBACK EscapeHook(int code, WPARAM wparam, LPARAM lparam) {
     return CallNextHookEx(g_escape_hook, code, wparam, lparam);
 }
 
-bool PrimaryButtonDown() {
+bool PrimaryButtonDown(const AppState& s) {
+    if (const auto* input = IntegrationInput(s)) return input->primary_down();
     const int button = GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON;
     return (GetAsyncKeyState(button) & 0x8000) != 0;
 }
@@ -469,7 +479,7 @@ HWND OpenDetachedWindow(AppState& s, size_t index, POINT grab) {
         offset = POINT{0, 0};
     }
     POINT cursor{};
-    GetCursorPos(&cursor);
+    DragCursor(s, &cursor);
 
     WindowInit init;
     if (const app::Tab* view = s.window_tabs.items[index]->ActiveFolder()) init.path = view->current_path;
@@ -492,6 +502,14 @@ bool FirstTabRect(AppState& s, const ui::WindowViewModel& vm, D2D1_RECT_F* rect)
     return false;
 }
 }  // namespace
+
+bool SetAnimationIntegrationDragInput(AppState& s, const AnimationIntegrationDragInput* input) {
+    if (!s.isolatedTest || !GetEnvironmentVariableW(L"PULSE_TEST_ANIMATION_INTEGRATION", nullptr, 0) ||
+        !GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) return false;
+    if (input && (!input->cursor || !input->primary_down || !input->move_loop)) return false;
+    g_integration_input = input;
+    return true;
+}
 
 bool TabDetachDistanceReached(POINT press, POINT now, float scale) {
     const float limit = kTabDetachDistanceDip * (scale > 0.0f ? scale : 1.0f);
@@ -524,7 +542,7 @@ int TabDropIndex(const TabSpan* spans, size_t span_count, size_t count, POINT pt
 void TrackTabDrop(AppState& s) {
     if (g_moving != s.hwnd) return;
     POINT cursor{};
-    GetCursorPos(&cursor);
+    DragCursor(s, &cursor);
     // Content drops are for a dragged tab, never for a window moved by its
     // title bar (M6c merges at the strip only).
     const bool tab_drag = !g_caption_move && s.window_tabs.items.size() == 1;
@@ -670,9 +688,9 @@ void RunDetachedTabMove(AppState& s, HWND from, size_t index) {
     PaneBack pane_back = std::move(g_pane_back);
     g_pane_back = PaneBack{};
     // Released before the loop could start: the window stays where it opened.
-    if (!PrimaryButtonDown() || g_escape_hook) return;
+    if (!PrimaryButtonDown(s) || g_escape_hook) return;
     POINT cursor{};
-    GetCursorPos(&cursor);
+    DragCursor(s, &cursor);
     if (grab.hwnd == hwnd && !IsZoomed(hwnd)) {
         SetWindowPos(hwnd, nullptr, cursor.x - grab.offset.x, cursor.y - grab.offset.y, 0, 0,
                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -691,7 +709,9 @@ void RunDetachedTabMove(AppState& s, HWND from, size_t index) {
     // dispatches nothing, not even WM_PAINT, so paint the drop right away.
     TrackTabDrop(s);
     PaintDropNow();
-    if (from) {
+    if (const auto* input = IntegrationInput(s)) {
+        g_escape_pressed = input->move_loop(s, from);
+    } else if (from) {
         SendMessageW(hwnd, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, MAKELPARAM(cursor.x, cursor.y));
     } else {
         // The only tab drags the window exactly as its title bar would,

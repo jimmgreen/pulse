@@ -1,4 +1,5 @@
 #include "extension_store_management_ui.h"
+#include "extension_developer_mode.h"
 #include "extension_store_permissions.h"
 #include "extension_store_review.h"
 #include "app_state.h"
@@ -156,7 +157,9 @@ void ExtensionManagementUi::Fill(AppState& s, ui::ExtensionStoreView& view, bool
                                                                    : Id::StoreUnsignedNeedsDevModeRollback);
         }
         const bool ready = !view.installed_busy && !view.installed_loading;
-        item.can_enable = ready && !entry.enabled && entry.error.empty();
+        const bool can_enable_unsigned = unsigned_local &&
+            (snapshot.installed->policy_allows_unsigned || DeveloperModeSetting(impl_->root));
+        item.can_enable = ready && !entry.enabled && (entry.error.empty() || can_enable_unsigned);
         item.can_disable = ready && entry.enabled;
         item.can_uninstall = ready;
         // An unsigned (developer-mode) revision can always be rolled back, e.g. to the official build it replaced.
@@ -179,10 +182,13 @@ bool ExtensionManagementUi::Action(AppState& s, int action, bool installation_ac
     const auto snapshot = impl_->service.GetSnapshot(); const auto index = static_cast<size_t>(action - base);
     if (installation_active || Active() || snapshot.phase == Phase::Loading || snapshot.generation != s.store_manage_view_generation || !snapshot.installed || index >= snapshot.installed->entries.size()) return true;
     const auto& entry = snapshot.installed->entries[index];
-    if ((change == store::StoreChangeAction::Enable && (entry.enabled || !entry.error.empty())) ||
+    const bool unsigned_local = entry.publisher_id.empty() && entry.error == "store_open:2";
+    const bool can_enable_unsigned = unsigned_local &&
+        (snapshot.installed->policy_allows_unsigned || DeveloperModeSetting(impl_->root));
+    if ((change == store::StoreChangeAction::Enable && (entry.enabled || !(entry.error.empty() || can_enable_unsigned))) ||
         (change == store::StoreChangeAction::Disable && !entry.enabled) ||
         (change == store::StoreChangeAction::Rollback && (entry.previous_revision.empty() ||
-            !(entry.error.empty() || (entry.publisher_id.empty() && entry.error == "store_open:2"))))) return true;
+            !(entry.error.empty() || unsigned_local)))) return true;
     impl_->owner = s.hwnd; impl_->owner_state = &s; impl_->missing_consent = false;
     impl_->draft.clear(); impl_->draft_generation = 0;
     impl_->service.PrepareChange(impl_->root, entry.id, change);

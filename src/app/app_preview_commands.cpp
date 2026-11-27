@@ -153,6 +153,7 @@ ui::QuickPreviewOptions QuickPreviewOptionsFromPrefs(const app::AppPrefs& prefs)
     options.prefer_system = prefs.preview_prefer_system;
     options.volume_percent = std::clamp(prefs.preview_volume_percent, 0, 100);
     options.muted = prefs.preview_muted;
+    options.immersive = prefs.preview_immersive;
     return options;
 }
 
@@ -171,6 +172,7 @@ static void SaveQuickPreviewOptions(AppState& s, ui::QuickPreviewWindow& preview
     prefs.preview_space_closes = options.space_closes;
     prefs.preview_loop = app::NormalizePreviewLoop(options.loop);
     prefs.preview_key_hint_left = std::clamp(options.key_hint_left, 0, 3);
+    prefs.preview_immersive = options.immersive;
     prefs.Save();
     InvalidateRect(s.hwnd, nullptr, FALSE);   // Settings may be showing these
 }

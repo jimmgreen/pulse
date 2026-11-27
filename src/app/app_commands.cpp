@@ -70,6 +70,7 @@
 #include "ai_assistant_chat.h"
 #include "dup_finder.h"
 #include "system_ctx_registry.h"
+#include "new_menu_state.h"
 #include "shell_verbs.h"
 #include "toolbar_apps.h"
 #include "toolbar_tools.h"
@@ -490,23 +491,8 @@ std::vector<app::TagAdsUpdate> BuildTagAdsUpdates(
     std::vector<app::TagAdsUpdate> updates;
     std::unordered_set<std::wstring> seen;
     std::vector<std::wstring> candidates = paths;
-    if (include_descendants) {
-        auto below = [](const std::wstring& candidate, const std::wstring& root) {
-            if (_wcsicmp(candidate.c_str(), root.c_str()) == 0) return true;
-            if (candidate.size() <= root.size() ||
-                _wcsnicmp(candidate.c_str(), root.c_str(), root.size()) != 0) return false;
-            return root.ends_with(L"\\") || candidate[root.size()] == L'\\' ||
-                   candidate[root.size()] == L'/';
-        };
-        for (const auto& tag : places.tags) {
-            for (const auto& assigned : tag.paths) {
-                if (std::any_of(paths.begin(), paths.end(),
-                                [&](const std::wstring& root) { return below(assigned, root); })) {
-                    candidates.push_back(assigned);
-                }
-            }
-        }
-    }
+    if (include_descendants)
+        for (auto& assigned : places.TaggedPathsUnder(paths)) candidates.push_back(std::move(assigned));
     updates.reserve(candidates.size());
     for (const auto& path : candidates) {
         const std::wstring key = TagDiscoveryKey(path);
@@ -1680,6 +1666,31 @@ bool AppendNativeCommandRows(AppState& state, std::vector<ui::FluentMenuItem>& i
     return waiting_for_seven_zip;
 }
 
+#ifdef PULSE_WITH_TEST_HOOKS
+namespace {
+std::function<DWORD(const app::native_explorer::Request&)> g_native_explorer_dispatch_test_sink;
+}
+void SetNativeExplorerDispatchTestSink(std::function<DWORD(const app::native_explorer::Request&)> sink) {
+    g_native_explorer_dispatch_test_sink = std::move(sink);
+}
+#endif
+
+namespace {
+std::optional<app::native_explorer::Request> NativeExplorerRequestForTab(const app::Tab* tab, int command) {
+    if (!tab || IsRecycleTab(tab) || IsDeviceTab(tab) || IsVfsFolder(tab->current_path)) return std::nullopt;
+    if (command == app::CmdOpenNativeExplorerHere)
+        return app::NativeExplorerMenuRequest(command, tab->current_path, {});
+    if (!tab->snapshot || tab->SelectedCount() != 1 ||
+        app::RecycleSelectionOf(*tab) != app::RecycleSelection::None) return std::nullopt;
+    const auto selected = tab->SelectedIndices();
+    if (selected.size() != 1 || selected.front() < 0 ||
+        static_cast<size_t>(selected.front()) >= tab->EntryCount()) return std::nullopt;
+    const auto entry = tab->EntryAt(static_cast<size_t>(selected.front()));
+    return app::NativeExplorerMenuRequest(command, tab->current_path,
+        {{EntryFullPath(*tab, selected.front()), entry.is_dir}});
+}
+}
+
 void DispatchMenuCommand(AppState& s, int cmd) {
     if (cmd == 35004) { RestoreToolbarDrag(s); return; }
     if (cmd == 35010) { ShowSortDropdown(s); return; }
@@ -1712,7 +1723,7 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
     }
-    const bool needs_files=cmd==app::CmdProperties || cmd==app::CmdOpenPath || cmd==app::CmdOpenInNewTab || cmd==app::CmdRename ||
+    const bool needs_files=cmd==app::CmdProperties || cmd==app::CmdOpenPath || cmd==app::CmdOpenInNewTab || cmd==app::CmdOpenNativeExplorer || cmd==app::CmdRename ||
         cmd==app::CmdGroupIntoFolder || cmd==app::CmdDissolveFolder || cmd==app::CmdSetAlias;
     if(needs_files && DeferContentSelection(s,[cmd](AppState& v){DispatchMenuCommand(v,cmd);})) return;
     if (cmd >= app::CmdViewBase && cmd < app::CmdViewBase + 8) {
@@ -1805,6 +1816,43 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         break;
     }
     case app::CmdCompareDiffOnly: ToggleCompareDiffOnly(s); break;
+    case app::CmdOpenNativeExplorer:
+    case app::CmdOpenNativeExplorerHere: {
+        const auto request = NativeExplorerRequestForTab(ActiveTab(s), cmd);
+        DWORD error = ERROR_INVALID_PARAMETER;
+        if (request) {
+#ifdef PULSE_WITH_TEST_HOOKS
+            if (s.isolatedTest && g_native_explorer_dispatch_test_sink)
+                error = g_native_explorer_dispatch_test_sink(*request);
+            else
+#endif
+                error = app::native_explorer::OpenAsync(*request, s.hwnd);
+        }
+        if (error != ERROR_SUCCESS)
+            s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
+                l10n::Get(l10n::StringId::OpenNativeExplorerFailed), {}, {}, {}, 4500);
+        break;
+    }
+    case app::CmdOpenInOtherPane: {
+        app::Tab* tab = ActiveTab(s);
+        if (!tab || !tab->snapshot || tab->SelectedCount() != 1) break;
+        const auto selected = tab->SelectedIndices();
+        if (selected.empty() || selected[0] < 0 || selected[0] >= static_cast<int>(tab->EntryCount()) ||
+            !tab->EntryAt(static_cast<size_t>(selected[0])).is_dir) break;
+        OpenInOtherPane(s, EntryFullPath(*tab, selected[0]));
+        break;
+    }
+    case app::CmdOpenInOtherPaneHere:
+        if (const app::Tab* tab = ActiveTab(s)) OpenInOtherPane(s, tab->current_path);
+        break;
+    case app::CmdCopyToPicked:
+    case app::CmdMoveToPicked: {
+        std::wstring picked;
+        if (PickFolder(s, picked, l10n::Get(l10n::StringId::QuickAccessChooseFolder).c_str(), L"transfer") &&
+            !picked.empty())
+            TransferSelectionToFolder(s, picked, cmd == app::CmdMoveToPicked);
+        break;
+    }
     case app::CmdOpenInNewTab: {
         app::Tab* tab = ActiveTab(s);
         if (!tab || !tab->snapshot) break;
@@ -2167,7 +2215,7 @@ void AdaptItemMenu(AppState& s, std::vector<ui::FluentMenuItem>& items, const ap
     if (caps.kind == app::SelectionKind::Drives && tab) {
         EraseCommand(items, app::CmdPinNetwork);
         if (caps.all_locked) {
-            for (int command : {app::CmdOpenInNewTab, app::CmdPinWorkspace, app::CmdViewRecentChanges,
+            for (int command : {app::CmdOpenInNewTab, app::CmdOpenNativeExplorer, app::CmdPinWorkspace, app::CmdViewRecentChanges,
                                 app::CmdPinQuickAccess, app::CmdUnpinQuickAccess})
                 EraseCommand(items, command);
         }
@@ -2280,7 +2328,8 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
             }
         }
     }
-    std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label, folder);
+    const bool native_explorer = NativeExplorerRequestForTab(ActiveTab(s), app::CmdOpenNativeExplorer).has_value();
+    std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label, folder, native_explorer);
     if (const auto* tab = ActiveTab(s))
         app::AppendRecentChangesCommand(items, app::RecentChangesMenuPath(*tab, false));
     ApplyWorkspacePinLabel(items, s);
@@ -2372,38 +2421,19 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         }
         items.insert(at == items.end() ? items.end() : std::next(at), std::move(stage));
     }
-    // 复制到 / 移动到目标栏 (#58-14, moved here from the layout menu): split
-    // only, right-clicked in a pane that is not the target; greyed when the
-    // target cannot take files, as TransferToTarget would refuse.
-    if (tab && tab->SelectedCount() > 0 && !IsRecycleTab(tab) && s.targetPane && s.targetPane != s.pane &&
-        LiveLayout(s).VisiblePanes().size() > 1) {
-        const app::SelectionCaps caps = SelectionCapsOf(s);
-        const app::Tab* dst = s.targetPane->ActiveTab();
-        const bool writable = dst && !dst->current_path.empty() && !fs::IsVirtualPath(dst->current_path) &&
-            !dst->net_readonly && !app::IsUncServerRoot(dst->current_path);
-        if (caps.copy || caps.cut) {
-            const struct { int command; l10n::StringId label; const wchar_t* glyph; const wchar_t* key; bool enabled; } kRows[] = {
-                {app::CmdCopyToTarget, l10n::StringId::CopyToTarget, ui::command_icons::kGlyphCopyToPane, L"Ctrl+Alt+C",
-                 writable && caps.copy},
-                {app::CmdMoveToTarget, l10n::StringId::MoveToTarget, ui::command_icons::kGlyphMoveToPane, L"Ctrl+Alt+X",
-                 writable && caps.cut},
-            };
-            // After 加入暂存区 / 设置别名 / 复制路径, whichever is last present.
-            auto at = items.end();
-            for (int command : {app::CmdCopyPath, app::CmdSetAlias, app::CmdStageToTray}) {
-                auto found = std::find_if(items.begin(), items.end(),
-                    [command](const ui::FluentMenuItem& item) { return item.command == command; });
-                if (found != items.end()) at = std::next(found);
-            }
-            for (const auto& row : kRows) {
-                ui::FluentMenuItem item;
-                item.command = row.command;
-                item.text = l10n::Get(row.label);
-                item.glyph = row.glyph;
-                item.shortcut = app::ShownShortcut(row.key);
-                item.enabled = row.enabled;
-                at = std::next(items.insert(at, std::move(item)));
-            }
+    // 在另一栏打开: one folder, with another pane on this tab; after 在新标签页打开.
+    // (复制到 / 移动到目标栏 left this menu: 复制到 / 移动到 ▸ lists the panes.)
+    if (tab && tab->snapshot && tab->SelectedCount() == 1 && !IsRecycleTab(tab) && OtherPaneForOpen(s)) {
+        const auto selected = tab->SelectedIndices();
+        if (!selected.empty() && selected[0] >= 0 && selected[0] < static_cast<int>(tab->EntryCount()) &&
+            tab->EntryAt(static_cast<size_t>(selected[0])).is_dir && !EntryFullPath(*tab, selected[0]).empty()) {
+            ui::FluentMenuItem other;
+            other.command = app::CmdOpenInOtherPane;
+            other.text = l10n::Get(l10n::StringId::OpenInOtherPane);
+            other.glyph = ui::command_icons::kGlyphMoveToPane;
+            auto at = std::find_if(items.begin(), items.end(),
+                [](const ui::FluentMenuItem& item) { return item.command == app::CmdOpenInNewTab; });
+            items.insert(at == items.end() ? at : std::next(at), std::move(other));
         }
     }
     if (tab && tab->SelectedCount() >= 2) {
@@ -3002,11 +3032,23 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, std::optional<RECT> chip_
     auto base_items = BuildFinderItemMenu(s, s.ops.CanUndo(), undoLabel);
     std::vector<std::wstring> window_folders;
     if (!recycle_selection) {
-        if (!paths.empty()) window_folders = WindowTransferFolders(s);
+        // 复制到 / 移动到: this window's other panes, then the other windows.
+        size_t pane_folders = 0;
+        if (!paths.empty()) {
+            window_folders = PaneTransferFolders(s);
+            pane_folders = window_folders.size();
+            for (auto& folder : WindowTransferFolders(s)) {
+                const auto same = [&](const std::wstring& path) { return _wcsicmp(path.c_str(), folder.c_str()) == 0; };
+                if (window_folders.size() < app::kMaxWindowTransferTargets &&
+                    std::none_of(window_folders.begin(), window_folders.end(), same))
+                    window_folders.push_back(std::move(folder));
+            }
+        }
         const app::SelectionCaps caps = SelectionCapsOf(s);
         // Phone items go to another window's folder through Explorer's
         // engine (SubmitDeviceTransfer), like local ones.
-        app::AppendWindowTransferCommands(base_items, window_folders, tab && (caps.copy || caps.cut));
+        app::AppendWindowTransferCommands(base_items, window_folders, tab && (caps.copy || caps.cut),
+                                          pane_folders, true);
         app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     } else {
         app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs);
@@ -3062,7 +3104,12 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, std::optional<RECT> chip_
 
 namespace {
 // The 新建 entries, shared with the toolbar New menu (defined below).
-std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait = true);
+using NewTemplateCache = app::NewMenuCache<app::sysctx::NewTemplate>;
+using NewTemplateSnapshot = NewTemplateCache::Snapshot;
+NewTemplateSnapshot NewTemplatesForMenu(AppState& s);
+void AppendNewTemplateState(std::vector<ui::FluentMenuItem>& items, const NewTemplateSnapshot& snapshot);
+int TrackBackgroundNewMenu(AppState& s, POINT screen_pt, std::vector<ui::FluentMenuItem> display,
+                           NewTemplateSnapshot& snapshot);
 bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::NewTemplate>& templates);
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates);
@@ -3123,7 +3170,19 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     std::wstring undoLabel = s.ops.UndoLabel();
     bool canPaste = !s.tray.batches().empty() || ClipboardHasFiles();
     const auto recent_changes_path = app::RecentChangesMenuPath(*tab, true);
-    auto base_items = app::BuildBackgroundMenu(canPaste, s.ops.CanUndo(), undoLabel);
+    const bool native_explorer = NativeExplorerRequestForTab(tab, app::CmdOpenNativeExplorerHere).has_value();
+    auto base_items = app::BuildBackgroundMenu(canPaste, s.ops.CanUndo(), undoLabel, native_explorer);
+    // 在另一栏打开: the folder shown, before 在资源管理器中打开 / 在终端中打开.
+    if (!tab->current_path.empty() && OtherPaneForOpen(s)) {
+        ui::FluentMenuItem other;
+        other.command = app::CmdOpenInOtherPaneHere;
+        other.text = l10n::Get(l10n::StringId::OpenInOtherPane);
+        other.glyph = ui::command_icons::kGlyphMoveToPane;
+        auto at = std::find_if(base_items.begin(), base_items.end(), [](const ui::FluentMenuItem& item) {
+            return item.command == app::CmdOpenNativeExplorerHere || item.command == app::CmdOpenTerminal;
+        });
+        base_items.insert(at, std::move(other));
+    }
     app::AppendRecentChangesCommand(base_items, recent_changes_path);
     app::AppendBackgroundViewCommands(base_items, view_options);
     ApplyWorkspacePinLabel(base_items, s);
@@ -3133,9 +3192,14 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     const auto quick_paths = QuickAccessTargets(tab, true);
     AppendQuickAccessCommand(s, base_items, quick_paths);
     const bool can_create_here = CanCreateHere(tab);
-    const auto new_templates = can_create_here ? NewTemplatesForMenu(s, false)
-                                               : std::vector<app::sysctx::NewTemplate>{};
-    if (can_create_here) AppendBackgroundNewMenu(base_items, new_templates);
+    auto new_templates = can_create_here ? NewTemplatesForMenu(s) : NewTemplateSnapshot{};
+    if (can_create_here) {
+        AppendBackgroundNewMenu(base_items, new_templates.list);
+        for (auto& row : base_items) {
+            if (row.command == app::CmdNone && row.text == l10n::Get(l10n::StringId::New))
+                AppendNewTemplateState(row.children, new_templates);
+        }
+    }
     if (!tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) && !app::IsUncServerRoot(tab->current_path))
         AppendFolderTools(s, base_items);
     // This PC, a server's share list, the Network view and other Pulse views
@@ -3171,12 +3235,14 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     auto display = ExplorerMenu(s, s.context_menu.base_items());
 
     BeginCtxTiming(s, display.size(), seeded);
-    const int cmd = s.menu->TrackPopup(screen_pt, std::move(display));
+    const int cmd = can_create_here
+        ? TrackBackgroundNewMenu(s, screen_pt, std::move(display), new_templates)
+        : s.menu->TrackPopup(screen_pt, std::move(display));
     s.context_menu.CloseMenu();
     LogCtxTiming(s, cmd);
     if (HandleShellMenuCommand(s, cmd)) return;
     if (HandleQuickAccessCommand(s, cmd, quick_paths)) return;
-    if (RunShellNewCommand(s, cmd, new_templates)) return;
+    if (RunShellNewCommand(s, cmd, new_templates.list)) return;
     if (cmd == app::CmdViewRecentChanges) { OpenChangeView(s, recent_changes_path); return; }
     if (cmd == app::CmdMapNetworkDrive) { RunMapNetworkDrive(s, L""); return; }
     if (HandleGitCommand(s, cmd, git_root)) return;
@@ -3372,56 +3438,42 @@ ui::FluentMenuItem CustomizeToolbarItem() {
 } // namespace
 
 namespace {
-// Explorer's 新建 entries for the New menu. A full HKCR walk takes a moment,
-// so the first menu waits for it once; later menus show the last list and
-// refresh it in the background (installs / the system page show up next time).
-struct NewTemplateCache {
-    std::mutex mutex;
-    std::vector<app::sysctx::NewTemplate> list;
-    bool loaded = false;
-    std::atomic<bool> refreshing{false};
-};
+// The UI reads snapshots only. Registry enumeration and icon preparation remain
+// on the IO worker; a rejected task or exception releases the single-flight slot.
 NewTemplateCache& NewTemplates() {
     static NewTemplateCache cache;
     return cache;
 }
 
-std::vector<app::sysctx::NewTemplate> LoadNewTemplates() {
-    app::sysctx::Roots roots;
-    roots.check_owner = false;
-    return app::sysctx::ListNewTemplates(roots);
+NewTemplateSnapshot NewTemplatesForMenu(AppState& s) {
+    NewTemplateCache& cache = NewTemplates();
+    if (cache.BeginRefresh()) {
+        const bool queued = s.worker.EnqueueIo([] {
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+            try {
+                app::sysctx::Roots roots;
+                roots.check_owner = false;
+                auto fresh = app::sysctx::ListNewTemplates(roots);
+                for (const auto& t : fresh) app::FileTypeMenuIcon(t.ext);
+                NewTemplates().Complete(std::move(fresh));
+            } catch (...) {
+                NewTemplates().Fail();
+            }
+            if (SUCCEEDED(com)) CoUninitialize();
+        });
+        if (!queued) cache.Fail();
+    }
+    return cache.Read();
 }
 
-// wait=false (the background menu, which must open at once): before the first
-// load has finished, no system rows this time and the load runs in the back.
-std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait) {
-    NewTemplateCache& cache = NewTemplates();
-    {
-        std::lock_guard<std::mutex> lock(cache.mutex);
-        if (cache.loaded || !wait) {
-            if (!cache.refreshing.exchange(true)) {
-                s.worker.EnqueueIo([] {
-                    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-                    auto fresh = LoadNewTemplates();
-                    for (const auto& t : fresh) app::FileTypeMenuIcon(t.ext);
-                    NewTemplateCache& c = NewTemplates();
-                    {
-                        std::lock_guard<std::mutex> l(c.mutex);
-                        c.list = std::move(fresh);
-                        c.loaded = true;
-                    }
-                    c.refreshing = false;
-                    if (SUCCEEDED(com)) CoUninitialize();
-                });
-            }
-            return cache.list;
-        }
-    }
-    auto list = LoadNewTemplates();
-    std::lock_guard<std::mutex> lock(cache.mutex);
-    cache.list = list;
-    cache.loaded = true;
-    return list;
+void AppendNewTemplateState(std::vector<ui::FluentMenuItem>& items, const NewTemplateSnapshot& snapshot) {
+    if (snapshot.state == app::NewMenuLoadState::Ready) return;
+    ui::FluentMenuItem status;
+    status.enabled = false;
+    status.text = l10n::Get(snapshot.state == app::NewMenuLoadState::Loading
+        ? l10n::StringId::NewMenuLoading : l10n::StringId::NewMenuLoadFailed);
+    if (!items.empty()) items.back().separator_after = true;
+    items.push_back(std::move(status));
 }
 
 // One 新建 entry, the way Explorer makes it.
@@ -3478,9 +3530,6 @@ bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::New
     return true;
 }
 
-// The background menu's 新建 flyout: the toolbar New menu's rows, minus the
-// flat 新建文件夹 / 新建文本文档 rows the menu already shows (those stay
-// separately configurable on the 右键菜单 page), right after them.
 // 查找重复文件 and, if the assistant is enabled and connected, AI 整理此文件夹….
 void AppendFolderTools(AppState& s, std::vector<ui::FluentMenuItem>& items) {
     size_t at = 0;
@@ -3506,19 +3555,16 @@ void AppendFolderTools(AppState& s, std::vector<ui::FluentMenuItem>& items) {
 
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates) {
-    bool has_folder = false, has_text = false;
     size_t at = 0;
     for (size_t i = 0; i < items.size(); ++i) {
-        if (items[i].command == app::CmdNewFolder) { has_folder = true; at = i + 1; }
-        if (items[i].command == app::CmdNewTextFile) { has_text = true; at = i + 1; }
+        if (items[i].command == app::CmdNewFolder) at = i + 1;
+        if (items[i].command == app::CmdNewTextFile) at = i + 1;
     }
     ui::FluentMenuItem header;
     header.command = app::CmdNone;
     header.text = l10n::Get(l10n::StringId::New);
     header.glyph = L"\xE710";
     for (auto& row : app::BuildNewMenu()) {
-        if ((row.command == app::CmdNewFolder && has_folder) || (row.command == app::CmdNewTextFile && has_text))
-            continue;
         header.children.push_back(std::move(row));
     }
     AppendShellNewRows(header.children, templates, true);
@@ -3530,6 +3576,61 @@ void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
     }
     items.insert(items.begin() + static_cast<std::ptrdiff_t>(at), std::move(header));
 }
+
+// A thread timer belongs to this modal invocation, never to AppState or the
+// worker. Nested menus get distinct IDs; destruction cancels the callback.
+class NewMenuRefreshTimer {
+public:
+    explicit NewMenuRefreshTimer(std::function<void()> poll) : poll_(std::move(poll)) {
+        id_ = SetTimer(nullptr, 0, 100, Tick);
+        if (id_) Timers().emplace(id_, this);
+    }
+    ~NewMenuRefreshTimer() {
+        if (id_) {
+            KillTimer(nullptr, id_);
+            Timers().erase(id_);
+        }
+    }
+    NewMenuRefreshTimer(const NewMenuRefreshTimer&) = delete;
+    NewMenuRefreshTimer& operator=(const NewMenuRefreshTimer&) = delete;
+private:
+    static std::unordered_map<UINT_PTR, NewMenuRefreshTimer*>& Timers() {
+        static thread_local std::unordered_map<UINT_PTR, NewMenuRefreshTimer*> timers;
+        return timers;
+    }
+    static void CALLBACK Tick(HWND, UINT, UINT_PTR id, DWORD) {
+        const auto found = Timers().find(id);
+        if (found != Timers().end()) found->second->poll_();
+    }
+    UINT_PTR id_ = 0;
+    std::function<void()> poll_;
+};
+
+int TrackBackgroundNewMenu(AppState& s, POINT screen_pt, std::vector<ui::FluentMenuItem> display,
+                           NewTemplateSnapshot& snapshot) {
+    bool settled = false;
+    NewMenuRefreshTimer timer([&] {
+        if (settled || !s.context_menu.menu_open() || !s.menu || !s.menu->IsOpen()) return;
+        auto fresh = NewTemplates().Read();
+        if (fresh.revision == snapshot.revision) return;
+        auto children = app::BuildNewMenu();
+        AppendShellNewRows(children, fresh.list, true);
+        AppendNewTemplateState(children, fresh);
+        app::ApplyBuiltinMenuPrefs(children, s.ctxMenuPrefs);
+        if (!children.empty()) children.back().separator_after = false;
+        // A visible flyout vetoes changes. Retry after the pointer leaves it;
+        // neither the controller nor dispatch indices advance until accepted.
+        if (s.context_menu.TryReplaceBaseFlyout(l10n::Get(l10n::StringId::New),
+                std::move(children), s.ctxMenuPrefs, [&s](std::vector<ui::FluentMenuItem> rows) {
+                    return s.menu->ReplaceItems(std::move(rows));
+                })) {
+            snapshot = std::move(fresh);
+            settled = true;
+        }
+    });
+    return s.menu->TrackPopup(screen_pt, std::move(display));
+}
+
 } // namespace
 
 void ShowNewDropdown(AppState& s) {
@@ -3540,7 +3641,8 @@ void ShowNewDropdown(AppState& s) {
     // Prototype: Pulse's types, 快捷方式…, then what the system 新建 menu
     // offers (with the file type icons Explorer shows), then 自定义工具栏.
     // Never block the UI thread waiting for cold HKCR ShellNew enumeration.
-    const auto templates = NewTemplatesForMenu(s, false);
+    const auto template_snapshot = NewTemplatesForMenu(s);
+    const auto& templates = template_snapshot.list;
     const app::Tab* active = ActiveTab(s);
     const bool can_create = CanCreateHere(active);
     // A writable phone folder takes new folders only, not files (CreateDeviceFolder).
@@ -3548,6 +3650,7 @@ void ShowNewDropdown(AppState& s) {
         app::DeviceRegistry::Instance().FolderWritable(active->current_path);
     for (auto& item : items) item.enabled = can_create || (phone_folder && item.command == app::CmdNewFolder);
     AppendShellNewRows(items, templates, can_create);
+    if (can_create) AppendNewTemplateState(items, template_snapshot);
     items.back().separator_after = true;
     // 「新建」按钮的主操作 (was a section of the old customize sheet).
     ui::FluentMenuItem primary;
@@ -6218,7 +6321,6 @@ static ui::FolderPickerSpec MakePickerSpec(const AppState& s, ui::PickerMode mod
     ui::FolderPickerSpec spec;
     spec.mode = mode;
     app::ApplyPickerAppearanceToSpec(app::PickerAppearanceFromPrefs(s.appPrefs), spec);
-    spec.show_hidden = s.appPrefs.show_hidden_files;
     return spec;
 }
 
@@ -6312,6 +6414,50 @@ int QuickPreviewEntryIndex(const app::Tab& tab, const ui::QuickPreviewItem& item
     return -1;
 }
 
+// The photo viewer's filmstrip: the media kind of every row on screen and the
+// files around the selected one. Only when `item` is that selection.
+void AttachQuickPreviewGallery(AppState& s, ui::QuickPreviewItem& item) {
+    item.gallery.reset();
+    app::Tab* tab = ActiveTab(s);
+    if (!tab || !tab->snapshot || !s.pane || item.path.empty() || tab->selected_index < 0) return;
+    if (EntryFullPath(*tab, tab->selected_index) != item.path) return;
+    ui::PaneViewModel pane;
+    app::FillPaneViewModel(pane, *s.pane, &s.places);
+    const int count = static_cast<int>(pane.EntryCount());
+    const int current = pane.ViewIndex(tab->selected_index);
+    const int entries = static_cast<int>(tab->EntryCount());
+    if (count <= 0 || current < 0 || current >= count) return;
+    auto gallery = std::make_shared<ui::QuickPreviewGallery>();
+    gallery->kinds.assign(static_cast<size_t>(count), 0);
+    for (int view = 0; view < count; ++view) {
+        const int source = pane.SourceIndex(view);
+        if (source < 0 || source >= entries) continue;
+        const fs::DirEntry& entry = tab->EntryAt(static_cast<size_t>(source));
+        if (entry.is_dir || entry.pc_launcher || entry.pc_device) continue;
+        gallery->kinds[static_cast<size_t>(view)] = static_cast<uint8_t>(ui::QuickPreviewMediaKind(entry.name));
+    }
+    gallery->current = current;
+    constexpr int kSpan = 80;   // the filmstrip draws a dozen; keep some for gliding
+    gallery->first = (std::max)(0, current - kSpan);
+    const int last = (std::min)(count - 1, current + kSpan);
+    gallery->entries.reserve(static_cast<size_t>(last - gallery->first + 1));
+    for (int view = gallery->first; view <= last; ++view) {
+        ui::QuickPreviewGalleryEntry e;
+        const int source = pane.SourceIndex(view);
+        if (source >= 0 && source < entries) {
+            const fs::DirEntry& entry = tab->EntryAt(static_cast<size_t>(source));
+            if (!entry.pc_launcher && !entry.pc_device) {
+                e.path = EntryFullPath(*tab, source);
+                e.attrs = entry.attrs;
+                e.size = entry.size;
+                e.modified = (static_cast<uint64_t>(entry.mtime.dwHighDateTime) << 32) | entry.mtime.dwLowDateTime;
+            }
+        }
+        gallery->entries.push_back(std::move(e));
+    }
+    item.gallery = std::move(gallery);
+}
+
 } // namespace
 
 bool QuickPreviewItemForRow(AppState& s, const app::Tab& tab, int index, ui::QuickPreviewItem& item) {
@@ -6382,26 +6528,32 @@ void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activa
                                    WM_QUICK_PREVIEW_OPEN, WM_QUICK_PREVIEW_COMMAND);
         s.quickPreview->SetAccent(s.accentColor);
         s.quickPreview->SetOptions(QuickPreviewOptionsFromPrefs(s.appPrefs));
-        s.quickPreview->Show(item, s.darkMode, effect, s.safeMode, zoom_from, activate,
+        ui::QuickPreviewItem shown = item;
+        AttachQuickPreviewGallery(s, shown);
+        s.quickPreview->Show(shown, s.darkMode, effect, s.safeMode, zoom_from, activate,
                              occupied.empty() ? nullptr : &occupied);
         s.quickPreviewSelection.Reset(item.path);
     }
 }
 
-void NavigateQuickPreview(AppState& s, int direction) {
+void NavigateQuickPreview(AppState& s, int direction, int target_view) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
     ui::WindowViewModel vm = BuildVm(s);
     const int count = static_cast<int>(vm.pane.EntryCount());
     if (count <= 0) return;
-    const int view = app::QuickPreviewNavigationTarget(
-        vm.pane.ViewIndex(tab->selected_index), count, direction);
+    const int current = vm.pane.ViewIndex(tab->selected_index);
+    const int view = target_view >= 0 ? app::QuickPreviewJumpTarget(current, count, target_view)
+                                      : app::QuickPreviewNavigationTarget(current, count, direction);
     if (view < 0) return;
     tab->MoveFocus(vm.pane.SourceIndex(view), false);
     EnsureRowVisible(s, *tab, tab->selected_index);
     auto update=[](AppState& v) {
         ui::QuickPreviewItem item;
-        if(v.quickPreview->visible() && SelectedQuickPreviewItem(v,item)) v.quickPreview->Update(item);
+        if(v.quickPreview->visible() && SelectedQuickPreviewItem(v,item)) {
+            AttachQuickPreviewGallery(v, item);
+            v.quickPreview->Update(item);
+        }
     };
     if(!DeferContentSelection(s,update,true)) update(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -6478,6 +6630,7 @@ void SyncQuickPreview(AppState& s) {
                 if (!QuickPreviewItemAt(s, *tab, source, next)) return false;
                 tab->SelectOnly(source);
                 EnsureRowVisible(s, *tab, source);
+                AttachQuickPreviewGallery(s, next);
                 s.quickPreview->Update(next);
                 InvalidateRect(s.hwnd, nullptr, FALSE);
                 return true;
@@ -6548,6 +6701,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
                                 s.appPrefs.list_size_bar, s.appPrefs.list_tag_name_color,
                                 s.appPrefs.list_selection_outline);
         s.renderer.SetTreeSticky(s.appPrefs.list_tree_sticky);
+        s.renderer.SetScrollPastEnd(s.appPrefs.list_scroll_past_end);
         s.renderer.SetDetailsColumns(s.appPrefs.details_columns);
         s.renderer.SetDetailsColumnOrder(s.appPrefs.details_column_order);
         s.renderer.SetRowActions(app::RowActionMask(s.ctxMenuPrefs.builtin_hidden,

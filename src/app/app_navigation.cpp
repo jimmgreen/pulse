@@ -3265,6 +3265,46 @@ std::vector<std::wstring> WindowTransferFolders(AppState& s) {
     return folders;
 }
 
+std::vector<std::wstring> PaneTransferFolders(AppState& s) {
+    std::vector<std::wstring> folders;
+    const app::Tab* source = ActiveTab(s);
+    const std::wstring here = source ? source->current_path : std::wstring{};
+    const auto visible = VisiblePanes(s);
+    std::vector<app::Pane*> order;
+    if (app::Pane* target = app::ResolveTransferTarget(visible, s.pane, s.targetPane)) order.push_back(target);
+    for (app::Pane* pane : visible)
+        if (pane && pane != s.pane && std::find(order.begin(), order.end(), pane) == order.end()) order.push_back(pane);
+    for (app::Pane* pane : order) {
+        if (folders.size() >= app::kMaxWindowTransferTargets) break;
+        const app::Tab* tab = pane->ActiveTab();
+        if (!tab || tab->current_path.empty()) continue;
+        const bool phone = IsDeviceTab(tab) && app::DeviceRegistry::Instance().FolderWritable(tab->current_path);
+        if ((fs::IsVirtualPath(tab->current_path) && !phone) || tab->net_readonly ||
+            app::IsUncServerRoot(tab->current_path)) continue;
+        const auto same = [&](const std::wstring& path) { return _wcsicmp(path.c_str(), tab->current_path.c_str()) == 0; };
+        if (same(here) || std::any_of(folders.begin(), folders.end(), same)) continue;
+        folders.push_back(tab->current_path);
+    }
+    return folders;
+}
+
+app::Pane* OtherPaneForOpen(AppState& s) {
+    const auto visible = VisiblePanes(s);
+    if (visible.size() < 2 || !s.pane) return nullptr;
+    if (app::Pane* target = app::ResolveTransferTarget(visible, s.pane, s.targetPane)) return target;
+    const auto it = std::find(visible.begin(), visible.end(), s.pane);
+    if (it == visible.end()) return nullptr;
+    return std::next(it) == visible.end() ? visible.front() : *std::next(it);
+}
+
+bool OpenInOtherPane(AppState& s, const std::wstring& path) {
+    app::Pane* other = OtherPaneForOpen(s);
+    if (!other || path.empty()) return false;
+    FocusPane(s, other);
+    NavigateTo(s, path);
+    return true;
+}
+
 void TransferSelectionToFolder(AppState& s, const std::wstring& folder, bool move) {
     if (DeferContentSelection(s, [=](AppState& v) { TransferSelectionToFolder(v, folder, move); })) return;
     app::Tab* src = ActiveTab(s);
@@ -3929,7 +3969,10 @@ void SwitchTab(AppState& s, size_t idx) {
     CancelFileClick(s);
     if (s.addressSearching) HideAddressEditor(s, false);
     RememberLayoutFocus(s);
+    // MRU records activation, even when several switches precede the next paint.
+    app::ObserveTabMru(s.tabMru, s.window_tabs);
     s.window_tabs.SwitchTab(idx);
+    app::ObserveTabMru(s.tabMru, s.window_tabs);
     BindCurrentLayout(s);
     RevalidateVisibleFolders(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);

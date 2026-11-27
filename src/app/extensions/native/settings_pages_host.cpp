@@ -129,7 +129,8 @@ UiTree BuildContextMenuTree(AppState& owner, const Entry& entry) {
     UiNode choices; choices.id = "ext-ctx-placement-grid"; choices.type = UiNodeType::Grid; choices.columns = 2; choices.gap = 8;
     struct Choice { I title, detail; ui::StoreIcon icon; };
     const Choice kChoices[4] = {
-        {I::NativeExtMenuPlacementDefault, I::NativeExtMenuPlacementDefaultDesc, ui::StoreIcon::Sparkle},
+        // 默认 = the way the extension itself puts its commands: the extension (puzzle) mark, not a sparkle.
+        {I::NativeExtMenuPlacementDefault, I::NativeExtMenuPlacementDefaultDesc, ui::StoreIcon::Puzzle},
         {I::NativeExtMenuPlacementFlat, I::NativeExtMenuPlacementFlatDesc, ui::StoreIcon::Lines},
         {I::NativeExtMenuPlacementSubmenu, I::NativeExtMenuPlacementSubmenuDesc, ui::StoreIcon::ListView},
         {I::NativeExtMenuPlacementHidden, I::NativeExtMenuPlacementHiddenDesc, ui::StoreIcon::Eye},
@@ -271,6 +272,14 @@ FocusedSettingsInfo FocusedSettings(HWND owner) {
         }
     }
     return info;
+}
+std::vector<std::wstring> PackageSettingsExtraTabTitles(HWND owner, size_t package) {
+    std::vector<std::wstring> titles;
+    if (const auto* pages = PackageSettings(owner, package)) {
+        const auto tabs = pages->Tabs();
+        for (size_t k = 1; k < tabs.size(); ++k) titles.push_back(tabs[k].title);
+    }
+    return titles;
 }
 void SetFocusedSettingsMode(HWND owner, int mode) {
     const auto found = hosts.find(owner);

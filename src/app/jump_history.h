@@ -31,6 +31,8 @@ public:
     // Zero means an unknown lifetime total (legacy records), never a decayed score.
     uint64_t VisitCount(const std::wstring& path) const;
     size_t Size() const;
+    // Forgets one folder (however its path was typed); false when it was not there.
+    bool Remove(const std::wstring& path);
     void Clear();
 
     static int64_t Now();   // seconds since 1970

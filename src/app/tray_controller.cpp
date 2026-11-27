@@ -1,4 +1,5 @@
 #include "tray_controller.h"
+#include "tray_reveal.h"
 #include "app_messages.h"
 #include "../common/localization.h"
 #include "../common/runtime_log.h"
@@ -8,6 +9,7 @@
 
 namespace pulse::app {
 namespace {
+// Legacy `applied` is SetWindowPlacement's result, never a ShowWindow success flag.
 void LogPlacement(const char* event, HWND window, bool snapshot, bool applied = false) {
     if (!diagnostics::runtime::Enabled()) return;
     RECT rect{};
@@ -99,28 +101,84 @@ void TrayController::HideWindow(bool show_icon) {
 }
 
 void TrayController::RestoreWindow() {
-    if (!hwnd_) return;
-    const bool hidden = !IsWindowVisible(hwnd_);
-    LogPlacement("tray_restore_begin", hwnd_, has_hidden_placement_);
-    if (before_restore_ && hidden) before_restore_();
-    if (hidden && has_hidden_placement_) {
-        auto placement = hidden_placement_;
-        // Restore a minimized window, including one minimized from maximized.
+    const HWND window = hwnd_;
+    const auto started = GetTickCount64();
+    const auto before = InspectWindowRevealState(window);
+    const bool snapshot = has_hidden_placement_;
+    auto placement = hidden_placement_;
+    bool placement_attempted = false, placement_applied = false, show_called = false;
+    bool show_previous_visible = false, foreground_attempted = false, foreground_set = false;
+    DWORD placement_error = ERROR_SUCCESS;
+    int requested_show = before.minimized ? SW_RESTORE : restore_maximized_ ? SW_SHOWMAXIMIZED : SW_SHOW;
+    const auto stage = [&](const wchar_t* name) {
+        diagnostics::runtime::TextEvent("tray_restore_stage", {{"stage", name}}, {
+            {"window", reinterpret_cast<uintptr_t>(window)}, {"elapsed_ms", GetTickCount64() - started}});
+    };
+    const auto finish = [&](const wchar_t* reason) {
+        const auto after = InspectWindowRevealState(window);
+        const bool target_changed = hwnd_ != window;
+        const bool restored = !target_changed && after.Restored();
+        LogPlacement("tray_restore_end", window, !target_changed && has_hidden_placement_, placement_applied);
+        diagnostics::runtime::Event("tray_restore_api", {
+            {"window", reinterpret_cast<uintptr_t>(window)}, {"snapshot_available", snapshot},
+            {"placement_attempted", placement_attempted}, {"placement_applied", placement_applied},
+            {"placement_error", placement_error}, {"show_called", show_called},
+            {"requested_show", static_cast<uint64_t>(requested_show)},
+            {"foreground_attempted", foreground_attempted}, {"foreground_set", foreground_set}});
+        diagnostics::runtime::TextEvent("tray_restore_result", {{"reason", reason}}, {
+            {"window", reinterpret_cast<uintptr_t>(window)}, {"window_valid", after.valid},
+            {"visible_after", after.visible}, {"minimized_after", after.minimized},
+            {"foreground_after", after.foreground}, {"restore_ok", restored},
+            {"requested_show", static_cast<uint64_t>(requested_show)}, {"placement_applied", placement_applied},
+            {"show_called", show_called}, {"show_previous_visible", show_previous_visible},
+            {"target_changed", target_changed}, {"elapsed_ms", GetTickCount64() - started}},
+            restored ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Warning);
+    };
+    LogPlacement("tray_restore_begin", window, snapshot);
+    if (!before.valid) { finish(L"invalid_window"); return; }
+    if (before_restore_ && !before.visible) {
+        stage(L"before_restore");
+        try { const auto hook = before_restore_; hook(); }
+        catch (...) { finish(L"before_restore_exception"); return; }
+    }
+    if (hwnd_ != window) { finish(L"target_changed"); return; }
+    if (!IsWindow(window)) { finish(L"window_destroyed"); return; }
+    if (!before.visible && snapshot) {
+        // Keep the pre-hook snapshot until a visible, nonminimized restore is confirmed.
         placement.showCmd = placement.showCmd == SW_SHOWMAXIMIZED ||
             (placement.flags & WPF_RESTORETOMAXIMIZED) ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
         placement.flags &= ~WPF_RESTORETOMAXIMIZED;
-        if (SetWindowPlacement(hwnd_, &placement)) {
-            has_hidden_placement_ = false;
-            restore_maximized_ = false;
-            SetForegroundWindow(hwnd_);
-            LogPlacement("tray_restore_end", hwnd_, false, true);
-            return;
-        }
+        requested_show = static_cast<int>(placement.showCmd);
+        placement_attempted = true;
+        stage(L"set_window_placement");
+        SetLastError(ERROR_SUCCESS);
+        placement_applied = SetWindowPlacement(window, &placement) != FALSE;
+        if (!placement_applied) placement_error = GetLastError();
+        if (hwnd_ != window) { finish(L"target_changed"); return; }
+        if (!IsWindow(window)) { finish(L"window_destroyed"); return; }
     }
-    ShowWindow(hwnd_, IsIconic(hwnd_) ? SW_RESTORE : restore_maximized_ ? SW_SHOWMAXIMIZED : SW_SHOW);
-    restore_maximized_ = false;
-    SetForegroundWindow(hwnd_);
-    LogPlacement("tray_restore_end", hwnd_, has_hidden_placement_);
+    if (!placement_applied || !InspectWindowRevealState(window).Restored()) {
+        if (!placement_attempted)
+            requested_show = IsIconic(window) ? SW_RESTORE : restore_maximized_ ? SW_SHOWMAXIMIZED : SW_SHOW;
+        show_called = true;
+        stage(L"show_window");
+        // The return value is previous visibility, not success or a GetLastError contract.
+        show_previous_visible = ShowWindow(window, requested_show) != FALSE;
+    }
+    if (hwnd_ != window) { finish(L"target_changed"); return; }
+    if (!IsWindow(window)) { finish(L"window_destroyed"); return; }
+    if (InspectWindowRevealState(window).Restored()) {
+        foreground_attempted = true;
+        stage(L"set_foreground");
+        foreground_set = SetForegroundWindow(window) != FALSE;
+    }
+    if (hwnd_ != window) { finish(L"target_changed"); return; }
+    if (!IsWindow(window)) { finish(L"window_destroyed"); return; }
+    if (InspectWindowRevealState(window).Restored()) {
+        has_hidden_placement_ = false;
+        restore_maximized_ = false;
+        finish(L"restored");
+    } else finish(L"not_visible");
 }
 
 bool TrayController::StartHidden(bool maximized, bool show_icon) {
@@ -133,8 +191,14 @@ bool TrayController::StartHidden(bool maximized, bool show_icon) {
         hidden_placement_.showCmd = maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
         hidden_placement_.flags &= ~WPF_RESTORETOMAXIMIZED;
     }
-    LogPlacement("tray_start_hidden", hwnd_, has_hidden_placement_);
-    ShowWindow(hwnd_, SW_HIDE);
+    const HWND window = hwnd_;
+    LogPlacement("tray_start_hidden", window, has_hidden_placement_);
+    ShowWindow(window, SW_HIDE);
+    const auto after = InspectWindowRevealState(window);
+    diagnostics::runtime::Event("tray_start_hidden_result", {
+        {"window", reinterpret_cast<uintptr_t>(window)}, {"requested_show", SW_HIDE},
+        {"window_valid", after.valid}, {"visible_after", after.visible}, {"minimized_after", after.minimized},
+        {"hide_ok", hwnd_ == window && after.valid && !after.visible}});
     return true;
 }
 

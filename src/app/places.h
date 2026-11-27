@@ -222,6 +222,8 @@ public:
     int FindTagIndex(const TagId& id) const;
     TagId ResolveTagRef(const std::wstring& ref) const;
     std::vector<std::wstring> PathsForTag(const TagId& id) const;
+    // Assigned paths at or below any root, in catalog order (duplicates retained).
+    std::vector<std::wstring> TaggedPathsUnder(const std::vector<std::wstring>& roots) const;
 
     TagId CreateTag(const std::wstring& name, uint32_t rgb);
     bool RenameTag(const TagId& id, const std::wstring& name);
@@ -235,6 +237,8 @@ public:
     // The same as one call per pair in order, with one save at the end.
     void RemapPaths(const std::vector<std::pair<std::wstring, std::wstring>>& moves);
     void CloneAssignments(const std::wstring& source, const std::wstring& destination);
+    // The same assignment result as one call per pair, in order.
+    void CloneAssignments(const std::vector<std::pair<std::wstring, std::wstring>>& copies);
     void RemoveAssignments(const std::wstring& path, bool include_descendants);
     // The same as one call per path, with one save at the end.
     void RemoveAssignments(const std::vector<std::wstring>& paths, bool include_descendants);

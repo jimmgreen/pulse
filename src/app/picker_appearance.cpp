@@ -1,6 +1,8 @@
 #include "picker_appearance.h"
 #include "app_prefs.h"
 #include "blank_pane_click.h"
+#include "picker_list_order.h"
+#include "picker_tag_catalog.h"
 #include "../ui/folder_picker_dialog.h"
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
@@ -81,6 +83,9 @@ PickerAppearanceSnapshot PickerAppearanceFromPrefs(const AppPrefs& prefs) {
     value.zebra_rows = prefs.list_zebra_rows;
     value.size_bar = prefs.list_size_bar;
     value.thumbnail_badges = prefs.list_thumbnail_badges;
+    value.show_hidden_files = prefs.show_hidden_files;
+    value.show_protected_os_files = prefs.show_protected_os_files;
+    value.show_file_extensions = prefs.show_file_extensions;
     value.details_columns = prefs.details_columns;
     value.blank_click_action = prefs.blank_click_action;
     value.preview_trigger = prefs.preview_trigger;
@@ -89,6 +94,7 @@ PickerAppearanceSnapshot PickerAppearanceFromPrefs(const AppPrefs& prefs) {
     value.window_effect = prefs.window_effect;
     value.panel_transparency = prefs.wallpaper_look;
     value.frame_transparency = prefs.frame_transparency;
+    value.list_order = PickerListOrderPrefsFromPrefs(prefs);
     Normalize(value);
     return value;
 }
@@ -117,12 +123,16 @@ bool ParsePickerAppearanceJson(const std::wstring& json, PickerAppearanceSnapsho
     value.zebra_rows = pulse::json::ExtractBool(json, L"list_zebra_rows", true);
     value.size_bar = pulse::json::ExtractBool(json, L"list_size_bar", false);
     value.thumbnail_badges = pulse::json::ExtractBool(json, L"list_thumbnail_badges", true);
+    value.show_hidden_files = pulse::json::ExtractBool(json, L"show_hidden_files", false);
+    value.show_protected_os_files = pulse::json::ExtractBool(json, L"show_protected_os_files", false);
+    value.show_file_extensions = pulse::json::ExtractBool(json, L"show_file_extensions", true);
     value.details_columns = static_cast<uint32_t>(Integer(json, L"details_columns", static_cast<int>(ui::kDetailsColumnsDefault)));
     value.blank_click_action = Integer(json, L"blank_click_action",
         pulse::json::ExtractBool(json, L"blank_click_go_back", false) ? kBlankClickBack : kBlankClickOff);
     value.preview_trigger = Integer(json, L"preview_trigger", kPreviewTriggerHover);
     value.hover_preview_delay_ms = Integer(json, L"hover_preview_delay_ms", 500);
     value.hover_card_size = Integer(json, L"hover_card_size", kHoverCardMedium);
+    value.list_order = ParsePickerListOrderPrefs(json);
     Normalize(value);
     if (Integer(json, L"details_columns_v", 1) < 2) value.details_columns |= ui::kDetailsColumnStatus;
     output = std::move(value);
@@ -160,9 +170,23 @@ PickerAppearanceReadResult ReadUserPickerAppearanceReadOnly() noexcept {
         const HRESULT hr = SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &directory.value);
         if (FAILED(hr)) return Failure(HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE);
         if (!directory.value || !*directory.value) return Failure(ERROR_PATH_NOT_FOUND);
-        return ReadPickerAppearanceFileReadOnly(std::wstring(directory.value) + L"\\Pulse\\app.json");
+        auto result = ReadPickerAppearanceFileReadOnly(std::wstring(directory.value) + L"\\Pulse\\app.json");
+        if (result.status != PickerAppearanceReadStatus::Failed) {
+            auto order = result.snapshot.list_order ? std::make_shared<PickerListOrderPrefs>(*result.snapshot.list_order)
+                                                   : std::make_shared<PickerListOrderPrefs>();
+            order->tags = ReadPickerTagCatalog();
+            result.snapshot.list_order = std::move(order);
+        }
+        return result;
     } catch (const std::bad_alloc&) { return Failure(ERROR_NOT_ENOUGH_MEMORY); }
     catch (...) { return Failure(ERROR_INVALID_DATA); }
+}
+void RefreshPickerListPreferences(PickerAppearanceSnapshot& session, const PickerAppearanceReadResult& latest) noexcept {
+    if (latest.status == PickerAppearanceReadStatus::Failed) return;
+    session.show_hidden_files = latest.snapshot.show_hidden_files;
+    session.show_protected_os_files = latest.snapshot.show_protected_os_files;
+    session.show_file_extensions = latest.snapshot.show_file_extensions;
+    session.list_order = latest.snapshot.list_order;
 }
 PickerAppearanceColors ResolvePickerAppearanceColors(const PickerAppearanceSnapshot& snapshot,
     bool system_dark, uint32_t system_accent, std::optional<bool> legacy_dark) noexcept {
@@ -182,6 +206,9 @@ void ApplyPickerAppearanceToSpec(const PickerAppearanceSnapshot& snapshot, ui::F
     spec.list_zebra_rows = snapshot.zebra_rows;
     spec.list_size_bar = snapshot.size_bar;
     spec.thumbnail_badges = snapshot.thumbnail_badges;
+    spec.show_hidden_files = snapshot.show_hidden_files;
+    spec.show_protected_os_files = snapshot.show_protected_os_files;
+    spec.show_file_extensions = snapshot.show_file_extensions;
     spec.blank_click_action = NormalizeBlankClickAction(snapshot.blank_click_action);
     spec.preview_trigger = snapshot.preview_trigger;
     spec.hover_preview_delay_ms = snapshot.hover_preview_delay_ms;
@@ -191,5 +218,8 @@ void ApplyPickerAppearanceToSpec(const PickerAppearanceSnapshot& snapshot, ui::F
     spec.window_effect = ui::WindowEffectFromId(snapshot.window_effect);
     spec.panel_transparency = snapshot.panel_transparency;
     spec.frame_transparency = snapshot.frame_transparency;
+    if (snapshot.list_order) {
+        spec.folder_order = [order = snapshot.list_order](const std::wstring& folder) { return order->Resolve(folder); };
+    }
 }
 }

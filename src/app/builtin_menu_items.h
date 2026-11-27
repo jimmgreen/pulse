@@ -61,6 +61,8 @@ enum class BuiltinMenuItem : uint8_t {
     ConnectServer,
     CopyToWindow,
     MoveToWindow,
+    OpenNativeExplorer,
+    OpenInOtherPane,
     Count
 };
 

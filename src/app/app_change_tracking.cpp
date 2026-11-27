@@ -1,4 +1,5 @@
 #include "app_internal.h"
+#include "picker_saved_followup.h"
 #include "change_time.h"
 #include "change_tracking_polling.h"
 #include "../common/localization.h"
@@ -325,7 +326,10 @@ void FillChangePane(AppState& s, app::Tab& tab, ui::PaneViewModel& pane, const D
         pane.change_empty_text = tab.change_empty_text.empty() ? Text(I::ChangeScanning) : tab.change_empty_text;
         pane.change_status_text = tab.change_status_text;
     }
-    if (!s.appPrefs.change_tracking_enabled) return;
+    if (!s.appPrefs.change_tracking_enabled) {
+        FillPickerSavedBadges(s, tab, pane);
+        return;
+    }
     auto add = [&](const std::wstring& path, int index) {
         if (path.empty() || fs::IsVirtualPath(path)) return;
         const auto key = Key(path);
@@ -347,6 +351,7 @@ void FillChangePane(AppState& s, app::Tab& tab, ui::PaneViewModel& pane, const D
         const auto& entry = tab.EntryAt(static_cast<size_t>(source));
         if (entry.is_dir && !entry.change_record_only) add(EntryFullPath(tab, source), source);
     }
+    FillPickerSavedBadges(s, tab, pane);
 }
 
 void UpdateChangeHover(AppState& s, const ui::HitTestResult& hit, POINT point) {

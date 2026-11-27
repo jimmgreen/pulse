@@ -174,6 +174,17 @@ std::vector<std::wstring> JumpHistory::Top(const std::wstring& app, size_t limit
     return paths;
 }
 
+bool JumpHistory::Remove(const std::wstring& path) {
+    if (path.empty()) return false;
+    std::lock_guard lock(mu_);
+    const std::wstring key = Key(path);
+    const auto before = entries_.size();
+    std::erase_if(entries_, [&](const Entry& e) { return e.key == key; });
+    if (entries_.size() == before) return false;
+    SaveLocked();
+    return true;
+}
+
 void JumpHistory::Clear() {
     std::lock_guard lock(mu_);
     entries_.clear();

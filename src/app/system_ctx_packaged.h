@@ -6,7 +6,7 @@
 #include <unordered_set>
 namespace pulse::app::sysctx {
 inline bool SystemItemToggleable(const Item& item) {
-    return item.source == Source::Registry &&
+    return item.source == Source::Registry && !item.registry_read_only &&
         (item.kind == Kind::Verb || item.kind == Kind::ShellEx || item.kind == Kind::DragDrop) &&
         (!item.is_protected || CanRestoreShellLink(item)) && !item.trusted_installer && item.root != Root::File;
 }

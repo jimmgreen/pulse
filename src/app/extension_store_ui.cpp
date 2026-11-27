@@ -301,6 +301,7 @@ const extensions::Manifest* PackageManifestById(const std::string& id) {
 void EnrichItemFromManifest(AppState& s, ui::ExtensionStoreItem& item) {
     if (item.settings_package >= 0) {
         item.has_menu_tab = !extensions::native::KnownPackageCommands(s, static_cast<size_t>(item.settings_package)).empty();
+        item.plugin_tabs = extensions::native::PackageSettingsExtraTabTitles(s.hwnd, static_cast<size_t>(item.settings_package));
     }
     const auto* manifest = PackageManifestById(item.id);
     if (!manifest) return;

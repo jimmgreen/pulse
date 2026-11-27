@@ -59,6 +59,8 @@ struct TagCatalogSnapshot {
 void PublishTagCatalog(std::shared_ptr<const TagCatalogSnapshot> snapshot);
 std::shared_ptr<const TagCatalogSnapshot> CurrentTagCatalog();
 std::shared_ptr<const TagGroupMap> TagGroupsForFolder(const std::wstring& folder);
+std::shared_ptr<const TagGroupMap> TagGroupsForFolder(const std::wstring& folder,
+    const std::shared_ptr<const TagCatalogSnapshot>& catalog);
 
 // Media grouping for one folder: the group of each file whose values are
 // known, for that exact file version. Files not listed (pending, unreadable,
@@ -148,6 +150,7 @@ class ScopedEntryGrouping {
 public:
     // `folder` resolves tag groups (GroupBy::Tag) and media groups.
     explicit ScopedEntryGrouping(int group_by, const std::wstring& folder = {});
+    explicit ScopedEntryGrouping(EntryGrouping grouping);
     ~ScopedEntryGrouping();
     ScopedEntryGrouping(const ScopedEntryGrouping&) = delete;
     ScopedEntryGrouping& operator=(const ScopedEntryGrouping&) = delete;

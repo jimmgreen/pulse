@@ -60,6 +60,7 @@ struct AppPrefs {
     bool list_smart_date = true;
     bool list_zebra_rows = true;
     bool list_tree_sticky = true;      // 滚动时固定上级: details tree folders stay pinned
+    bool list_scroll_past_end = true;  // 滚动到最后一项之后: lists scroll on past their end (room to drop)
     bool list_size_bar = false;
     // Folders in the list get their size worked out on their own; off, the
     // size cell offers it per folder (a size sort still asks for them all).
@@ -165,6 +166,13 @@ struct AppPrefs {
     bool jump_history = true;                // frequent places first (jump_history.tsv)
     bool dialog_adaptive_legacy = true;      // non-elevated adaptive legacy Win32/WinForms/WinUI dialog takeover
     bool global_search_apps = true;          // Start menu programs in quick search results
+    bool global_search_apps_first = false;   // 应用 group above 跳转 / 最佳匹配
+    // Quick search order (global_search_arrange.h values): sort, direction,
+    // folder placement and grouping, kept between summons.
+    int global_search_sort = 0;
+    bool global_search_sort_desc = false;
+    int global_search_folders = 0;
+    int global_search_group = 0;
     bool show_hidden_files = false;
     // 文件扩展名 (a toolbar switch): off draws files of a registered type
     // without their extension, as File Explorer can (ui/known_extensions.h).
@@ -203,6 +211,7 @@ struct AppPrefs {
     bool preview_prefer_system = false; // Office previews with a native/system switch
     int preview_volume_percent = 100;
     bool preview_muted = false;
+    bool preview_immersive = true;   // Quick Look photo viewer for pictures / videos
     bool change_tracking_enabled = false;
     int change_tracking_days = 7;
     // system / zh-CN / en-US

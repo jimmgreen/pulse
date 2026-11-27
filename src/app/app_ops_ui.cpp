@@ -9,6 +9,7 @@
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
 #include "../ui/file_operation_dialog.h"
+#include "../ui/file_operation_progress_state.h"
 #include "../ui/ui_renderer.h"
 #include "../ui/batch_rename_dialog.h"
 #include "../ui/ai_list_overlay.h"
@@ -372,7 +373,7 @@ struct FileClipboardPaste {
     std::atomic<bool> cancelled{false};
     std::atomic<bool> done{false};
     HWND notify = nullptr;  // receives WM_FILE_CLIPBOARD_READY once `done` is set
-    ULONGLONG deadline = 0;
+    ULONGLONG deadline = 0; // OpenClipboard retry budget, not remote rendering time.
     uint32_t sequence = 0;
     std::wstring folder;
     app::TreeTransferDestinations targets;
@@ -423,8 +424,9 @@ void PasteShellFileFormats(AppState& s, const app::TreeTransferDestinations& tar
     }
     const auto& destination = targets.folders.front();
     ArmArrivalSelection(s, nullptr, 0, 8000);
-    if (!s.ops.RunShellVerb({ClipboardPath(destination)}, L"paste", true, s.hwnd))
-        ops::PasteShellClipboard(destination);
+    if (!s.ops.RunShellVerb({ClipboardPath(destination)}, L"paste", true, s.hwnd) &&
+        !ops::PasteShellClipboard(destination))
+        NotifyClipboardPasteFailed(s);
 }
 
 void StartFileClipboardPaste(AppState& s, const app::Tab& tab, app::TreeTransferDestinations targets) {
@@ -470,13 +472,10 @@ void PollFileClipboardPaste(AppState& s) {
         CancelFileClipboardPaste(s);
         return;
     }
-    if (!request->done.load(std::memory_order_acquire)) {
-        if (GetTickCount64() < request->deadline) return;
-        CancelFileClipboardPaste(s);
-        diagnostics::runtime::Event("file_clipboard_paste_timeout");
-        NotifyClipboardPasteFailed(s);
-        return;
-    }
+    // The worker bounds OpenClipboard retries. GetClipboardData may already
+    // be rendering a remote file list; its result must not be discarded just
+    // because the lock-acquisition deadline elapsed. Navigation still cancels.
+    if (!request->done.load(std::memory_order_acquire)) return;
     CancelFileClipboardPaste(s);
     if (request->result == ops::ClipboardFileRead::Changed) return;
     const auto targets = TreeTransferDestinationsForTab(*tab);
@@ -1853,7 +1852,8 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     // the person watches and the strip lists the rest. Finished cleanly while
     // others run: the card goes on with the next one in place instead of closing.
     if (status.task_id != 0 && s.operationUiTaskId && status.task_id != s.operationUiTaskId && !tracked_retry &&
-        OperationWindowVisible(s) && status.authorization == ops::AuthorizationState::None) {
+        s.operationWindow && s.operationWindow->CanFollowNextTask() &&
+        status.authorization == ops::AuthorizationState::None) {
         if (const auto shown = s.ops.QueryTask(s.operationUiTaskId); shown && shown->active) {
             status = *shown;
         } else if (status.active && shown && shown->phase == ops::OpPhase::Completed && shown->failed_items == 0) {
@@ -1885,7 +1885,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     if (s.operationWindow) {
         s.operationWindow->Update(status);
         // Everything else running or queued, listed under the shown task.
-        s.operationWindow->SetOtherTasks(status.active || OperationWindowVisible(s)
+        s.operationWindow->SetOtherTasks(status.active || s.operationWindow->CanFollowNextTask()
             ? s.ops.ActiveStatuses(true) : std::vector<ops::OpStatus>{});
     }
 
@@ -1939,8 +1939,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
                                 status.type == ops::OpType::CreateTextFile;
         const bool emptying = status.type == ops::OpType::EmptyRecycle;
         const auto delay = emptying ? std::chrono::milliseconds(400) : kOperationAutoShowDelay;
-        const bool nearly_done = !emptying &&
-            (status.percent >= 90.0f || (status.external && status.percent >= 84.0f));
+        const bool nearly_done = ui::TransferNearDoneSuppressesAutoShow(status);
         // A modal prompt (for example an archive password or the write confirmation) must stay
         // above progress, and the delay restarts after it so the window does not pop up in the
         // short gap between two prompts.
@@ -1957,7 +1956,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     if (s.operationPinnedByUser) return;
 
     if (status.phase == ops::OpPhase::Completed) {
-        // The live window closes immediately on success; retain completion time only.
+        // The live window owns its success hold and close; retain completion time only.
         if (s.operationFinishedAt.time_since_epoch().count() == 0)
             s.operationFinishedAt = now;
     } else if (status.phase == ops::OpPhase::Failed) {

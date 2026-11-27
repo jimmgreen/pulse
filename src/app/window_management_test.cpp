@@ -1,4 +1,5 @@
 #include "window_management_test.h"
+#include "animation_integration_hooks.h"
 #include "app_internal.h"
 #include "explorer_shortcuts.h"
 #include "keymap_input.h"
@@ -17,6 +18,7 @@
 #include "workspace_path.h"
 #include "tray_reveal.h"
 #include "../common/utf8_file.h"
+#include "../common/picker_pulse_open.h"
 #include "../ui/ui_renderer.h"
 #include "../ui/view_layout.h"
 #include <algorithm>
@@ -1544,6 +1546,77 @@ __declspec(noinline) static int RunWindowManagementFullTest(AppState &original, 
     return log.failed ? 1 : 0;
 }
 int RunWindowManagementTest(AppState& original, const std::wstring& report_path) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_PICKER_OPEN_ONLY", nullptr, 0)) {
+        Report log;
+        if (_wfopen_s(&log.file, report_path.c_str(), L"wb") != 0 || !log.file) return 2;
+        wchar_t directory[32768]{};
+        const DWORD count = GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", directory, ARRAYSIZE(directory));
+        const std::filesystem::path root(directory);
+        if (!original.isolatedTest || !count || count >= ARRAYSIZE(directory) || !root.is_absolute()) {
+            log.Check(false, "picker receiver probe requires isolated instance and absolute fixture root");
+        } else {
+            const auto folder = root / L"picker receiver folder";
+            std::filesystem::create_directories(folder);
+            const auto file = folder / L"selected item.txt";
+            FILE* fixture = nullptr;
+            _wfopen_s(&fixture, file.c_str(), L"wb");
+            if (fixture) { std::fputs("picker receiver fixture", fixture); std::fclose(fixture); }
+            log.Check(fixture != nullptr, "receiver fixture file created inside isolated data root");
+            const auto pump = [&](auto ready) {
+                const auto deadline = GetTickCount64() + 10000;
+                do {
+                    MSG message{};
+                    while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                        if (message.message == WM_QUIT) return false;
+                        TranslateMessage(&message); DispatchMessageW(&message);
+                    }
+                    if (ready()) return true;
+                    MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+                } while (GetTickCount64() < deadline);
+                return ready();
+            };
+            const auto folder_path = fs::NormalizePath(folder.wstring());
+            const auto file_path = fs::NormalizePath(file.wstring());
+            const int before_policy = original.appPrefs.external_open;
+            const bool before_shot = original.shot.active;
+            original.shot.active = false;
+            for (int policy = 0; fixture && policy != 3; ++policy) {
+                original.appPrefs.external_open = policy;
+                for (const bool select_file : {false, false, true}) {
+                    const size_t before_tabs = original.window_tabs.items.size();
+                    const size_t before_windows = original.core.windows.Count();
+                    const auto result = OpenExternalFolder(original,
+                        picker_pulse_open::Intent(select_file ? file.wstring() : folder.wstring(), select_file));
+                    std::fprintf(log.file, "CASE external_policy=%d file=%d status=%d tabs_before=%zu tabs_after=%zu\n",
+                        policy, select_file ? 1 : 0, static_cast<int>(result.status), before_tabs, original.window_tabs.items.size());
+                    log.Check(result.status == ExternalOpenStatus::Dispatched && result.target == &original,
+                        "actual receiver dispatches picker intent to isolated Pulse window");
+                    log.Check(original.window_tabs.items.size() == before_tabs + 1 && original.core.windows.Count() == before_windows,
+                        "actual receiver creates new tab rather than dedupe or new window for every external-open policy");
+                    const bool loaded = pump([&] {
+                        const auto* tab = ActiveTab(original);
+                        return tab && !tab->loading && !tab->pending_generation && tab->snapshot && tab->current_path == folder_path;
+                    });
+                    log.Check(loaded, "new active tab finishes actual filesystem enumeration at requested folder");
+                    if (select_file) {
+                        const bool selected = pump([&] {
+                            const auto* tab = ActiveTab(original);
+                            const auto paths = tab ? SelectedFullPaths(*tab) : std::vector<std::wstring>{};
+                            return paths.size() == 1 && paths.front() == file_path;
+                        });
+                        log.Check(selected, "file intent selects exactly the real requested file after enumeration");
+                    }
+                }
+            }
+            original.appPrefs.external_open = before_policy;
+            original.shot.active = before_shot;
+        }
+        std::fprintf(log.file, "Failures: %d\n", log.failed);
+        std::fclose(log.file);
+        return log.failed ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_TEST_ANIMATION_INTEGRATION", nullptr, 0))
+        return RunAnimationIntegrationProbe(original, report_path);
     if (GetEnvironmentVariableW(L"PULSE_TEST_EXPLORER_ROLLBACK_ONLY", nullptr, 0)) {
         Report log;
         if (_wfopen_s(&log.file, report_path.c_str(), L"wb") != 0 || !log.file) return 2;

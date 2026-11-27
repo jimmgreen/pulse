@@ -99,8 +99,21 @@ bool ExtensionStoreDetailAction(AppState& s, int action) {
         if (detail_item && detail_item->settings_package >= 0) {
             if (action == Value(Action::StoreDetailOpenMenu))
                 extensions::native::RequestSettingsPagesContextMenu(s.hwnd, static_cast<size_t>(detail_item->settings_package));
-            else
+            else {
+                // 设置 opens 常用设置, not whichever of the package's own tabs was open last.
                 extensions::native::RequestSettingsPagesPackage(s.hwnd, static_cast<size_t>(detail_item->settings_package));
+                extensions::native::SetFocusedSettingsPluginTab(s.hwnd, 0);
+            }
+            OpenSettingsTab(s, ui::kSettingsPageNativeExtensions);
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+        }
+        return true;
+    } else if (range(Action::StoreDetailPluginTabBase, 6)) {
+        // 支持格式 and the package's other tabs: its settings page, opened on that tab.
+        if (detail_item && detail_item->settings_package >= 0) {
+            extensions::native::RequestSettingsPagesPackage(s.hwnd, static_cast<size_t>(detail_item->settings_package));
+            extensions::native::SetFocusedSettingsPluginTab(s.hwnd, 1 + action - Value(Action::StoreDetailPluginTabBase));
+            extensions::native::SetFocusedSettingsMode(s.hwnd, 0);
             OpenSettingsTab(s, ui::kSettingsPageNativeExtensions);
             InvalidateRect(s.hwnd, nullptr, FALSE);
         }

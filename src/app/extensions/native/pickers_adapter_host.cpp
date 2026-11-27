@@ -132,7 +132,7 @@ struct PickerHostDispatcher : std::enable_shared_from_this<PickerHostDispatcher>
             : job.spec.kind == PickerRequestKind::PickFolders ? ui::PickerMode::Folder
             : ui::PickerMode::File;
         picker.allow_multiselect = (job.spec.flags & PULSE_PICKER_FLAG_MULTISELECT) != 0;
-        picker.show_hidden = ((job.spec.flags & PULSE_PICKER_FLAG_SHOW_HIDDEN) != 0) || app->appPrefs.show_hidden_files;
+        picker.show_hidden = (job.spec.flags & PULSE_PICKER_FLAG_SHOW_HIDDEN) != 0;
         picker.prompt_overwrite = (job.spec.flags & PULSE_PICKER_FLAG_NO_OVERWRITE_PROMPT) == 0;
         if (!job.spec.title.empty()) {
             picker.title = std::move(job.spec.title);

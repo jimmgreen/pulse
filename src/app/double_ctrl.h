@@ -1,40 +1,39 @@
 #pragma once
 #include <windows.h>
+#include <array>
 #include <atomic>
 #include <cstdint>
-#include <functional>
-#include <memory>
+#include <mutex>
 #include <thread>
 
 namespace pulse {
-// Two clean Ctrl taps: each held briefly, the second starting soon after the
-// first ends, with no other key or mouse button in between. The logic is kept
-// apart from the listener so it can be tested with synthetic timings.
 class DoubleCtrlDetector {
 public:
-    static constexpr uint64_t kHoldMs = 280;  // longest press that still counts as a tap
+    static constexpr uint64_t kHoldMs = 280;
     void SetGap(uint32_t ms) { gap_ = ms; }
-    // A key event (ctrl = either Ctrl key). True when it completes a double tap.
-    bool Key(bool ctrl, bool down, uint64_t now);
-    // A mouse button, wheel or anything else that spoils the gesture.
+    bool Key(bool ctrl, bool down, uint64_t now) {
+        return PhysicalKey(ctrl ? VK_LCONTROL : 'A', down, now);
+    }
+    bool PhysicalKey(UINT key, bool down, uint64_t now, bool injected = false);
+    void Prime(UINT key) { if (key < pressed_.size()) { pressed_[key] = true; Interrupt(); } }
     void Interrupt();
-    // A tap is under way (or could still be completed): the listener watches
-    // mouse buttons only then.
     bool Pending(uint64_t now) const {
-        return held_ || phase_ == Phase::SecondDown || (phase_ == Phase::FirstUp && now - up_at_ <= gap_);
+        return phase_ == Phase::FirstDown || phase_ == Phase::SecondDown ||
+            (phase_ == Phase::FirstUp && now - up_at_ <= gap_);
     }
 private:
     enum class Phase : uint8_t { Idle, FirstDown, FirstUp, SecondDown, Spoiled };
+    bool Blocked(UINT except) const;
     Phase phase_ = Phase::Idle;
-    bool held_ = false;
+    std::array<bool, 256> pressed_{};
+    std::array<bool, 256> injected_{};
+    UINT tap_key_ = 0;
     uint64_t down_at_ = 0, up_at_ = 0;
     uint32_t gap_ = 300;
 };
 
-// Listens for the double tap on a small thread of its own (Raw Input sink on a
-// message-only window: no keyboard hook, so it cannot slow typing anywhere)
-// and posts `message` to `target`. The shelf can share this listener and
-// optionally request periodic pointer samples.
+// UI-owned lifecycle; hooks run only while enabled, on a dedicated message thread.
+// All hook callbacks pass input through and only update state/post notifications.
 class DoubleCtrlWatcher {
 public:
     DoubleCtrlWatcher() = default;
@@ -42,33 +41,29 @@ public:
     DoubleCtrlWatcher(const DoubleCtrlWatcher&) = delete;
     DoubleCtrlWatcher& operator=(const DoubleCtrlWatcher&) = delete;
     void Update(HWND target, UINT message, bool enabled, uint32_t gap_ms);
-    using InputObserver = std::function<void(const RAWINPUT&)>;
-    using InputPoll = std::function<void()>;
-    void SetInputObserver(InputObserver observe, InputPoll poll = {});
     void Stop();
-    bool Running() const { return thread_.joinable(); }
-    // Full-screen games, presentations and other "do not disturb" states.
+    bool Running() const { return running_.load(); }
+    bool IsCurrentTrigger(WPARAM generation) const {
+        return Running() && generation != 0 && generation == generation_.load();
+    }
+    DWORD LastError() const { return error_.load(); }
     static bool QuietMoment();
 private:
+    friend struct DoubleCtrlWatcherTestAccess;
     void Run();
-    static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
-    void OnInput(HRAWINPUT input);
-    void WatchMouse(bool on);
-    void RefreshInputDevices();
-    struct Observer {
-        InputObserver on_input;
-        InputPoll poll;
-    };
+    void StopLocked();
+    static LRESULT CALLBACK KeyboardProc(int code, WPARAM wparam, LPARAM lparam);
+    static LRESULT CALLBACK MouseProc(int code, WPARAM wparam, LPARAM lparam);
+    static thread_local DoubleCtrlWatcher* current_;
+    std::mutex lifecycle_;
     std::thread thread_;
-    std::atomic<DWORD> thread_id_{0};
-    std::atomic<HWND> target_{nullptr};
-    std::atomic<UINT> message_{0};
-    std::atomic<uint32_t> gap_{300};
-    std::atomic<bool> enabled_{false};
-    std::atomic<std::shared_ptr<const Observer>> observer_;
-    HWND window_ = nullptr;          // listener thread only
-    bool mouse_ = false;             // listener thread only
-    bool polling_ = false;           // listener thread only
-    DoubleCtrlDetector detector_;    // listener thread only
+    std::atomic<bool> running_{false};
+    std::atomic<DWORD> error_{ERROR_SUCCESS};
+    std::atomic<ULONG_PTR> generation_{1};
+    HWND target_ = nullptr;
+    UINT message_ = 0;
+    uint32_t gap_ = 300;
+    HANDLE ready_ = nullptr, stop_ = nullptr;
+    DoubleCtrlDetector detector_;
 };
 }

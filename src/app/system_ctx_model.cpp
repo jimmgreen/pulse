@@ -438,6 +438,7 @@ bool GenericProduct(const std::wstring& product) {
 }
 
 std::wstring MethodText(const Item& item, bool toggleable) {
+    if (item.registry_read_only) return l10n::Get(l10n::StringId::ContextTreeRegistryChild);
     if (item.source == sysctx::Source::Packaged) return l10n::Get(l10n::StringId::PackagedMenuReadOnly);
     if (item.trusted_installer)
         return l10n::Get(l10n::StringId::WindowsManagesThisEntryItselfTrustedInstallerPulseLeavesItAl).c_str();
@@ -476,8 +477,11 @@ std::wstring SceneKeys(const sysctx::Scene& scene) {
 // The key ContextMenuPrefs files the entry under in Pulse's own menu: shell
 // extensions by CLSID, static verbs by their menu text (as Pulse sees it).
 std::wstring PulseKey(const Item& item) {
+    if (!item.parent_id.empty() || item.registry_read_only) return {};
     if (item.kind == Kind::ShellEx) return item.clsid.empty() ? std::wstring() : ipc::HandlerCatalogKey(item.clsid);
-    if (item.kind == Kind::Verb && !item.display.empty()) return ipc::CatalogKey(item.display, false);
+    if (item.kind == Kind::Verb && !item.display.empty())
+        return ipc::IsCompressVendorFlyout(item.display) ? ipc::CompressCatalogKey()
+            : ipc::CatalogKey(item.display, item.has_children);
     return {};
 }
 
@@ -560,6 +564,11 @@ std::wstring SystemCtxModel::OpKey(Root root, Kind kind, const std::wstring& key
     return key;
 }
 
+std::wstring SystemCtxModel::SelectionKey(const Item& item) {
+    return item.tree_id.empty() ? OpKey(item.root, item.kind, item.key_path)
+        : std::to_wstring(static_cast<int>(item.root)) + L"|tree|" + item.tree_id;
+}
+
 std::wstring SystemCtxModel::PendingKey(const Op& op) {
     std::wstring key = OpKey(op.root, op.kind, op.key_path);
     if (op.action == Action::Position) key += L"|pos";
@@ -580,18 +589,18 @@ void SystemCtxModel::Refresh() {
     StartJob(ui::SysCtxView::State::Loading, {}, 0, false);
 }
 
-void SystemCtxModel::StartJob(ui::SysCtxView::State state, std::vector<Op> ops, size_t pop_undo, bool record_undo) {
+void SystemCtxModel::StartJob(ui::SysCtxView::State state, std::vector<Op> ops, size_t pop_undo, bool record_undo, int only_scene) {
     std::lock_guard lock(mutex_);
     if (state_ == ui::SysCtxView::State::Loading || state_ == ui::SysCtxView::State::Applying) return;
     if (worker_.joinable()) worker_.join();  // finished: it cleared the state before exiting
     state_ = state;
     dirty_ = true;
-    worker_ = std::thread([this, ops = std::move(ops), pop_undo, record_undo]() mutable {
-        RunJob(std::move(ops), pop_undo, record_undo);
+    worker_ = std::thread([this, ops = std::move(ops), pop_undo, record_undo, only_scene]() mutable {
+        RunJob(std::move(ops), pop_undo, record_undo, only_scene);
     });
 }
 
-SystemCtxModel::ScanResult SystemCtxModel::Scan() const {
+SystemCtxModel::ScanResult SystemCtxModel::Scan(int only_scene) const {
     const sysctx::Roots roots;
     const auto packaged = shell::PackagedContextMenuVerbs();
     ScanResult out;
@@ -602,6 +611,7 @@ SystemCtxModel::ScanResult SystemCtxModel::Scan() const {
     };
     std::unordered_map<std::wstring, VersionInfo> versions;  // file -> its version strings
     for (size_t i = 0; i < scene_ids_.size(); ++i) {
+        if (only_scene >= 0 && static_cast<int>(i) != only_scene) continue;
         const std::wstring& id = scene_ids_[i];
         sysctx::Scene scene;
         if (id.rfind(L"ext:", 0) == 0) {
@@ -740,7 +750,7 @@ bool SystemCtxModel::RunElevated(const std::vector<Op>& ops, std::vector<OpResul
     return true;
 }
 
-void SystemCtxModel::RunJob(std::vector<Op> ops, size_t pop_undo, bool record_undo) {
+void SystemCtxModel::RunJob(std::vector<Op> ops, size_t pop_undo, bool record_undo, int only_scene) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     std::wstring message;
     bool error = false;
@@ -793,12 +803,20 @@ void SystemCtxModel::RunJob(std::vector<Op> ops, size_t pop_undo, bool record_un
             }
         }
     }
-    ScanResult scanned = Scan();
+    ScanResult scanned = Scan(only_scene);
     HWND notify = nullptr;
     {
         std::lock_guard lock(mutex_);
-        entries_ = std::move(scanned.entries);
-        scene_keys_ = std::move(scanned.keys);
+        if (only_scene >= 0) {
+            entries_.resize(scanned.entries.size());
+            scene_keys_.resize(scanned.keys.size());
+            const size_t index = static_cast<size_t>(only_scene);
+            entries_[index] = std::move(scanned.entries[index]);
+            scene_keys_[index] = std::move(scanned.keys[index]);
+        } else {
+            entries_ = std::move(scanned.entries);
+            scene_keys_ = std::move(scanned.keys);
+        }
         if (!ops.empty()) {
             // Queued entries that went through (or failed for good) leave the
             // queue; a cancelled UAC prompt keeps them for another try.
@@ -960,13 +978,13 @@ std::shared_ptr<const ui::SysCtxView> SystemCtxModel::View() {
             const bool matches[ui::kSysCtxFilterCount] = {true, !item.enabled, item.root == Root::Machine, third,
                                                           item.missing, hidden_by_default};
             for (int f = 0; f < ui::kSysCtxFilterCount; ++f) view->filter_counts[static_cast<size_t>(f)] += matches[f] ? 1 : 0;
-            const std::wstring key = OpKey(item.root, item.kind, item.key_path);
+            const std::wstring key = SelectionKey(item);
 
             std::wstring title = TitleLocked(e);
 
             // Live preview: the menu after the queued changes; what is off
             // sits on the 已隐藏 shelf under it.
-            {
+            if (item.parent_id.empty()) {
                 ui::SysCtxPreviewItem p;
                 p.title = title;
                 p.icon_path = e.icon;
@@ -987,6 +1005,7 @@ std::shared_ptr<const ui::SysCtxView> SystemCtxModel::View() {
 
             ui::SysCtxRowView row;
             row.title = std::move(title);
+            row.depth = item.depth;
             const std::wstring target = !item.file.empty() ? item.file : !item.command.empty() ? item.command : item.clsid;
             const bool handler = item.kind == Kind::ShellEx || item.kind == Kind::DragDrop;
             if (item.missing) {
@@ -1049,10 +1068,11 @@ std::shared_ptr<const ui::SysCtxView> SystemCtxModel::View() {
             row.registry_copyable = item.source == sysctx::Source::Registry;
             row.registry = item.source == sysctx::Source::Packaged ? l10n::Get(l10n::StringId::PackagedMenuSource)
                            : item.root == Root::File ? item.key_path
-                           : (row.machine ? L"HKLM\\Software\\Classes\\" : L"HKCU\\Software\\Classes\\") + item.key_path;
+                           : (row.machine ? L"HKLM\\" : L"HKCU\\") + (item.registry_path.empty() ? L"Software\\Classes\\" + item.key_path : item.registry_path);
             row.file = !item.file.empty() ? item.file : !item.command.empty() ? item.command : item.clsid;
             row.publisher = e.publisher;
             row.method = MethodText(item, Toggleable(item));
+            if (item.children_incomplete) row.method += L"\n" + l10n::Get(l10n::StringId::ContextTreePartial);
             if (item.source == sysctx::Source::Packaged)
                 row.kind_label = l10n::Get(l10n::StringId::PackagedMenuSource);
             if (handler && item.source == sysctx::Source::Registry) {
@@ -1166,6 +1186,62 @@ void SystemCtxModel::SelectSub(int sub) {
     dirty_ = true;
 }
 
+std::wstring SystemCtxModel::NormalizeExtension(std::wstring extension) {
+    const auto first = extension.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) return {};
+    extension = extension.substr(first, extension.find_last_not_of(L" \t\r\n") - first + 1);
+    if (extension.front() != L'.') extension.insert(extension.begin(), L'.');
+    if (extension.size() < 2 || extension.size() > 33) return {};
+    for (size_t i = 1; i < extension.size(); ++i) {
+        const wchar_t c = extension[i];
+        if (!std::iswalnum(c) && c != L'_' && c != L'-' && c != L'+') return {};
+        extension[i] = static_cast<wchar_t>(std::towlower(c));
+    }
+    return extension;
+}
+
+bool SystemCtxModel::SelectExtension(std::wstring extension) {
+    extension = NormalizeExtension(std::move(extension));
+    if (extension.empty()) return false;
+    int scene = -1;
+    {
+        std::lock_guard lock(mutex_);
+        if (state_ != ui::SysCtxView::State::Ready) return false;
+        auto& nav = nav_[10];
+        const auto existing = std::find(nav.subs.begin(), nav.subs.end(), extension);
+        int sub = 0;
+        if (existing != nav.subs.end()) {
+            sub = static_cast<int>(existing - nav.subs.begin());
+            scene = nav.scenes[static_cast<size_t>(sub)];
+        } else {
+            if (custom_extension_scene_ < 0) {
+                custom_extension_scene_ = static_cast<int>(scene_ids_.size());
+                custom_extension_sub_ = static_cast<int>(nav.subs.size());
+                scene_ids_.push_back({});
+                nav.scenes.push_back(custom_extension_scene_);
+                nav.subs.push_back({});
+                entries_.resize(scene_ids_.size());
+                scene_keys_.resize(scene_ids_.size());
+            }
+            scene = custom_extension_scene_;
+            sub = custom_extension_sub_;
+            scene_ids_[static_cast<size_t>(scene)] = L"ext:" + extension;
+            nav.subs[static_cast<size_t>(sub)] = extension;
+            entries_[static_cast<size_t>(scene)].clear();
+            scene_keys_[static_cast<size_t>(scene)].clear();
+        }
+        nav_index_ = 10;
+        sub_index_[10] = sub;
+        selected_.clear();
+        overview_ = false;
+        filter_ = ui::kSysCtxFilterAll;
+        message_.clear();
+        dirty_ = true;
+    }
+    StartJob(ui::SysCtxView::State::Loading, {}, 0, false, scene);
+    return true;
+}
+
 void SystemCtxModel::SetFilter(int filter) {
     std::lock_guard lock(mutex_);
     if (filter < 0 || filter >= ui::kSysCtxFilterCount) return;
@@ -1177,7 +1253,7 @@ void SystemCtxModel::SelectRow(int row) {
     std::lock_guard lock(mutex_);
     const Entry* e = RowEntryLocked(row);
     if (!e) return;
-    const std::wstring key = OpKey(e->item.root, e->item.kind, e->item.key_path);
+    const std::wstring key = SelectionKey(e->item);
     selected_ = key == selected_ ? std::wstring() : key;
     if (!selected_.empty()) side_tab_ = 1;
     dirty_ = true;
@@ -1232,7 +1308,7 @@ void SystemCtxModel::SelectPreview(int item) {
     const auto [s, i] = preview_map_[static_cast<size_t>(item)];
     if (s < 0 || s >= static_cast<int>(entries_.size()) || i >= entries_[static_cast<size_t>(s)].size()) return;
     const Item& it = entries_[static_cast<size_t>(s)][i].item;
-    const std::wstring key = OpKey(it.root, it.kind, it.key_path);
+    const std::wstring key = SelectionKey(it);
     selected_ = key == selected_ ? std::wstring() : key;
     dirty_ = true;
 }
@@ -1369,6 +1445,7 @@ void SystemCtxModel::QueueSlowSkip(int index) {
 
 void SystemCtxModel::TogglePulseRow(int row) {
     std::lock_guard lock(mutex_);
+    if (state_ != ui::SysCtxView::State::Ready) return;
     const Entry* e = RowEntryLocked(row);
     if (!e) return;
     const std::wstring key = PulseKey(e->item);
@@ -1488,6 +1565,8 @@ std::wstring SystemCtxModel::TitleLocked(const Entry& e) const {
 }
 
 void SystemCtxModel::SetPulseHidden(std::vector<std::wstring> keys) {
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
     std::lock_guard lock(mutex_);
     if (keys == pulse_hidden_) return;
     pulse_hidden_ = std::move(keys);
@@ -1574,7 +1653,7 @@ std::wstring SystemCtxModel::RowRegistryPath(int row) {
     const Entry* e = RowEntryLocked(row);
     if (!e || e->item.source != sysctx::Source::Registry || e->item.root == Root::File) return {};
     return (e->item.root == Root::Machine ? L"HKEY_LOCAL_MACHINE" : L"HKEY_CURRENT_USER") +
-           std::wstring(L"\\Software\\Classes\\") + e->item.key_path;
+           std::wstring(L"\\") + (e->item.registry_path.empty() ? L"Software\\Classes\\" + e->item.key_path : e->item.registry_path);
 }
 
 std::wstring SystemCtxModel::RowFile(int row) {
@@ -1583,6 +1662,23 @@ std::wstring SystemCtxModel::RowFile(int row) {
     if (!e) return {};
     if (e->item.root == Root::File) return e->item.key_path;
     return e->item.file;
+}
+
+std::wstring SystemCtxModel::RowPulseTreeRoot(int row) {
+    std::lock_guard lock(mutex_);
+    const Entry* entry = RowEntryLocked(row);
+    if (!entry) return {};
+    if (row < 0) row = selected_row_;
+    const int scene = row_map_[static_cast<size_t>(row)].first;
+    const auto& entries = entries_[static_cast<size_t>(scene)];
+    for (size_t depth = 0; !entry->item.parent_id.empty() && depth < 32; ++depth) {
+        const auto parent = std::find_if(entries.begin(), entries.end(), [&](const Entry& candidate) {
+            return candidate.item.tree_id == entry->item.parent_id;
+        });
+        if (parent == entries.end() || &*parent == entry) return {};
+        entry = &*parent;
+    }
+    return entry->item.parent_id.empty() ? PulseKey(entry->item) : std::wstring();
 }
 
 std::wstring SystemCtxModel::RowPulseKey(int row) {

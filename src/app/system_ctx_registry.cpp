@@ -89,10 +89,10 @@ bool ReadDword(HKEY key, const wchar_t* name, DWORD& out) {
            type == REG_DWORD;
 }
 
-std::vector<std::wstring> Subkeys(HKEY key) {
+std::vector<std::wstring> Subkeys(HKEY key, size_t limit = SIZE_MAX) {
     std::vector<std::wstring> out;
     wchar_t name[256];
-    for (DWORD i = 0;; ++i) {
+    for (DWORD i = 0; out.size() < limit; ++i) {
         DWORD len = ARRAYSIZE(name);
         const LSTATUS st = RegEnumKeyExW(key, i, name, &len, nullptr, nullptr, nullptr, nullptr);
         if (st == ERROR_NO_MORE_ITEMS) break;
@@ -287,45 +287,218 @@ void FillHandler(const Roots& roots, Item& it) {
     }
 }
 
+Item ReadVerbItem(const Roots& roots, const Scene& scene, const std::wstring& cls, Root root,
+                  const std::wstring& relative, const std::wstring& absolute,
+                  const std::wstring& verb, HKEY key) {
+    Item it;
+    it.kind = Kind::Verb;
+    it.root = root;
+    it.scene = scene.id;
+    it.class_key = cls;
+    it.key_name = verb;
+    it.key_path = relative;
+    it.registry_path = absolute;
+    std::wstring text;
+    if (!ReadString(key, L"MUIVerb", text) || text.empty()) ReadString(key, nullptr, text);
+    it.display = text.empty() ? verb : StripMnemonic(ResolveIndirect(roots, text));
+    if (!it.display.empty() && it.display[0] == L'@') it.display = verb;
+    ReadString(key, L"Icon", it.icon);
+    Key cmd;
+    if (Open(key, L"command", KEY_READ, cmd) == ERROR_SUCCESS) ReadString(cmd.h, nullptr, it.command);
+    it.file = ResolveFile(RawPath(it.command));
+    if (it.file.empty() && !it.icon.empty()) it.file = ResolveFile(RawPath(it.icon));
+    it.missing = PointsAtMissingFile(it.command) || PointsAtMissingFile(it.icon);
+    it.extended = HasValue(key, L"Extended");
+    it.position = ReadPlace(key);
+    it.legacy_disable = HasValue(key, L"LegacyDisable");
+    it.programmatic_only = HasValue(key, L"ProgrammaticAccessOnly");
+    DWORD velocity = 0, flags = 0;
+    it.velocity_hidden = ReadDword(key, L"HideBasedOnVelocityId", velocity);
+    it.command_flags_hidden = ReadDword(key, L"CommandFlags", flags) && (flags & 0x8);
+    it.enabled = !(it.legacy_disable || it.programmatic_only || it.velocity_hidden || it.command_flags_hidden);
+    it.is_protected = IsProtectedVerb(verb);
+    if (!it.key_path.starts_with(L"commandstore:"))
+        it.trusted_installer = OwnedByTrustedInstaller(roots, root, it.key_path);
+    return it;
+}
+
 void ScanVerbs(const Roots& roots, const Scene& scene, const std::wstring& cls, Root root,
                std::vector<Item>& out) {
     Key shell;
     if (Open(RootKey(roots, root), FullPath(roots, root, cls + L"\\shell"), KEY_READ, shell) != ERROR_SUCCESS)
         return;
     for (const auto& verb : Subkeys(shell.h)) {
-        // printto only serves drag-onto-printer; Explorer never lists it.
         if (IEquals(verb, L"printto")) continue;
-        Key v;
-        if (Open(shell.h, verb, KEY_READ, v) != ERROR_SUCCESS) continue;
-        Item it;
-        it.kind = Kind::Verb;
-        it.root = root;
-        it.scene = scene.id;
-        it.class_key = cls;
-        it.key_name = verb;
-        it.key_path = cls + L"\\shell\\" + verb;
-        std::wstring text;
-        if (!ReadString(v.h, L"MUIVerb", text) || text.empty()) ReadString(v.h, nullptr, text);
-        it.display = text.empty() ? verb : StripMnemonic(ResolveIndirect(roots, text));
-        if (!it.display.empty() && it.display[0] == L'@') it.display = verb;
-        ReadString(v.h, L"Icon", it.icon);
-        Key cmd;
-        if (Open(v.h, L"command", KEY_READ, cmd) == ERROR_SUCCESS) ReadString(cmd.h, nullptr, it.command);
-        it.file = ResolveFile(RawPath(it.command));
-        if (it.file.empty() && !it.icon.empty()) it.file = ResolveFile(RawPath(it.icon));
-        it.missing = PointsAtMissingFile(it.command) || PointsAtMissingFile(it.icon);
-        it.extended = HasValue(v.h, L"Extended");
-        it.position = ReadPlace(v.h);
-        it.legacy_disable = HasValue(v.h, L"LegacyDisable");
-        it.programmatic_only = HasValue(v.h, L"ProgrammaticAccessOnly");
-        DWORD velocity = 0, flags = 0;
-        it.velocity_hidden = ReadDword(v.h, L"HideBasedOnVelocityId", velocity);
-        it.command_flags_hidden = ReadDword(v.h, L"CommandFlags", flags) && (flags & 0x8);
-        it.enabled = !(it.legacy_disable || it.programmatic_only || it.velocity_hidden || it.command_flags_hidden);
-        it.is_protected = IsProtectedVerb(verb);
-        it.trusted_installer = OwnedByTrustedInstaller(roots, root, it.key_path);
-        out.push_back(std::move(it));
+        Key key;
+        if (Open(shell.h, verb, KEY_READ, key) != ERROR_SUCCESS) continue;
+        const auto relative = cls + L"\\shell\\" + verb;
+        out.push_back(ReadVerbItem(roots, scene, cls, root, relative,
+                                  FullPath(roots, root, relative), verb, key.h));
     }
+}
+
+constexpr uint16_t kRegistryTreeDepth = 16;
+constexpr size_t kRegistryTreeRows = 4096;
+constexpr size_t kRegistryBranchRows = 256;
+
+std::wstring RegistryLocation(Root root, const std::wstring& path) {
+    return (root == Root::Machine ? L"m:" : L"u:") + Lower(path);
+}
+
+bool RelativeRegistryPath(std::wstring_view path) {
+    if (path.empty() || path.size() > 512 || path.front() == L'\\' ||
+        path.find(L"..") != path.npos || path.find(L':') != path.npos ||
+        path.find(L'/') != path.npos) return false;
+    return std::none_of(path.begin(), path.end(), [](wchar_t c) { return c < L' '; });
+}
+
+LSTATUS OpenTreePath(HKEY root, const std::wstring& path, Key& key) {
+    // RegOpenKeyEx can reject a single deeply nested path with ERROR_INVALID_PARAMETER.
+    // Traverse bounded relative segments while preserving the original hive/view.
+    size_t split = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        split = path.find(L'\\', split);
+        if (split == path.npos) return Open(root, path, KEY_READ, key);
+        ++split;
+    }
+    Key parent;
+    const auto status = Open(root, path.substr(0, split - 1), KEY_READ, parent);
+    if (status != ERROR_SUCCESS) return status;
+    return OpenTreePath(parent.h, path.substr(split), key);
+}
+
+// A separate occurrence per parent preserves shared CommandStore references.
+// All reads stay on Enumerate's worker; descendants never become write ops.
+void AppendRegistryTree(const Roots& roots, const Scene& scene, Item item,
+                        std::vector<Item>& out, std::set<std::wstring>& active,
+                        size_t& remaining) {
+    const auto location = RegistryLocation(item.root, item.registry_path);
+    const size_t index = out.size();
+    out.push_back(std::move(item));
+    auto& initial = out[index];
+    if (initial.kind != Kind::Verb) return;
+    Key key;
+    if (OpenTreePath(RootKey(roots, initial.root), initial.registry_path, key) != ERROR_SUCCESS) {
+        initial.children_incomplete = true;
+        return;
+    }
+    std::wstring commands, extended;
+    const bool subcommands = ReadString(key.h, L"SubCommands", commands);
+    ReadString(key.h, L"ExtendedSubCommandsKey", extended);
+    Key inline_shell;
+    const bool embedded = Open(key.h, L"shell", KEY_READ, inline_shell) == ERROR_SUCCESS;
+    initial.has_children = subcommands || !extended.empty() || embedded;
+    if (!initial.has_children) return;
+    if (initial.depth >= kRegistryTreeDepth || remaining == 0) {
+        initial.children_incomplete = true;
+        return;
+    }
+    active.insert(location);
+    // Copy parent data before appending: vector growth invalidates references.
+    const auto parent_id = initial.tree_id;
+    const auto class_key = initial.class_key;
+    const auto parent_relative = initial.key_path;
+    const auto parent_path = initial.registry_path;
+    const auto parent_root = initial.root;
+    const uint16_t depth = initial.depth + 1;
+    std::set<std::wstring> siblings;
+    size_t added = 0;
+    auto append = [&](Root root, const std::wstring& relative, const std::wstring& full,
+                      const std::wstring& name, HKEY child_key) {
+        const auto child_location = RegistryLocation(root, full);
+        if (!siblings.insert(child_location).second) return;
+        if (active.contains(child_location) || remaining == 0 || added >= kRegistryBranchRows) {
+            out[index].children_incomplete = true;
+            return;
+        }
+        auto child = ReadVerbItem(roots, scene, class_key, root, relative, full, name, child_key);
+        child.parent_id = parent_id;
+        child.tree_id = parent_id + L"|" + child_location;
+        child.depth = depth;
+        child.registry_read_only = true;
+        --remaining;
+        ++added;
+        const size_t child_index = out.size();
+        AppendRegistryTree(roots, scene, std::move(child), out, active, remaining);
+        out[index].children_incomplete = out[index].children_incomplete || out[child_index].children_incomplete;
+    };
+    auto scan_shell = [&](const std::wstring& relative) {
+        if (!RelativeRegistryPath(relative)) { out[index].children_incomplete = true; return; }
+        std::set<std::wstring> names;
+        bool found = false;
+        for (const Root root : {Root::User, Root::Machine}) {
+            Key shell;
+            if (OpenTreePath(RootKey(roots, root), FullPath(roots, root, relative), shell) != ERROR_SUCCESS)
+                continue;
+            found = true;
+            for (const auto& name : Subkeys(shell.h, kRegistryBranchRows + 1)) {
+                if (IEquals(name, L"printto") || !names.insert(Lower(name)).second) continue;
+                if (added >= kRegistryBranchRows || remaining == 0) {
+                    out[index].children_incomplete = true; break;
+                }
+                Key child;
+                if (Open(shell.h, name, KEY_READ, child) != ERROR_SUCCESS) {
+                    out[index].children_incomplete = true; continue;
+                }
+                const auto path = Join(relative, name);
+                append(root, path, FullPath(roots, root, path), name, child.h);
+            }
+        }
+        if (!found) out[index].children_incomplete = true;
+    };
+    if (!commands.empty()) {
+        size_t offset = 0;
+        size_t references = 0;
+        while (offset <= commands.size()) {
+            if (++references > kRegistryBranchRows || remaining == 0) {
+                out[index].children_incomplete = true; break;
+            }
+            const auto end = commands.find(L';', offset);
+            auto token = commands.substr(offset, end == commands.npos ? commands.npos : end - offset);
+            const auto first = token.find_first_not_of(L" \t\r\n");
+            const auto last = token.find_last_not_of(L" \t\r\n");
+            token = first == token.npos ? L"" : token.substr(first, last - first + 1);
+            if (!token.empty()) {
+                bool found = false;
+                if (RelativeRegistryPath(token) && token.find(L'\\') == token.npos) {
+                    // Match the existing runtime resolver: machine CommandStore first.
+                    for (const Root root : {Root::Machine, Root::User}) {
+                        const auto& store = root == Root::Machine ? roots.machine_command_store : roots.user_command_store;
+                        if (store.empty()) continue;
+                        const auto full = Join(store, token);
+                        Key child;
+                        if (OpenTreePath(RootKey(roots, root), full, child) != ERROR_SUCCESS) continue;
+                        append(root, L"commandstore:" + token, full, token, child.h);
+                        found = true; break;
+                    }
+                }
+                if (!found) out[index].children_incomplete = true;
+            }
+            if (end == commands.npos) break;
+            offset = end + 1;
+        }
+    } else if (embedded || subcommands) {
+        if (parent_relative.starts_with(L"commandstore:")) {
+            if (embedded) {
+                for (const auto& name : Subkeys(inline_shell.h, kRegistryBranchRows + 1)) {
+                    if (IEquals(name, L"printto")) continue;
+                    if (added >= kRegistryBranchRows || remaining == 0) {
+                        out[index].children_incomplete = true; break;
+                    }
+                    Key child;
+                    if (Open(inline_shell.h, name, KEY_READ, child) == ERROR_SUCCESS)
+                        append(parent_root, parent_relative + L"\\shell\\" + name,
+                               parent_path + L"\\shell\\" + name, name, child.h);
+                }
+            }
+        } else scan_shell(parent_relative + L"\\shell");
+    }
+    if (!extended.empty()) {
+        while (!extended.empty() && extended.back() == L'\\') extended.pop_back();
+        if (Lower(extended).ends_with(L"\\shell")) scan_shell(extended);
+        else scan_shell(extended + L"\\shell");
+    }
+    active.erase(location);
 }
 
 void ScanHandlers(const Roots& roots, const Scene& scene, const std::wstring& cls, Root root,
@@ -909,6 +1082,17 @@ std::vector<Item> Enumerate(const Roots& roots, const Scene& scene) {
         }
         out.push_back(std::move(it));
     }
+    if (scene.mode == SceneMode::Menu) {
+        std::vector<Item> tree;
+        size_t remaining = kRegistryTreeRows;
+        std::set<std::wstring> active;
+        for (auto& item : out) {
+            if (item.registry_path.empty()) item.registry_path = FullPath(roots, item.root, item.key_path);
+            item.tree_id = L"registry:" + scene.id + L"|" + RegistryLocation(item.root, item.registry_path);
+            AppendRegistryTree(roots, scene, std::move(item), tree, active, remaining);
+        }
+        return tree;
+    }
     return out;
 }
 
@@ -1013,7 +1197,9 @@ Op MakeOp(const Item& item, Action action) {
     op.action = action;
     op.kind = item.kind;
     op.root = item.root;
-    op.key_path = item.key_path;
+    // A child may be a globally shared CommandStore reference. Never turn a
+    // read-only tree occurrence into an Explorer-wide mutation batch.
+    if (!item.registry_read_only) op.key_path = item.key_path;
     return op;
 }
 

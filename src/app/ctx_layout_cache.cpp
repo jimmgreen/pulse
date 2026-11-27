@@ -350,7 +350,13 @@ bool ParseCtxLayout(const uint8_t* data, size_t size, std::wstring_view build,
     Reader r{ data + 4, data + size };
     uint32_t version = 0, count = 0;
     std::wstring writer;
-    if (!r.U32(version) || version != kCtxLayoutVersion || !r.W(writer) || writer != build ||
+    // The writer build is recorded, not matched: every Pulse build installed or
+    // run from a build folder shares this file, and rejecting the others' file
+    // threw away every learned menu at each switch, so the next right-click of
+    // every type grew again. The rows are only a prediction the live answer
+    // replaces; a change to how rows are stored bumps kCtxLayoutVersion.
+    (void)build;
+    if (!r.U32(version) || version != kCtxLayoutVersion || !r.W(writer) ||
         !r.U32(count) || count > kCtxLayoutMaxKeys)
         return false;
     CtxLayoutRecords parsed;

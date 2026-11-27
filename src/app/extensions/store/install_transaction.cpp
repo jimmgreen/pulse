@@ -507,10 +507,15 @@ StoreChangeReview ChangeReview(Session& session, const Value& registry, const st
     if (action == StoreChangeAction::Disable || action == StoreChangeAction::Uninstall) return review;
     const auto policy_bytes = Read(session.root / L"signature-policy.json", kMaxStoreRegistryBytes, &session.pins);
     review.policy_revision = PackageRevision(policy_bytes);
+    std::string policy_err;
+    const bool policy_allows_unsigned = VerifyPackageSignature({}, {}, policy_bytes, policy_err);
+    if (!policy_allows_unsigned && policy_err != "signature_required") Fail("invalid_signature_policy:" + policy_err);
+    const bool allow_unsigned_enable = devmode::Enabled(session.root) || policy_allows_unsigned;
     // Rolling back leaves the active revision, so an unsigned developer build may be left
-    // even with developer mode off; rolling back TO an unsigned revision needs developer mode.
+    // even with developer mode off; enabling or rolling back TO an unsigned revision needs
+    // developer mode (or a store policy with requireSigned:false).
     auto current = VerifyStoredPrivate(session, *entry, review.active_revision, true, action == StoreChangeAction::Enable,
-        action == StoreChangeAction::Rollback);
+        action == StoreChangeAction::Rollback || (action == StoreChangeAction::Enable && allow_unsigned_enable));
     review.publisher_id = current.publisher;
     auto target = current;
     if (action == StoreChangeAction::Rollback) {
@@ -638,6 +643,16 @@ bool ReadInstalledStore(const fs::path& root, InstalledSnapshot& out, std::strin
         Session session(root, false, true);
         InstalledSnapshot snapshot; snapshot.root = session.root; snapshot.missing = !session.root_exists;
         if (session.root_exists) {
+            const auto policy_path = session.root / L"signature-policy.json";
+            if (Exists(policy_path)) {
+                try {
+                    const auto policy_bytes = Read(policy_path, kMaxStoreRegistryBytes, &session.pins);
+                    std::string policy_err;
+                    snapshot.policy_allows_unsigned = VerifyPackageSignature({}, {}, policy_bytes, policy_err);
+                } catch (...) {
+                    snapshot.policy_allows_unsigned = false;
+                }
+            }
             const auto registry = Registry(session); snapshot.registry_revision = RegistryRevision(session);
             for (const auto& item : registry.find("packages")->items()) {
                 InstalledEntry row;

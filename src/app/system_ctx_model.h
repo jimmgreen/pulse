@@ -38,6 +38,8 @@ public:
 
     void SelectScene(int scene);
     void SelectSub(int sub);
+    static std::wstring NormalizeExtension(std::wstring extension);
+    bool SelectExtension(std::wstring extension); // one bounded custom scene; worker scan only
     void SetFilter(int filter);
     // Selects `row` of the current view (again: deselects) and shows 详情.
     void SelectRow(int row);
@@ -105,6 +107,7 @@ public:
     // Pulse's catalog key for the entry (ipc::HandlerCatalogKey / CatalogKey);
     // empty for kinds Pulse does not list as rows of its own.
     std::wstring RowPulseKey(int row);
+    std::wstring RowPulseTreeRoot(int row); // ancestor root for the observed submenu editor
     std::wstring DataDirectory() const;     // holds ops.jsonl and the Backups folder
     std::wstring BackupDirectory() const;
 
@@ -112,6 +115,7 @@ public:
     void SetDataDirectoryForTesting(std::wstring directory);
 
 private:
+    friend struct SystemCtxModelTestPeer;
     struct Entry {
         sysctx::Item item;
         std::wstring icon;         // resolved .exe/.ico, checked on the worker
@@ -137,13 +141,13 @@ private:
         std::vector<std::wstring> subs;
     };
 
-    void StartJob(ui::SysCtxView::State state, std::vector<sysctx::Op> ops, size_t pop_undo, bool record_undo);
-    void RunJob(std::vector<sysctx::Op> ops, size_t pop_undo, bool record_undo);
+    void StartJob(ui::SysCtxView::State state, std::vector<sysctx::Op> ops, size_t pop_undo, bool record_undo, int only_scene = -1);
+    void RunJob(std::vector<sysctx::Op> ops, size_t pop_undo, bool record_undo, int only_scene);
     struct ScanResult {
         std::vector<std::vector<Entry>> entries;
         std::vector<std::wstring> keys;  // per scene: where its entries live
     };
-    ScanResult Scan() const;
+    ScanResult Scan(int only_scene = -1) const;
     // Machine ops through the elevated helper; fills `results`.
     bool RunElevated(const std::vector<sysctx::Op>& ops, std::vector<sysctx::OpResult>& results,
                      std::wstring& error) const;
@@ -160,6 +164,7 @@ private:
     void ToggleMapped(const std::vector<std::pair<int, size_t>>& map, int index);
     std::wstring ChangeTitleLocked(const std::vector<sysctx::Op>& ops) const;
 
+    static std::wstring SelectionKey(const sysctx::Item& item);
     static std::wstring OpKey(sysctx::Root root, sysctx::Kind kind, const std::wstring& key_path);
     // pending_ key: the switch and the placement of an entry queue separately.
     static std::wstring PendingKey(const sysctx::Op& op);
@@ -177,6 +182,8 @@ private:
     std::map<std::wstring, sysctx::Op> pending_;       // OpKey -> queued op
     std::vector<Batch> undo_;
     std::vector<Change> changes_;                      // applied this session, oldest first
+    int custom_extension_scene_ = -1;
+    int custom_extension_sub_ = -1;
     int nav_index_ = 2;                                // 文件夹: the busiest menu
     std::vector<int> sub_index_;                       // per nav row
     int filter_ = ui::kSysCtxFilterAll;

@@ -255,7 +255,8 @@ bool SelectedQuickPreviewItem(AppState& s, ui::QuickPreviewItem& item);
 // rows quick look does not open (drives, recycle bin and virtual folders).
 bool QuickPreviewItemForRow(AppState& s, const app::Tab& tab, int index, ui::QuickPreviewItem& item);
 void ToggleQuickPreview(AppState& s);
-void NavigateQuickPreview(AppState& s, int direction);
+// target_view >= 0: jump to that view row (the photo viewer's filmstrip / filter).
+void NavigateQuickPreview(AppState& s, int direction, int target_view = -1);
 // File verb requested from inside the quick preview (WM_QUICK_PREVIEW_COMMAND).
 void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& command);
 void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewWindow& preview,

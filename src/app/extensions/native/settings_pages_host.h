@@ -28,6 +28,9 @@ struct FocusedSettingsInfo {
     std::wstring status_text;
 };
 FocusedSettingsInfo FocusedSettings(HWND owner);
+// The titles of a package's own extra settings tabs (支持格式, ...), after its first page; empty
+// until the package has created them. The store detail page lists them like the settings page does.
+std::vector<std::wstring> PackageSettingsExtraTabTitles(HWND owner, size_t package);
 // The header's tabs: 0 常用设置, 1 右键菜单.
 void SetFocusedSettingsMode(HWND owner, int mode);
 void SetFocusedSettingsPluginTab(HWND owner, int tab_index);

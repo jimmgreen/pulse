@@ -75,6 +75,7 @@ const SetDef kSettingDefs[] = {
     SET_SW("thumbnail_app_badges", ListThumbnailBadges, 9, 0, 34, list_thumbnail_badges),
     SET_SW("media_columns", MediaColumnsTitle, 9, 0, 80, media_columns),
     SET_SW("tree_sticky", SettingsTreeSticky, 9, 0, 79, list_tree_sticky),
+    SET_SW("scroll_past_end", SettingsScrollPastEnd, 9, 0, 84, list_scroll_past_end),
     {"alias_mark", I::AliasMark, 9, 0, -1, +[](AppState&) -> int { return app::AliasStore::Instance().ShowMark() ? 1 : 0; },
      +[](AppState&, int i) { app::AliasStore::Instance().SetShowMark(i != 0); }, {}},
     {"mtime_marks", I::ListMtimeHint, 9, 0, -1, SET_GET(s.appPrefs.list_mtime_hint),

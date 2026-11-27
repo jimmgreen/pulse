@@ -12,6 +12,7 @@
 #include "../common/localization.h"
 #include "../common/path_utils.h"
 #include "../common/reveal_item_entry.h"
+#include "../common/picker_pulse_open.h"
 #include "app_messages.h"
 #include "closed_windows.h"
 #include "default_file_manager.h"
@@ -39,6 +40,16 @@ bool IsBusy(const AppState& s) {
     if (s.renameIndex >= 0 || s.addressEditing) return true;
     if (s.hwnd && !IsWindowEnabled(s.hwnd)) return true;
     return GetCapture() != nullptr;
+}
+
+bool ConfirmExternalWindowReveal(const AppState& target) {
+    const auto state = app::InspectWindowRevealState(target.hwnd);
+    if (state.Restored()) return true;
+    diagnostics::runtime::Event("external_reveal_failed", {
+        {"window", reinterpret_cast<uintptr_t>(target.hwnd)}, {"window_valid", state.valid},
+        {"visible_after", state.visible}, {"minimized_after", state.minimized},
+        {"foreground_after", state.foreground}}, diagnostics::runtime::Level::Warning);
+    return false;
 }
 
 int LayoutTabIndex(const AppState& s, const void* tab) {
@@ -139,6 +150,10 @@ bool IsExtensionOpenLaunch(const std::wstring& raw) { return extensions::IsExtOp
 
 ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent, bool reveal) {
     std::wstring item;
+    const auto picker = picker_pulse_open::Parse(intent);
+    if ((intent.starts_with(picker_pulse_open::kFolder) || intent.starts_with(picker_pulse_open::kFile)) && !picker)
+        return {ExternalOpenStatus::Failed, nullptr};
+    if (picker) { item = picker->path; reveal = picker->file; }
     if (intent.starts_with(reveal_item_entry::kIntent)) {
         const auto target = std::wstring_view(intent).substr(reveal_item_entry::kIntent.size());
         if (!reveal_item_entry::ValidTarget(target)) return {ExternalOpenStatus::Failed, nullptr};
@@ -217,6 +232,7 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent,
             }
             AppState* pkg_target = pkg_decision.window < pkg_windows.size() ? pkg_windows[pkg_decision.window] : pkg_windows.front();
             RevealWindow(*pkg_target);
+            if (!ConfirmExternalWindowReveal(*pkg_target)) return {ExternalOpenStatus::Failed, nullptr};
             OpenExtensionPackageInStore(*pkg_target, unquoted);
             return {ExternalOpenStatus::Dispatched, pkg_target};
         }
@@ -232,6 +248,7 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent,
     // Screenshot runs stay one window (plan §8.7); nothing to open stays as before.
     if (mru.shot.active || (!this_pc && path.empty())) {
         OpenFolderInNewTab(mru, raw, reveal);
+        if (!mru.shot.active && !ConfirmExternalWindowReveal(mru)) return {ExternalOpenStatus::Failed, nullptr};
         return {ExternalOpenStatus::Dispatched, &mru};
     }
     AppCore& core = mru.core;
@@ -261,10 +278,10 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent,
     // The first tab can only move out while it is still there and not alone.
     batch.tab_movable = batch.tab_movable && batch_tab_movable;
 
-    const app::ExternalOpenPolicy policy = OpenPolicy(mru);
+    const app::ExternalOpenPolicy policy = picker ? app::ExternalOpenPolicy::AlwaysTab : OpenPolicy(mru);
     app::ExternalOpenRequest request;
     request.new_window = false;
-    request.can_dedupe = !this_pc;
+    request.can_dedupe = !this_pc && !picker;
     request.tick = now;
     const int launch_mode = activate ? 2 : explicit_tab ? 1 : icon ? mru.appPrefs.open_pulse_icon :
         win_e ? mru.appPrefs.open_win_e : mru.appPrefs.open_this_pc;
@@ -309,6 +326,10 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent,
             // close-to-tray reopening is configured to start at a fresh location.
             if (activate) target->hidden_to_tray = false;
             RevealWindow(*target);
+        } else if (picker) {
+            OpenTabAt(*target, path);
+            if (picker->file) SelectLaunchedFile(*target, raw, true);
+            RevealWindow(*target);
         } else OpenFolderInNewTab(*target, raw, reveal);
         opened = decision.action != app::ExternalOpenAction::Activate;
         break;
@@ -333,7 +354,7 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& intent,
         break;
     }
     }
-    if (!target) {
+    if (!target || !ConfirmExternalWindowReveal(*target)) {
         log_launch("external_launch_result", static_cast<uint64_t>(ExternalOpenStatus::Failed));
         return {ExternalOpenStatus::Failed, nullptr};
     }

@@ -26,6 +26,10 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
 bool UpdateSplitterDrag(AppState& s, int mx, int my);
 void ClearDropFeedback(AppState& s);
 bool TickDropEdgeScroll(AppState& s, POINT point);
+// 滚动到最后一项之后: a drag left the window or was cancelled; the panes it
+// scrolled glide back. TickDropScrollReturn steps them once per frame.
+void ReturnDropScrolls(AppState& s);
+bool TickDropScrollReturn(AppState& s);
 std::wstring BaseName(const std::wstring& path);
 bool PointOnPaneHeader(const AppState& s, const ui::WindowViewModel& vm,
                               int pane_index, float x, float y);
