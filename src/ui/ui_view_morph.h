@@ -1,16 +1,9 @@
 // ui_view_morph.h — Shared-element morph when a pane switches view mode.
 //
-// Switching Medium icons -> List (or any two modes) used to snap. Now every
-// item that was on screen before the switch travels from its old cell/icon
-// rect to its new one (FLIP), the thumbnail shrinks into the row icon, and
-// items that were not on screen fade in with a small rise. Timing follows a
-// critically damped spring: velocity starts at zero, 50% at ~95 ms, settles
-// by kMorphMs with no overshoot; items start a few ms apart (stagger).
-//
-// Cost model: only items drawn this frame are recorded (a few hundred hash
-// entries at most), nothing is allocated per frame once the maps have grown,
-// and the whole morph is time-bounded (Active) so an interrupted morph never
-// keeps the frame pump alive. Hit-testing always uses the target layout.
+// Target cells and labels are authoritative immediately. Existing icons settle
+// briefly inside their target slots; interactive targets never travel through
+// other rows. Wall-clock timing bounds this feedback even on slow frames.
+// Only visible items are recorded, and tracking is bounded.
 #pragma once
 #include "ui_motion.h"
 #include <cmath>
@@ -40,22 +33,17 @@ inline D2D1_RECT_F LerpRect(const D2D1_RECT_F& a, const D2D1_RECT_F& b, float k)
 
 class ViewMorphMotion {
 public:
-    static constexpr uint32_t kMorphMs = 400;      // one item's travel
-    static constexpr uint32_t kStaggerMs = 6;      // per visible item
-    static constexpr uint32_t kMaxStaggerMs = 90;  // cap: big folders stay quick
+    static constexpr uint32_t kMorphMs = 150;     // brief shared-element continuity
+    static constexpr uint32_t kStaggerMs = 0;     // ready content never waits its turn
+    static constexpr uint32_t kMaxStaggerMs = 0;
     static constexpr uint32_t kTotalMs = kMorphMs + kMaxStaggerMs;
     static constexpr size_t kMaxTracked = 1024;    // visible items only
-    // Most a single frame may advance the morph. A slow frame (first layout
-    // of a view: cold icon / text caches) then slows the glide for a moment
-    // instead of skipping a third of it.
-    static constexpr uint64_t kMaxStepMs = 33;
 
     struct Rects {
         D2D1_RECT_F cell;
         D2D1_RECT_F icon;
     };
-    // The geometry a pane was laid out with, so the previous view can be
-    // rebuilt exactly (its labels fade out where they were).
+    // Geometry retained with the previous view for its artwork source.
     struct LayoutParams {
         bool valid = false;
         D2D1_RECT_F viewport{};
@@ -70,7 +58,7 @@ public:
         bool animating = false;  // false: draw exactly as the target layout
         bool entering = false;   // was not on screen before the switch
         float progress = 1.0f;   // eased 0..1 for this item
-        float opacity = 1.0f;    // entering items fade in
+        float opacity = 1.0f;    // actionable items remain fully visible
         D2D1_RECT_F cell{};
         D2D1_RECT_F icon{};
         D2D1_RECT_F from_icon{};
@@ -90,8 +78,8 @@ public:
             previous_.clear();
         } else if (mode != mode_) {
             if (allowed && !previous_.empty() && SystemAnimationsEnabled()) {
-                // previous_ holds what was drawn last frame (possibly mid-morph,
-                // so a second switch continues from where items are now).
+                // Retain the last rendered artwork as the source of a rapid switch.
+                // New target cells remain authoritative throughout.
                 from_.swap(previous_);
                 from_mode_ = mode_;
                 from_layout_ = layout_;
@@ -107,7 +95,7 @@ public:
             }
         }
         if (running_ && now != start_) {
-            elapsed_ += std::min<uint64_t>(now - last_now_, kMaxStepMs);
+            elapsed_ = now - start_;
             last_now_ = now;
         }
         if (running_ && elapsed_ >= kTotalMs) {
@@ -141,30 +129,30 @@ public:
         out = it->second;
         return true;
     }
-    // The previous view's labels (and items with no place in the new view)
-    // fade out quickly while the shapes start travelling.
+    // The old-label pass is suppressed: new target text is immediately readable.
     float FromOpacity() const noexcept {
-        if (!running_) return 0.0f;
-        const float t = static_cast<float>(elapsed_) / static_cast<float>(kMorphMs);
-        return 1.0f - SmoothStep(0.0f, 0.35f, t);
+        return 0.0f; // New labels stay readable; do not superimpose the old text.
     }
 
     bool Running() const noexcept { return running_; }
+    bool Finish() noexcept {
+        const bool was_running = running_;
+        running_ = false;
+        elapsed_ = kTotalMs;
+        from_.clear();
+        return was_running;
+    }
     int FromMode() const noexcept { return from_mode_; }
     uint32_t FramesSinceStart() const noexcept { return frames_; }
     int TextWarmupNext() const noexcept { return text_warmup_next_; }
     void AdvanceTextWarmup(int next) noexcept { text_warmup_next_ = next; }
 
-    // Opacity for the text / metadata layer: the new layout's labels arrive
-    // once the shapes are mostly in place, so they never smear across.
+    // Text and metadata never wait for decorative artwork to settle.
     float TextOpacity() const noexcept {
-        if (!running_) return 1.0f;
-        const float t = static_cast<float>(elapsed_) / static_cast<float>(kMorphMs);
-        return SmoothStep(0.30f, 0.85f, t);
+        return 1.0f;
     }
 
-    // order: 0-based position among the items drawn this frame (stagger).
-    // rise: entering items start this far below their target (pixels).
+    // Preserve the sampling API; neither row order nor a rise delays content.
     Sample Get(uint64_t key, const D2D1_RECT_F& cell, const D2D1_RECT_F& icon,
                int order, float rise) const {
         Sample s;
@@ -183,14 +171,19 @@ public:
         const auto it = from_.find(key);
         if (it != from_.end()) {
             s.from_icon = it->second.icon;
-            s.cell = LerpRect(it->second.cell, cell, p);
-            s.icon = LerpRect(it->second.icon, icon, p);
+            // Moving a whole row leaves display and input using different
+            // layouts. Keep the cell/name at the final position and let the
+            // artwork settle within that same, already actionable slot.
+            const float inset = 0.03f * (1.0f - p);
+            const float dx = (icon.right - icon.left) * inset;
+            const float dy = (icon.bottom - icon.top) * inset;
+            s.icon = D2D1::RectF(icon.left + dx, icon.top + dy,
+                               icon.right - dx, icon.bottom - dy);
         } else {
             s.entering = true;
-            s.opacity = p;
-            const float dy = rise * (1.0f - p);
-            s.cell.top += dy; s.cell.bottom += dy;
-            s.icon.top += dy; s.icon.bottom += dy;
+            // A newly visible item has no previous spatial anchor.
+            // Show it immediately rather than hiding actionable content.
+            (void)rise;
             s.from_icon = s.icon;
         }
         return s;
@@ -202,11 +195,10 @@ public:
         current_[key] = Rects{cell, icon};
     }
 
-    // Time-bounded like the other motions: a pane that stops drawing mid-morph
-    // must not keep the frame pump running. Measured from the last drawn
-    // frame, since slow frames stretch the morph (kMaxStepMs).
+    // An interrupted pane expires from the switch start, not its last frame.
+    // Slow rendering never extends the wall-clock animation deadline.
     bool Active(uint64_t now) const noexcept {
-        return running_ && now - last_now_ < kTotalMs + kSettleGraceMs;
+        return running_ && now - start_ < kTotalMs + kSettleGraceMs;
     }
 
 private:
@@ -219,7 +211,7 @@ private:
     uint64_t now_ = 0;
     uint64_t start_ = 0;
     uint64_t last_now_ = 0;
-    uint64_t elapsed_ = 0;  // morph clock: real time, capped per frame
+    uint64_t elapsed_ = 0;  // elapsed wall time since the most recent switch
     uint32_t frames_ = 0;
     int text_warmup_next_ = 0;
     LayoutParams layout_{};

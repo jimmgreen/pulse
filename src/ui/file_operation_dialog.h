@@ -77,6 +77,8 @@ public:
     // Immediate, no motion (the app moving or closing the UI).
     void Hide();
     bool IsVisible() const;
+    // A completed card's automatic close may hand off to another active task; manual hides may not.
+    bool CanFollowNextTask() const;
     // When the window is built after the task started (first pill click), the
     // app passes the start it recorded so 已用时间 counts from the real start.
     void SetTaskStart(uint64_t task_id, std::chrono::steady_clock::time_point started);
@@ -100,12 +102,13 @@ private:
     void RequestDismiss(bool to_status = true);
     void RequestCancel();
     // Shrinks into the status pill, then hides; the task keeps running.
-    void HideToStatus();
+    void HideToStatus(bool after_success = false);
     POINT StatusZoomOrigin() const;
     void DropBackdropForZoom(bool suppress_shadow);
     void EndZoom();
     void FinishHideToStatus();
     void FinishShowFromStatus();
+    void SyncSuccessDismiss(ULONGLONG now);
     bool TickSuccessDismiss(ULONGLONG now);
     bool Shown() const;
     void CreateCardFormats();
@@ -155,6 +158,8 @@ private:
     ULONGLONG task_end_tick_ = 0;
     static constexpr ULONGLONG kSuccessDismissMs = 1200;
     ULONGLONG success_dismiss_at_ = 0;
+    uint64_t success_dismiss_task_id_ = 0;
+    std::optional<uint64_t> success_hiding_task_;
     bool auto_close_ = true;
     bool keep_open_requested_ = false;
     bool locate_after_ = false;

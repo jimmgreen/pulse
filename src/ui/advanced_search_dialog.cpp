@@ -137,6 +137,7 @@ std::wstring NameHowLabel(app::NameMatchHow how) {
     switch (how) {
     case app::NameMatchHow::StartsWith: return l10n::Get(I::AdvSearchStarts);
     case app::NameMatchHow::Exact: return l10n::Get(I::AdvSearchExact);
+    case app::NameMatchHow::Regex: return l10n::Get(I::AdvSearchRegex);
     default: return l10n::Get(I::AdvSearchContains);
     }
 }
@@ -255,6 +256,12 @@ public:
                                          const std::wstring& value) {
         spec_ = std::move(spec);
         content_mode_ = !spec_.content.empty();
+        if (field >= 10) {
+            more_ = true;
+            dark_ = (field % 2) != 0;
+            scale_ = field < 12 ? 1.0f : field < 14 ? 1.5f : 2.0f;
+            accent_ = D2D1::ColorF(0.15f, 0.4f, 0.9f);
+        }
         WNDCLASSEXW wc{sizeof(wc)};
         wc.hInstance = GetModuleHandleW(nullptr); wc.lpfnWndProc = WndProc;
         wc.lpszClassName = kClass;
@@ -266,7 +273,33 @@ public:
         if (field == 1) SetWindowTextW(edit_kw_, value.c_str());
         if (field == 2) SetWindowTextW(edit_exts_, value.c_str());
         if (field == 3) SetWindowTextW(edit_exclude_, value.c_str());
-        SendMessageW(hwnd_, WM_COMMAND, IDOK, 0);
+        if (field == 4 || field == 5) {
+            SetWindowTextW(edit_kw_, value.c_str());
+            Click(kHitNameHow + static_cast<int>(app::NameMatchHow::Regex));
+            if (field == 5) SetWindowTextW(edit_kw_, L"^alpha");
+        }
+        if (field >= 10) {
+            SetWindowPos(hwnd_, nullptr, 0, 0, static_cast<int>(kDlgW * scale_),
+                         static_cast<int>(std::ceil(height_px_)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            snapshot_path_ = value;
+            Render();
+            bool valid = snapshot_saved_;
+            int regex_pills = 0;
+            for (const auto& pill : pills_) {
+                if (pill.id == kHitNameHow + static_cast<int>(app::NameMatchHow::Regex)) {
+                    ++regex_pills;
+                    valid = valid && pill.selected && pill.bounds.left >= card_[1].left &&
+                        pill.bounds.right <= card_[1].right && pill.bounds.bottom <= card_[1].bottom;
+                }
+            }
+            for (size_t i = 0; i < pills_.size(); ++i) for (size_t j = i + 1; j < pills_.size(); ++j) {
+                const auto& a = pills_[i].bounds; const auto& b = pills_[j].bounds;
+                if (std::min(a.right, b.right) > std::max(a.left, b.left) &&
+                    std::min(a.bottom, b.bottom) > std::max(a.top, b.top)) valid = false;
+            }
+            result_.accepted = valid && regex_pills == 1;
+            result_.query = preview_;
+        } else SendMessageW(hwnd_, WM_COMMAND, IDOK, 0);
         if (IsWindow(hwnd_)) DestroyWindow(hwnd_);
         hwnd_ = nullptr;
         return result_;
@@ -500,6 +533,10 @@ private:
 
     std::wstring CountLine(bool& danger) const {
         danger = false;
+        if (regex_error_) {
+            danger = true;
+            return l10n::Get(I::AdvSearchRegexInvalid);
+        }
         if (scope_error_) {
             danger = true;
             return l10n::Get(I::AdvancedSearchNeedScopeMessage);
@@ -687,7 +724,7 @@ private:
                 separators_.push_back(row_top);
             }
             std::vector<Pill> row;
-            for (int v = 0; v < 3; ++v) {
+            for (int v = 0; v < (content_mode_ ? 3 : 4); ++v) {
                 if (content_mode_) {
                     const auto mode = static_cast<index::ContentMatchMode>(v);
                     row.push_back({{}, ContentModeLabel(mode), Ico::None, kHitContentMode + v, spec_.content_mode == mode, true});
@@ -724,7 +761,10 @@ private:
     D2D1_COLOR_F EditForeground() const { return ColorFromRef(EditTextColor(dark_)); }
     D2D1_COLOR_F EditBackground() const { return ColorFromRef(EditBackColor(dark_)); }
 
-    I KeywordHint() const { return content_mode_ ? I::AdvKeywordContentHint : I::AdvKeywordNameHint; }
+    I KeywordHint() const {
+        if (content_mode_) return I::AdvKeywordContentHint;
+        return spec_.name_how == app::NameMatchHow::Regex ? I::AdvSearchRegexHint : I::AdvKeywordNameHint;
+    }
     I ExcludeHint() const { return content_mode_ ? I::AdvExcludeContentHint : I::AdvExcludeNameHint; }
 
     HWND CreateField(int id, const std::wstring& text, I cue_id) {
@@ -849,6 +889,7 @@ private:
         if (!edits_ready_) return;
         SyncFromEdits();
         preview_ = app::CompileSearchQuery(spec_);
+        regex_error_ = index::QueryHasInvalidRegex(index::ParseQuery(preview_));
         const auto split = app::SplitSearchQueryText(preview_);
         scope_error_ = split.content.present() && app::ContentSearchNeedsScope(split) &&
                        spec_.location == app::LocationScope::Indexed;
@@ -867,7 +908,7 @@ private:
     }
 
     void RequestCountSoon() {
-        if (!hwnd_ || !count_request_ || content_mode_ || scope_error_) {
+        if (!hwnd_ || !count_request_ || content_mode_ || scope_error_ || regex_error_) {
             count_pending_ = false;
             return;
         }
@@ -975,6 +1016,7 @@ private:
             }
         } else if (id >= kHitNameHow && id < kHitNameHow + 100) {
             spec_.name_how = static_cast<app::NameMatchHow>(id - kHitNameHow);
+            SetCue(edit_kw_, KeywordHint());
         } else if (id >= kHitContentMode && id < kHitContentMode + 100) {
             spec_.content_mode = static_cast<index::ContentMatchMode>(id - kHitContentMode);
         }
@@ -984,7 +1026,7 @@ private:
     void Complete(bool accepted) {
         if (accepted) {
             Recompute();
-            if (scope_error_) return;
+            if (scope_error_ || regex_error_) return;
             result_.accepted = true;
             result_.query = preview_;
         }
@@ -1368,12 +1410,12 @@ private:
             search.kind = fluent::ButtonKind::Primary;
             search.state.hovered = hover_ == kHitSearch;
             search.state.pressed = pressed_ == kHitSearch;
-            search.state.enabled = !scope_error_;
+            search.state.enabled = !scope_error_ && !regex_error_;
             painter_.DrawButton(search);
             brush_->Release();
             brush_ = nullptr;
         }
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_ADVANCED_QUERY_TEST)
         if (!snapshot_path_.empty()) {
             // A flip-chain back buffer is no longer the submitted frame after Present.
             const HRESULT drawn = compositor_.Dc()->EndDraw();
@@ -1432,7 +1474,7 @@ private:
             if (wparam == kCountTimer) {
                 KillTimer(hwnd_, kCountTimer);
                 count_timer_ = false;
-                if (count_request_ && !content_mode_ && !scope_error_) {
+                if (count_request_ && !content_mode_ && !scope_error_ && !regex_error_) {
                     counted_query_ = preview_;
                     count_request_(hwnd_, preview_);
                 }
@@ -1616,12 +1658,15 @@ private:
     bool done_ = false;
     bool edits_ready_ = false;
     bool scope_error_ = false;
+    bool regex_error_ = false;
     float scale_ = 1.0f;
     bool selection_outline_ = false;
     ULONGLONG next_recovery_ = 0;
     UINT recovery_delay_ = 250;
 #ifdef PULSE_WITH_SELFTEST
     unsigned recovery_attempts_ = 0;
+#endif
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_ADVANCED_QUERY_TEST)
     std::wstring snapshot_path_;
     bool snapshot_saved_ = false;
 #endif

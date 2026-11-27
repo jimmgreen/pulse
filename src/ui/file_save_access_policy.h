@@ -22,7 +22,8 @@ struct SaveAccessResult {
 };
 // Worker-only restricted experiment, not native parity. Existing snapshots must
 // have been confirmed by the caller. New targets are briefly created/deleted.
-// No retries and no path-based deletion. Failure/cleanup evidence must be kept.
+// No access/create retries or path-based deletion. Cleanup observation alone may
+// wait up to 250 ms for transient metadata readers; failure evidence is retained.
 // Observer is a deterministic testing seam; exceptions become failures. Never
 // call UI or reenter this model from an observer. No callback occurs in DllMain.
 // Shared by target and every retained ancestor metadata check.

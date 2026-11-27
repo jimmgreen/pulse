@@ -4,6 +4,7 @@
 
 #include "../common/localization.h"
 #include "../app/frame_pump.h"
+#include "../app/partial_redraw.h"
 #include "FluentTokens.h"
 #include "edit_host.h"
 #include "extension_data_view.h"
@@ -14,6 +15,7 @@
 #include "fluent_components.h"
 #include "fluent_menu.h"
 #include "typography.h"
+#include "ui_motion.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -45,6 +47,7 @@ std::string ReadText(HWND window) {
 }
 } // namespace
 struct ExtensionTreeView::Impl {
+    enum class LayoutKind { Full, Scroll, Refresh };
     struct Item {
         const UiNode *node;
         HWND window;
@@ -74,6 +77,7 @@ struct ExtensionTreeView::Impl {
     bool bar_drag = false, bar_hot = false;
     float bar_grab = 0;
     bool rendering = false;
+    ExtensionTreePaintStats paint_stats;
     bool transparent_background = false;
     D2D1_COLOR_F background_wash{0, 0, 0, 0};
     bool ready = false;
@@ -100,7 +104,7 @@ struct ExtensionTreeView::Impl {
     POINT scroll_point{};
     ULONGLONG scroll_tick = 0;
     static constexpr UINT ScrollFrameMessage = WM_APP + 0x353;
-    unsigned generation = 0;
+    unsigned generation = 0, refreshed_generation = 0;
     std::map<std::string, std::shared_ptr<ExtensionDataController>> sources;
     std::map<std::string, std::string> source_queries, validation_errors;
     std::set<HWND> composing;
@@ -112,7 +116,7 @@ struct ExtensionTreeView::Impl {
     ExtensionTreeLayout layout;
     const UiNode *nested_drag = nullptr;
     std::map<std::string, std::string> state;
-    uint64_t state_revision = 0;
+    uint64_t state_revision = 0, refreshed_revision = 0;
     static constexpr UINT StateMessage = WM_APP + 0x352;
     std::map<std::string, ExtensionStateChange> pending_state_events;
     std::set<std::string> pending_continuous_commands;
@@ -537,7 +541,7 @@ struct ExtensionTreeView::Impl {
                                         std::max(0.0f, bar.content_extent - bar.viewport_extent), y, bar_grab)));
         scroll_remaining = 0;
         scroll_pump.Disarm();
-        Layout(true);
+        Layout(LayoutKind::Scroll);
     }
     void OpenSelect(HWND window) {
         auto lifetime = owner->impl_;
@@ -738,7 +742,7 @@ struct ExtensionTreeView::Impl {
             top = std::max(4.0f * scale, b.top - height - 6.0f * scale);
         painter.DrawTooltip({left, top, left + width, top + height}, text);
     }
-    bool Render() {
+    bool Render(const RECT *requested_damage = nullptr) {
         if (!ready || !host || rendering)
             return false;
         if (compositor.NeedsRecovery()) {
@@ -757,7 +761,31 @@ struct ExtensionTreeView::Impl {
             rendering = false;
             return false;
         }
+        static const bool allow_partial = [] {
+            wchar_t value[8]{};
+            const DWORD n = GetEnvironmentVariableW(L"PULSE_EXTENSION_PARTIAL_REDRAW", value, ARRAYSIZE(value));
+            return !(n == 1 && value[0] == L'0');
+        }();
+        RECT client{}, damage{};
+        GetClientRect(host, &client);
+        bool partial = allow_partial && requested_damage && compositor.CanPresentPartial() &&
+            !tooltip_shown && validation_errors.empty() &&
+            IntersectRect(&damage, requested_damage, &client) && !EqualRect(&damage, &client);
+        if (partial) {
+            // Custom/data surfaces can draw beyond their nominal item bounds.
+            // Keep their full-render contract until they expose precise damage.
+            partial = std::none_of(items.begin(), items.end(), [](const Item &item) {
+                return item.visible && (item.data || item.node->type == UiNodeType::Canvas);
+            });
+        }
+        const D2D1_RECT_F clip = D2D1::RectF(static_cast<float>(damage.left), static_cast<float>(damage.top),
+                                            static_cast<float>(damage.right), static_cast<float>(damage.bottom));
+        const auto intersects = [](const D2D1_RECT_F &a, const D2D1_RECT_F &b) {
+            return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+        };
+        uint64_t drawn_items = 0;
         dc->BeginDraw();
+        if (partial) dc->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
         dc->Clear(transparent_background && !high_contrast ? background_wash : theme.bg);
         painter.BeginFrame(theme, high_contrast);
         bool successful = true;
@@ -765,6 +793,14 @@ struct ExtensionTreeView::Impl {
             if (!item.visible || item.bounds.right <= item.clip.left || item.bounds.left >= item.clip.right ||
                 item.bounds.bottom <= item.clip.top || item.bounds.top >= item.clip.bottom)
                 continue;
+            if (partial) {
+                // Include standard control focus/shadow overflow, not just layout bounds.
+                const float outset = 12.0f * scale;
+                const auto visual = D2D1::RectF(item.bounds.left - outset, item.bounds.top - outset,
+                    item.bounds.right + outset, item.bounds.bottom + outset);
+                if (!intersects(item.clip, clip) || !intersects(visual, clip)) continue;
+            }
+            ++drawn_items;
             const auto &node = *item.node;
             const auto bounds = item.bounds;
             fluent::ControlState visual;
@@ -829,13 +865,20 @@ struct ExtensionTreeView::Impl {
             dc->PopAxisAlignedClip();
         }
         DrawTooltip();
+        if (partial) dc->PopAxisAlignedClip();
         HRESULT result = dc->EndDraw();
         if (SUCCEEDED(result))
-            result = compositor.Present();
+            result = compositor.Present(partial ? &damage : nullptr);
         if (result == D2DERR_RECREATE_TARGET || result == DXGI_ERROR_DEVICE_REMOVED ||
             result == DXGI_ERROR_DEVICE_RESET || result == DXGI_ERROR_DRIVER_INTERNAL_ERROR)
             compositor.NotifyDeviceLost(result);
         render_failed = !successful || FAILED(result);
+        if (render_failed) compositor.ForceFullFrame();
+        else {
+            ++paint_stats.frames;
+            if (partial) ++paint_stats.partial_frames;
+            paint_stats.drawn_items += drawn_items;
+        }
         rendering = false;
         return !render_failed;
     }
@@ -1231,6 +1274,7 @@ struct ExtensionTreeView::Impl {
             return DefWindowProcW(window, message, wparam, lparam);
         auto lifetime = self->owner->impl_;
         if (message == WM_NCDESTROY) {
+            app::PartialDamageMap().erase(window);
             auto sources = std::move(self->sources);
             self->sources.clear();
             for (auto &[id, source] : sources)
@@ -1256,7 +1300,9 @@ struct ExtensionTreeView::Impl {
         if (message == WM_PAINT) {
             PAINTSTRUCT paint{};
             BeginPaint(window, &paint);
-            self->Render();
+            RECT damage{};
+            const bool partial = app::TakePartialDamage(window, paint.rcPaint, &damage);
+            self->Render(partial ? &damage : nullptr);
             EndPaint(window, &paint);
             return 0;
         }
@@ -1283,13 +1329,21 @@ struct ExtensionTreeView::Impl {
         }
         if (message == WM_TIMER && wparam == 1) {
             bool animate = false;
-            for (const auto &item : self->items)
-                animate = animate || (item.visible && item.node->type == UiNodeType::Progress &&
-                                      item.node->progress_state == "indeterminate");
-            if (animate)
-                InvalidateRect(window, nullptr, FALSE);
-            else
-                KillTimer(window, 1);
+            if (IsWindowVisible(window) && !IsIconic(GetAncestor(window, GA_ROOT)) &&
+                motion::SystemAnimationsEnabled()) {
+                for (const auto &item : self->items) {
+                    if (!item.visible || item.node->type != UiNodeType::Progress ||
+                        item.node->progress_state != "indeterminate") continue;
+                    RECT dirty{static_cast<LONG>(std::floor(std::max(item.bounds.left, item.clip.left))),
+                        static_cast<LONG>(std::floor(std::max(item.bounds.top, item.clip.top))),
+                        static_cast<LONG>(std::ceil(std::min(item.bounds.right, item.clip.right))),
+                        static_cast<LONG>(std::ceil(std::min(item.bounds.bottom, item.clip.bottom)))};
+                    if (IsRectEmpty(&dirty)) continue;
+                    app::InvalidatePartial(window, dirty);
+                    animate = true;
+                }
+            }
+            if (!animate) KillTimer(window, 1);
             return 0;
         }
         if (message == WM_LBUTTONDOWN) {
@@ -1372,6 +1426,13 @@ struct ExtensionTreeView::Impl {
             }
             self->scroll_point = point;
             const float delta = static_cast<float>(-GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * 48;
+            if (!motion::SystemAnimationsEnabled()) {
+                self->scroll_pump.Disarm();
+                const float pending = self->scroll_remaining;
+                self->scroll_remaining = 0;
+                self->ApplyScrollDelta(pending + delta);
+                return 0;
+            }
             if (!self->scroll_pump.Running()) self->scroll_pump.Start(window, ScrollFrameMessage);
             if (self->scroll_pump.Running()) {
                 self->scroll_remaining += delta;
@@ -1678,12 +1739,13 @@ struct ExtensionTreeView::Impl {
                 static_cast<float>(std::max(0, total - static_cast<int>(client.bottom))));
             scroll = static_cast<int>(std::lround(outer_scroll_position));
         }
-        Layout(true);
+        Layout(LayoutKind::Scroll);
     }
-    void Layout(bool scroll_only = false) {
+    void Layout(LayoutKind kind = LayoutKind::Full) {
         if (!host)
             return;
-        if (!scroll_only) { scroll_remaining = 0; scroll_pump.Disarm(); }
+        const bool scroll_only = kind == LayoutKind::Scroll;
+        if (kind == LayoutKind::Full) { scroll_remaining = 0; scroll_pump.Disarm(); }
         RECT client{};
         GetClientRect(host, &client);
         struct WindowPlacement { HWND window; RECT bounds; };
@@ -1735,6 +1797,13 @@ struct ExtensionTreeView::Impl {
                 : typography::MeasureAdvance(compositor.DwriteFactory(),
                                              painter.RampFormat(fluent::Painter::TextRamp::Body), text);
             return advance + (16.0f + (node.glyph.empty() ? 0.0f : 22.0f) + (node.separator ? 18.0f : 0.0f) + 4.0f) * scale;
+        };
+        options.chip_width = [&](const UiNode &node) {
+            if (!ready) return 0.0f;
+            const auto text = Wide(node.text);
+            if (node.type != UiNodeType::Badge || node.dot || text.empty()) return 0.0f;
+            // A little roomier than the bare pill: a wrapped line of formats reads as a set of badges.
+            return painter.MeasureBadgeWidth(text) + 6.0f * scale;
         };
         options.place = [&](const UiNode &node, D2D1_RECT_F bounds, D2D1_RECT_F clip, bool visible, bool enabled) {
             auto item = Find(&node);
@@ -2023,7 +2092,15 @@ void ExtensionTreeView::SetTheme(bool dark, D2D1_COLOR_F accent, float scale) {
 void ExtensionTreeView::Refresh() {
     auto lifetime = impl_;
     auto &self = *lifetime;
-    unsigned generation = self.generation;
+    const unsigned generation = self.generation;
+    const uint64_t revision = self.state_revision;
+    bool changed = generation != self.refreshed_generation || revision != self.refreshed_revision;
+    const auto update = [&](bool differs, const auto &apply) {
+        if (differs) {
+            apply();
+            changed = true;
+        }
+    };
     self.refreshing = true;
     auto items = self.items;
     for (const auto &item : items) {
@@ -2035,8 +2112,10 @@ void ExtensionTreeView::Refresh() {
             enabled = false;
         if (self.generation != generation)
             return;
-        if (auto current = self.Find(item.window))
+        if (auto current = self.Find(item.window)) {
+            changed = current->command_allowed != enabled || changed;
             current->command_allowed = enabled;
+        }
         std::optional<std::string> value;
         if (node.binding.starts_with("state."))
             value = StateValue(node.binding.substr(6));
@@ -2054,31 +2133,41 @@ void ExtensionTreeView::Refresh() {
             auto parsed = std::from_chars(value->data(), value->data() + value->size(), numeric);
             if (parsed.ec != std::errc{} || parsed.ptr != value->data() + value->size())
                 numeric = 0;
-            if (item.data)
-                item.data->SetSelection(*value);
-            else if (extensions::ContinuousSlider(node))
-                SetWindowTextW(item.window, Wide(*value).c_str());
+            if (item.data) {
+                if (item.data->Selection() != *value)
+                    changed = item.data->SetSelection(*value) || changed;
+            } else if (extensions::ContinuousSlider(node))
+                update(ReadText(item.window) != *value, [&] { SetWindowTextW(item.window, Wide(*value).c_str()); });
             else if (node.type == UiNodeType::Slider || node.type == UiNodeType::SplitPane)
-                SendMessageW(item.window, TBM_SETPOS, TRUE, numeric);
+                update(SendMessageW(item.window, TBM_GETPOS, 0, 0) != numeric,
+                       [&] { SendMessageW(item.window, TBM_SETPOS, TRUE, numeric); });
             else if (node.type == UiNodeType::Select)
-                SendMessageW(item.window, CB_SETCURSEL, numeric, 0);
+                update(SendMessageW(item.window, CB_GETCURSEL, 0, 0) != numeric,
+                       [&] { SendMessageW(item.window, CB_SETCURSEL, numeric, 0); });
             else if (node.type == UiNodeType::List)
-                SendMessageW(item.window, LB_SETCURSEL, numeric, 0);
-            else if (node.type == UiNodeType::Progress)
-                SendMessageW(item.window, PBM_SETPOS, std::clamp(numeric, 0, 100), 0);
-            else if (node.type == UiNodeType::Tabs || node.type == UiNodeType::Segmented)
-                TabCtrl_SetCurSel(item.window, numeric);
-            else if (IsExtensionBooleanControl(node))
-                SendMessageW(item.window, BM_SETCHECK, *value == "true" ? BST_CHECKED : BST_UNCHECKED, 0);
-            else if ((node.type == UiNodeType::Text || node.type == UiNodeType::TextInput ||
-                      node.type == UiNodeType::CommandSearch) &&
-                     !self.composing.contains(item.window) && ReadText(item.window) != *value)
-                SetWindowTextW(item.window, Wide(*value).c_str());
+                update(SendMessageW(item.window, LB_GETCURSEL, 0, 0) != numeric,
+                       [&] { SendMessageW(item.window, LB_SETCURSEL, numeric, 0); });
+            else if (node.type == UiNodeType::Progress) {
+                const int position = std::clamp(numeric, 0, 100);
+                update(SendMessageW(item.window, PBM_GETPOS, 0, 0) != position,
+                       [&] { SendMessageW(item.window, PBM_SETPOS, position, 0); });
+            } else if (node.type == UiNodeType::Tabs || node.type == UiNodeType::Segmented)
+                update(TabCtrl_GetCurSel(item.window) != numeric, [&] { TabCtrl_SetCurSel(item.window, numeric); });
+            else if (IsExtensionBooleanControl(node)) {
+                const int checked = *value == "true" ? BST_CHECKED : BST_UNCHECKED;
+                update(SendMessageW(item.window, BM_GETCHECK, 0, 0) != checked,
+                       [&] { SendMessageW(item.window, BM_SETCHECK, checked, 0); });
+            } else if ((node.type == UiNodeType::Text || node.type == UiNodeType::TextInput ||
+                        node.type == UiNodeType::CommandSearch) && !self.composing.contains(item.window))
+                update(ReadText(item.window) != *value, [&] { SetWindowTextW(item.window, Wide(*value).c_str()); });
         }
-        InvalidateRect(item.window, nullptr, TRUE);
     }
     self.refreshing = false;
-    self.Layout();
+    // Polling unchanged values must not reflow the page or cancel queued wheel input.
+    if (changed)
+        self.Layout(generation == self.refreshed_generation ? Impl::LayoutKind::Refresh : Impl::LayoutKind::Full);
+    self.refreshed_generation = generation;
+    self.refreshed_revision = revision;
     self.RefreshSources();
 }
 HWND ExtensionTreeView::Hwnd() const { return impl_->host; }
@@ -2430,6 +2519,36 @@ void ExtensionTreeView::CopySnapshotViewState(const ExtensionTreeView &source) {
             item.data->CopyViewState(*original->data);
     }
     impl_->Layout();
+}
+ExtensionTreePaintStats ExtensionTreeView::PaintStats() const {
+    return impl_->paint_stats;
+}
+std::optional<D2D1_RECT_F> ExtensionTreeView::NodeBounds(const std::string &id) const {
+    const auto *node = impl_->Node(id);
+    const auto *item = node ? impl_->Find(node) : nullptr;
+    return item && item->visible ? std::optional<D2D1_RECT_F>{item->bounds} : std::nullopt;
+}
+bool ExtensionTreeView::CopyPresentedPixels(std::vector<uint32_t> &bgra, UINT &width, UINT &height) const {
+    bgra.clear(); width = height = 0;
+    auto *frame = impl_->compositor.FrameCopy();
+    auto *dc = impl_->compositor.Dc();
+    if (!frame || !dc) return false;
+    const auto size = frame->GetPixelSize();
+    ComPtr<ID2D1Bitmap1> readable;
+    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        frame->GetPixelFormat(), 96, 96);
+    if (FAILED(dc->CreateBitmap(size, nullptr, 0, &properties, &readable)) ||
+        FAILED(readable->CopyFromBitmap(nullptr, frame, nullptr))) return false;
+    bgra.resize(static_cast<size_t>(size.width) * size.height);
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(readable->Map(D2D1_MAP_OPTIONS_READ, &mapped))) { bgra.clear(); return false; }
+    for (UINT y = 0; y < size.height; ++y) {
+        const auto *row = reinterpret_cast<const uint32_t *>(mapped.bits + static_cast<size_t>(y) * mapped.pitch);
+        std::copy_n(row, size.width, bgra.data() + static_cast<size_t>(y) * size.width);
+    }
+    readable->Unmap();
+    width = size.width; height = size.height;
+    return true;
 }
 bool ExtensionTreeView::PaintTo(HDC target, int x, int y) {
     auto lifetime = impl_;

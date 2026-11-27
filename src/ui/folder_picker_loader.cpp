@@ -1,5 +1,7 @@
 #include "../common/windows_compat.h"
 #include "folder_picker_loader.h"
+#include "picker_archive_session.h"
+#include "../ops/archive_open_fallback.h"
 #include "../common/picker_navigation.h"
 #include "../common/picker_open_filter.h"
 #include "../common/picker_user_storage.h"
@@ -52,7 +54,12 @@ DWORD ListingError(const std::wstring& path, DWORD enumeration_error) {
 
 // Probe only directory admission, on the existing worker. Enumeration and
 // access validation retain their original paths and cancellation generation.
-DWORD ProbeFolder(const std::wstring& path, const std::function<bool()>& cancelled, uint32_t native_options) {
+DWORD ProbeFolder(const std::wstring& path, const std::function<bool()>& cancelled, const PickerOptions& options) {
+    if (options.archive && options.archive->Contains(path)) {
+        std::vector<fs::DirEntry> rows;
+        return options.archive->List(path, rows, cancelled);
+    }
+    const auto native_options = options.native_options;
     if (path.empty() || picker_navigation::IsComputerPath(path)) return ERROR_SUCCESS;
     if (picker_shell::IsParsingName(path) || picker_shell::Enabled(native_options)) {
         if (!picker_shell::Enabled(native_options) || FAILED(picker_shell::ValidateOptions(native_options))) return ERROR_NOT_SUPPORTED;
@@ -111,7 +118,8 @@ PickerListing ReadShellListing(const std::wstring& path, PickerMode mode, const 
     HRESULT hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&folder));
     if (SUCCEEDED(hr)) hr = folder->BindToHandler(nullptr, BHID_SFObject, IID_PPV_ARGS(&shell_folder));
     SHCONTF flags = static_cast<SHCONTF>(SHCONTF_FOLDERS | SHCONTF_NONFOLDERS);
-    if (options.show_hidden) flags = static_cast<SHCONTF>(flags | SHCONTF_INCLUDEHIDDEN | SHCONTF_INCLUDESUPERHIDDEN);
+    if (options.show_hidden) flags = static_cast<SHCONTF>(flags | SHCONTF_INCLUDEHIDDEN);
+    if (options.show_hidden && options.show_protected_os_files) flags = static_cast<SHCONTF>(flags | SHCONTF_INCLUDESUPERHIDDEN);
     if (SUCCEEDED(hr)) hr = shell_folder->EnumObjects(nullptr, flags, &enumerator);
     if (FAILED(hr)) { listing.error = picker_shell::Error(hr); return listing; }
     auto rows = std::make_shared<std::vector<fs::DirEntry>>();
@@ -129,7 +137,9 @@ PickerListing ReadShellListing(const std::wstring& path, PickerMode mode, const 
         hr = item->GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_STREAM | SFGAO_HIDDEN | SFGAO_SYSTEM, &attributes);
         if (FAILED(hr)) continue;
         const bool folder_item = (attributes & SFGAO_FOLDER) != 0;
-        if (!options.show_hidden && (attributes & (SFGAO_HIDDEN | SFGAO_SYSTEM))) continue;
+        const DWORD visibility_attributes = ((attributes & SFGAO_HIDDEN) ? FILE_ATTRIBUTE_HIDDEN : 0) |
+            ((attributes & SFGAO_SYSTEM) ? FILE_ATTRIBUTE_SYSTEM : 0);
+        if (!PickerAllowsAttributes(visibility_attributes, options)) continue;
         if (FAILED(picker_shell::Name(item.Get(), SIGDN_NORMALDISPLAY, entry.name))) continue;
         if (FAILED(picker_shell::Name(item.Get(), SIGDN_DESKTOPABSOLUTEPARSING, entry.path))) continue;
         entry.shell_attributes = attributes;
@@ -139,19 +149,29 @@ PickerListing ReadShellListing(const std::wstring& path, PickerMode mode, const 
             if (SUCCEEDED(picker_shell::Name(item.Get(), SIGDN_FILESYSPATH, filesystem_path))) {
                 const auto slash = filesystem_path.find_last_of(L"\\/");
                 entry.name = filesystem_path.substr(slash == filesystem_path.npos ? 0 : slash + 1);
+                if (options.archive && ops::archive_open::Supported(filesystem_path)) {
+                    const DWORD disk_attributes = GetFileAttributesW(NativePath(filesystem_path).c_str());
+                    entry.archive = disk_attributes != INVALID_FILE_ATTRIBUTES && !(disk_attributes & FILE_ATTRIBUTE_DIRECTORY);
+                    if (entry.archive) {
+                        if (!PickerAllowsAttributes(disk_attributes, options)) continue;
+                        entry.kind = PickerEntryKind::File;
+                        entry.path = std::move(filesystem_path);
+                    }
+                }
             }
         }
         const DWORD display_attributes = entry.kind == PickerEntryKind::Folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
-        if (!PickerShowsEntry(display_attributes, entry.name, mode, options)) continue;
+        if (!PickerShowsEntry(display_attributes, entry.name, entry.archive ? PickerMode::Save : mode, options)) continue;
         if (!folder_item && !picker_shell::IsSelectable(attributes, false, options.native_options)) continue;
         entry.source = rows->size();
         fs::DirEntry row; row.name = entry.name; row.full_path = entry.path;
         row.shell_id = entry.path; row.is_dir = entry.kind == PickerEntryKind::Folder;
-        row.attrs = row.is_dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        row.attrs = (row.is_dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL) | visibility_attributes;
         rows->push_back(std::move(row)); listing.entries.push_back(std::move(entry));
     }
     if (cancelled()) { listing.error = ERROR_CANCELLED; listing.entries.clear(); return listing; }
-    SortPickerEntries(listing.entries, options);
+    if (options.order_entries) options.order_entries(listing.entries, *rows);
+    else SortPickerEntries(listing.entries, options);
     auto sorted = std::make_shared<std::vector<fs::DirEntry>>();
     sorted->reserve(listing.entries.size());
     for (const auto& entry : listing.entries) sorted->push_back(std::move((*rows)[entry.source]));
@@ -161,7 +181,8 @@ PickerListing ReadShellListing(const std::wstring& path, PickerMode mode, const 
 
 PickerListing ReadListing(const std::wstring& path, PickerMode mode, const PickerOptions& options,
                           const std::function<bool()>& cancelled) {
-    if (picker_shell::IsParsingName(path) || (!path.empty() && !picker_navigation::IsComputerPath(path) && picker_shell::Enabled(options.native_options)))
+    const bool virtual_archive = options.archive && options.archive->Contains(path);
+    if (!virtual_archive && (picker_shell::IsParsingName(path) || (!path.empty() && !picker_navigation::IsComputerPath(path) && picker_shell::Enabled(options.native_options))))
         return ReadShellListing(path, mode, options, cancelled);
     if (picker_navigation::IsComputerPath(path)) {
         auto listing = ReadListing(L"", mode, options, cancelled);
@@ -174,17 +195,24 @@ PickerListing ReadListing(const std::wstring& path, PickerMode mode, const Picke
     SetThreadErrorMode(SEM_FAILCRITICALERRORS, &old_mode);
     std::vector<fs::DirEntry> raw;
     try {
-        fs::EnumerateDirectory(path, raw);
+        if (virtual_archive) listing.error = options.archive->List(path, raw, cancelled);
+        else fs::EnumerateDirectory(path, raw);
     } catch (...) {
         const DWORD error = GetLastError();
         raw.clear();
-        listing.error = ListingError(path, error);
+        listing.error = virtual_archive ? (error ? error : ERROR_READ_FAULT) : ListingError(path, error);
     }
     SetThreadErrorMode(old_mode, nullptr);
     if (cancelled()) return listing;
 
     const std::wstring prefix = path.empty() || path.back() == L'\\' ? path : path + L'\\';
     listing.entries.reserve(raw.size());
+    // The open filter bar's counts cover the whole folder, before the view filters.
+    const bool count = !path.empty() && (mode == PickerMode::File || mode == PickerMode::Image);
+    if (count) listing.filter_counts.assign(std::min<size_t>(options.filters.size(), 64), 0);
+    const auto ticks = [](const FILETIME& time) {
+        return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
     for (size_t i = 0; i < raw.size(); ++i) {
         const fs::DirEntry& source = raw[i];
         PickerEntry entry;
@@ -200,17 +228,42 @@ PickerListing ReadListing(const std::wstring& path, PickerMode mode, const Picke
             entry.size = source.drive_total;
             entry.free = source.drive_free;
         } else {
-            if (source.full_path.empty() &&
-                !PickerShowsEntry(source.attrs, source.name, mode, options)) continue;
+            const bool file = !source.is_dir;
+            entry.archive = options.archive && !virtual_archive && file && ops::archive_open::Supported(entry.path);
+            entry.is_new = count && file && source.full_path.empty() && options.new_since &&
+                ticks(source.mtime) >= options.new_since;
+            if (count && file && source.full_path.empty() &&
+                PickerAllowsAttributes(source.attrs, options)) {
+                for (size_t f = 0; f < listing.filter_counts.size(); ++f)
+                    if (PickerMatchesFilterAt(source.name, mode, options, f)) ++listing.filter_counts[f];
+                ++listing.category_counts[0];
+                if (options.category_of) {
+                    const int category = options.category_of(source.name);
+                    if (category > 0 && static_cast<size_t>(category) < kPickerCategoryCount) ++listing.category_counts[static_cast<size_t>(category)];
+                }
+                if (entry.is_new && PickerMatchesFilter(source.name, mode, options))
+                    ++listing.new_count;
+            }
+            if ((source.full_path.empty() || entry.archive) &&
+                !PickerShowsEntry(source.attrs, source.name, entry.archive ? PickerMode::Save : mode, options)) continue;
+            if (file && source.full_path.empty()) {
+                if (options.category > 0 && options.category_of && options.category_of(source.name) != options.category) continue;
+                if (options.modified_after && ticks(source.mtime) <= options.modified_after) continue;
+                if (options.only_new && options.new_since && !entry.is_new && count) continue;
+            }
             entry.kind = source.is_dir ? PickerEntryKind::Folder
-                : mode == PickerMode::Image && !IsShortcut(source.name) ? PickerEntryKind::Image
+                : mode == PickerMode::Image && !entry.archive && !IsShortcut(source.name) ? PickerEntryKind::Image
                 : PickerEntryKind::File;
             entry.size = source.size;
         }
         listing.entries.push_back(std::move(entry));
     }
     // Drives keep the drive-letter order the enumeration produced.
-    if (!path.empty()) SortPickerEntries(listing.entries, options);
+    listing.counted = count;
+    if (!path.empty()) {
+        if (options.order_entries) options.order_entries(listing.entries, raw);
+        else SortPickerEntries(listing.entries, options);
+    }
     auto rows = std::make_shared<std::vector<fs::DirEntry>>();
     rows->reserve(listing.entries.size());
     for (const PickerEntry& entry : listing.entries) rows->push_back(std::move(raw[entry.source]));
@@ -359,6 +412,48 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
     if (options.validate_local_open_access_v1 &&
         (mode != PickerMode::File || names.size() > kMaxLocalOpenSelections || options.skip_access_validation)) {
         result.error = ERROR_NOT_SUPPORTED; return result;
+    }
+    if (options.archive) {
+        std::vector<std::wstring> resolved, virtual_paths;
+        std::vector<size_t> virtual_indices;
+        resolved.reserve(names.size());
+        for (const auto& name : names) {
+            if (cancelled()) { result.error = ERROR_CANCELLED; return result; }
+            auto path = ResolvePath(current, name);
+            if (path.empty()) { result.error = ERROR_INVALID_NAME; result.failed_path = name; return result; }
+            if (options.archive->Contains(path)) {
+                if (names.size() == 1) {
+                    std::vector<fs::DirEntry> rows;
+                    const DWORD error = options.archive->List(path, rows, cancelled);
+                    if (cancelled()) { result.error = ERROR_CANCELLED; return result; }
+                    if (!error) { result.navigate = std::move(path); return result; }
+                    if (error != ERROR_PATH_NOT_FOUND) { result.error = error; result.failed_path = path; return result; }
+                }
+                virtual_indices.push_back(resolved.size());
+                virtual_paths.push_back(path);
+            }
+            resolved.push_back(std::move(path));
+        }
+        if (!virtual_paths.empty()) {
+            auto materialized = options.archive->Materialize(virtual_paths, cancelled);
+            if (cancelled() || materialized.error || materialized.paths.size() != virtual_paths.size()) {
+                result.error = cancelled() ? ERROR_CANCELLED : materialized.error ? materialized.error : ERROR_INVALID_DATA;
+                result.failed_path = virtual_paths.front();
+                return result;
+            }
+            for (size_t i = 0; i < virtual_indices.size(); ++i) resolved[virtual_indices[i]] = std::move(materialized.paths[i]);
+            auto local_options = options;
+            local_options.archive.reset();
+            result = ValidatePaths(current, resolved, mode, local_options, cancelled);
+            if (cancelled()) result.error = ERROR_CANCELLED;
+            if (result.error) {
+                result.paths.clear(); result.missing_paths.clear(); result.navigate.clear();
+            } else {
+                result.archive_source = options.archive->ArchiveFor(virtual_paths.front());
+                result.archive_delivery = std::move(materialized.lease);
+            }
+            return result;
+        }
     }
     // LocalOpen applies the same access/shortcut checks to every selected file.
     // No prefix escapes on an error: the batch is cleared below.
@@ -527,6 +622,7 @@ struct PickerLoader::Target {
     UINT directories_message = 0;
     std::atomic<uint64_t> serial{0};
     bool closed = false;
+    bool capture_save_followup = false;
     std::function<void(uint64_t)> pending;
 };
 
@@ -534,12 +630,13 @@ PickerListing ReadPickerListing(const std::wstring& path, PickerMode mode, const
     return ReadListing(path, mode, options, [] { return false; });
 }
 
-PickerLoader::PickerLoader(HWND hwnd, UINT message, UINT validation_message, UINT folder_commit_message, UINT directories_message) : target_(std::make_shared<Target>()) {
+PickerLoader::PickerLoader(HWND hwnd, UINT message, UINT validation_message, UINT folder_commit_message, UINT directories_message, bool capture_save_followup) : target_(std::make_shared<Target>()) {
     target_->hwnd = hwnd;
     target_->message = message;
     target_->validation_message = validation_message;
     target_->folder_commit_message = folder_commit_message;
     target_->directories_message = directories_message;
+    target_->capture_save_followup = capture_save_followup;
     for (int worker = 0; worker < 2; ++worker) std::thread([target = target_] {
         SetThreadErrorMode(SEM_FAILCRITICALERRORS, nullptr);
         std::unique_lock lock(target->lock);
@@ -585,7 +682,7 @@ void PickerLoader::Load(uint64_t generation, std::wstring path, PickerMode mode,
         auto cancelled = [&] { return target->serial.load() != serial; };
         DWORD admission_error = ERROR_SUCCESS;
         if (target->folder_commit_message) {
-            admission_error = ProbeFolder(path, cancelled, options.native_options);
+            admission_error = ProbeFolder(path, cancelled, options);
             if (cancelled()) return;
             if (admission_error == ERROR_SUCCESS) {
                 auto commit = std::make_unique<PickerFolderCommit>();
@@ -694,6 +791,11 @@ void PickerLoader::ValidateSave(uint64_t generation, SaveTargetRequest request) 
             if (initial.state == SaveTargetState::TargetDirectory) result->navigate = initial.path;
             else ApplySaveSnapshot(*result, std::move(save));
         } else ApplySaveSnapshot(*result, std::move(save));
+        if (target->capture_save_followup && !result->error && !result->save_file_ok_checked &&
+            result->save_snapshot && result->paths.size() == 1) {
+            picker_save::Stamp before;
+            if (picker_save::Capture(result->paths.front(), before) == ERROR_SUCCESS) result->save_before = before;
+        }
         std::lock_guard guard(target->lock);
         if (!target->closed && !cancelled() && target->validation_message &&
             PostMessageW(target->hwnd, target->validation_message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
@@ -711,6 +813,11 @@ void PickerLoader::RevalidateSave(uint64_t generation, SaveConfirmationSnapshot 
         result->generation = generation;
         result->failed_path = snapshot.Path();
         ApplySaveSnapshot(*result, RevalidateSaveConfirmation(snapshot, cancelled));
+        if (target->capture_save_followup && !result->error && !result->save_file_ok_checked &&
+            result->save_snapshot && result->paths.size() == 1) {
+            picker_save::Stamp before;
+            if (picker_save::Capture(result->paths.front(), before) == ERROR_SUCCESS) result->save_before = before;
+        }
         std::lock_guard guard(target->lock);
         if (!target->closed && !cancelled() && target->validation_message &&
             PostMessageW(target->hwnd, target->validation_message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
@@ -766,6 +873,11 @@ void PickerLoader::CheckSaveAccess(uint64_t generation, SaveConfirmationSnapshot
             }
             result->save_access_diagnostic = std::move(access);
             }
+        }
+        if (target->capture_save_followup && !result->error && !result->save_file_ok_checked &&
+            result->save_snapshot && result->paths.size() == 1) {
+            picker_save::Stamp before;
+            if (picker_save::Capture(result->paths.front(), before) == ERROR_SUCCESS) result->save_before = before;
         }
         std::lock_guard guard(target->lock);
         if (!target->closed && !cancelled() && target->validation_message &&

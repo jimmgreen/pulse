@@ -281,27 +281,10 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
         o.line_height = lh;
         c.Text(text, fmt, D2D1::RectF(x, y, x + width, y + 1.0f), color, o);
     };
-    // .shimmer: text2 with an accent band sweeping across every 1.8 s.
-    const auto shimmer = [&](const std::wstring& text, IDWriteTextFormat* fmt, float x, float y, float h) {
+    // The running spark carries activity; keep status text stable and readable.
+    const auto status_text = [&](const std::wstring& text, IDWriteTextFormat* fmt, float x, float y, float h) {
         const float tw = c.Measure(text, fmt);
-        const D2D1_RECT_F r = D2D1::RectF(x, y, x + tw + 2.0f, y + h);
-        c.Text(text, fmt, r, pal.text2);
-        if (!motion_on || tw <= 0.0f) return;
-        conv_decor_ = true;
-        const float t = static_cast<float>(now_ms % 1800) / 1800.0f;
-        const float gpos = 1.0f - 2.2f * t;        // background-position 100% → -120%
-        const float gx = x - 1.2f * tw * gpos;
-        const D2D1_COLOR_F a0 = Alpha(pal.accent, 0.0f), a1 = pal.accent;
-        const D2D1_GRADIENT_STOP stops[] = {{0.35f, a0}, {0.5f, a1}, {0.65f, a0}};
-        ID2D1LinearGradientBrush* mask =
-            Gradient(dc, D2D1::Point2F(gx, 0.0f), D2D1::Point2F(gx + 2.2f * tw, 0.0f), stops, 3);
-        if (!mask) return;
-        dc->PushLayer(D2D1::LayerParameters1(r, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(),
-                                             1.0f, mask, D2D1_LAYER_OPTIONS1_NONE),
-                      nullptr);
-        c.Text(text, fmt, r, pal.accent);
-        dc->PopLayer();
-        mask->Release();
+        c.Text(text, fmt, D2D1::RectF(x, y, x + tw + 2.0f, y + h), pal.text2);
     };
     // msg-in: opacity 0 → 1 and translateY(8) → 0, .35 s.
     struct Entrance {
@@ -652,7 +635,7 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
                 if (b.running && motion_on) { pose = SparkPose(now_ms); conv_decor_ = true; }
                 c.Icon(AiIcon::Spark, x, cy - 7.5f * s, 15.0f * s, pal.accent, pose);
                 x += 22.0f * s;
-                if (b.running) shimmer(b.label, formats_.body13, x, hy, 28.0f * s);
+                if (b.running) status_text(b.label, formats_.body13, x, hy, 28.0f * s);
                 else line(b.label, formats_.body13, x, hy, x + label_w + 2.0f, 28.0f * s, pal.text2);
                 x += label_w + 7.0f * s;
                 if (meta_w > 0.0f) {
@@ -1538,7 +1521,7 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
                 AiIconPose pose;
                 if (motion_on) { pose = SparkPose(now_ms); conv_decor_ = true; }
                 c.Icon(AiIcon::Spark, x0, wy + 6.0f * s, 16.0f * s, pal.accent, pose);
-                shimmer(b.text, formats_.small125, x0 + 24.0f * s, wy, 28.0f * s);
+                status_text(b.text, formats_.small125, x0 + 24.0f * s, wy, 28.0f * s);
             }
             y += 28.0f * s;
             pending = 6.0f * s;

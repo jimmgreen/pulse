@@ -341,6 +341,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         }
         l.alias_mark_row=row(64);
         l.tree_sticky_row=row(64);
+        l.scroll_past_end_row=row(64);
 
         section(I::ListMtimeHint);
         l.mtime_style_card=row(seg_h); fitted_segments(l.mtime_style_card,l.mtime_style_row,{I::MtimeStyleOff,I::MtimeStyleDot,I::MtimeStyleBar,I::MtimeStyleText});
@@ -1359,7 +1360,7 @@ inline int HitTestSettingsStore(const SettingsLayout& l, const WindowViewModel& 
             view.items[static_cast<size_t>(detail_index)].action_enabled &&
             ContainsPt(d.install_button, x, y))
             return static_cast<int>(PackAction::StoreDetailInstall);
-        if (ContainsPt(d.enable, x, y)) return static_cast<int>(PackAction::StoreDetailEnable);
+        if (ContainsPt(d.enable, x, y) || ContainsPt(d.enable_label, x, y)) return static_cast<int>(PackAction::StoreDetailEnable);
         if (ContainsPt(d.more, x, y)) return static_cast<int>(PackAction::StoreDetailMore);
         for (int i = 0; i < d.tab_count && i < 4; ++i)
             if (ContainsPt(d.tabs[i], x, y)) return d.tab_actions[i];

@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 #include <windows.h>
 namespace pulse::ui {
 enum class ExtensionStateSource : uint32_t { User = 1, Programmatic = 2 };
@@ -22,6 +23,11 @@ struct ExtensionTreeCallbacks {
 };
 // Padding (physical px) the view keeps around its content on every side.
 constexpr int kExtensionTreeContentInset = 8;
+struct ExtensionTreePaintStats {
+    uint64_t frames = 0;
+    uint64_t partial_frames = 0;
+    uint64_t drawn_items = 0;
+};
 class ExtensionTreeView {
   public:
     ExtensionTreeView();
@@ -59,6 +65,11 @@ class ExtensionTreeView {
     extensions::UiTree SnapshotTree() const;
     void CopySnapshotViewState(const ExtensionTreeView &source);
     bool PaintTo(HDC target, int x, int y);
+    ExtensionTreePaintStats PaintStats() const;
+    std::optional<D2D1_RECT_F> NodeBounds(const std::string &id) const;
+    // Reads the last submitted frame, only when Compositor frame copying is enabled.
+    // Does not schedule or perform a render.
+    bool CopyPresentedPixels(std::vector<uint32_t> &bgra, UINT &width, UINT &height) const;
 
   private:
     struct Impl;

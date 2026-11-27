@@ -52,7 +52,7 @@ void MainRenderer::DrawAddressSearchChrome(const WindowViewModel& vm, float w, c
             ComPtr<ID2D1SolidColorBrush> brush;
             compositor_->Dc()->CreateSolidColorBrush(vm.address_search_text.empty()
                 ? theme.text_secondary : theme.text, &brush);
-            if (brush.get()) DrawTextRect(compositor_->Dc(), compositor_->AddressFormat(), brush.get(),
+            if (brush.get()) DrawTextRect(compositor_->Dc(), EmbeddedPickerLayout() ? compositor_->FileNameFormat() : compositor_->AddressFormat(), brush.get(),
                 text, layout.input.left, layout.input.top, layout.input.right - layout.input.left,
                 layout.input.bottom - layout.input.top);
         }
@@ -74,7 +74,7 @@ void MainRenderer::DrawAddressSearchChrome(const WindowViewModel& vm, float w, c
         MakeBrush(compositor_->Dc(),theme.text_secondary,brTextSecondary_);
         const float text_left=field.left+36*scale_;
         const float text_right=field.right-14*scale_-painter_.MeasureBadgeWidth(search.trailing_keycap);
-        DrawTextEndEllipsis(compositor_, compositor_->TextFormat(),
+        DrawTextEndEllipsis(compositor_, EmbeddedPickerLayout() ? compositor_->FileNameFormat() : compositor_->TextFormat(),
             brTextSecondary_.get(),std::wstring(search.placeholder),text_left,field.top,
             std::max(0.0f,text_right-text_left),field.bottom-field.top);
     }

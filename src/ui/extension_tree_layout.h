@@ -14,6 +14,9 @@ struct ExtensionLayoutCallbacks {
     std::function<void(const extensions::UiNode &, D2D1_RECT_F, D2D1_RECT_F, bool, bool)> place;
     // Optional content width in pixels for controls that size to their label (breadcrumbs); 0 = fill.
     std::function<float(const extensions::UiNode &)> intrinsic_width;
+    // Optional label width in pixels of a badge: a horizontal stack made only of badges wraps
+    // like a line of text (as many per row as fit) instead of splitting into equal cells.
+    std::function<float(const extensions::UiNode &)> chip_width;
 };
 class ExtensionTreeLayout {
   public:
@@ -51,6 +54,10 @@ class ExtensionTreeLayout {
     struct Flow {
         int columns = 1;
         std::vector<float> widths;
+        std::vector<char> row_end;  // wrapped chips: the visible child that ends each row
+        bool EndRow(size_t index, int column) const {
+            return row_end.empty() ? column == columns : row_end[index] != 0;
+        }
     };
     float ConstrainWidth(const extensions::UiNode &node, float width) const;
     float ConstrainHeight(const extensions::UiNode &node, float height) const;

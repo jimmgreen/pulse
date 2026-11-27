@@ -113,6 +113,9 @@ std::wstring NativeSaveMaskFilename(std::wstring_view filename, const std::vecto
 std::optional<size_t> InferSaveFilterFromFilename(std::wstring_view filename,
     const std::vector<PickerFilter>& filters, size_t current_filter) {
     if (current_filter >= filters.size() || !ValidText(filename)) return std::nullopt;
+    // An explicit all-files selection accepts the typed suffix without changing the caller's format.
+    const auto& current_pattern = filters[current_filter].pattern;
+    if (current_pattern == L"*.*" || current_pattern == L"*") return std::nullopt;
     const auto slash = filename.find_last_of(L"\\/");
     const auto leaf = filename.substr(slash == filename.npos ? 0 : slash + 1);
     if (leaf.empty() || leaf.front() == L'.' || leaf.back() == L'.' || std::iswspace(leaf.back()) ||

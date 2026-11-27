@@ -5,8 +5,50 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <memory>
+#include <string_view>
+#include <vector>
+#include "../common/preview_extensions.h"
 
 namespace pulse::ui {
+// 0 other, 1 picture (RAW and PSD included), 2 video: the kinds Quick Look's
+// photo viewer and its filmstrip filter know. Works on a name or a path.
+inline int QuickPreviewMediaKind(std::wstring_view name) {
+    const size_t dot = name.find_last_of(L'.');
+    const size_t slash = name.find_last_of(L"\\/");
+    if (dot == std::wstring_view::npos || (slash != std::wstring_view::npos && dot < slash) ||
+        name.size() - dot > 7)
+        return 0;
+    wchar_t buffer[8]{};
+    size_t n = 0;
+    for (size_t i = dot; i < name.size() && n < 7; ++i) {
+        wchar_t c = name[i];
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+        buffer[n++] = c;
+    }
+    const std::wstring_view ext(buffer, n);
+    using pulse::preview::PreviewFamily;
+    if (pulse::preview::IsImageExtension(ext) || pulse::preview::IsFamilyExtension(PreviewFamily::Raw, ext) ||
+        pulse::preview::IsFamilyExtension(PreviewFamily::Psd, ext))
+        return 1;
+    return pulse::preview::IsVideoExtension(ext) ? 2 : 0;
+}
+
+// The listing around the previewed item, for the photo viewer's filmstrip and
+// its filtered prev / next. kinds has one QuickPreviewMediaKind per view row;
+// entries describe rows [first, first + entries.size()).
+struct QuickPreviewGalleryEntry {
+    std::wstring path;
+    DWORD attrs = 0;
+    uint64_t modified = 0, size = 0;
+};
+struct QuickPreviewGallery {
+    std::vector<uint8_t> kinds;
+    int current = -1;   // view row of the previewed item
+    int first = 0;
+    std::vector<QuickPreviewGalleryEntry> entries;
+};
+
 struct QuickPreviewItem {
     std::wstring path, name;
     DWORD attrs = 0;
@@ -15,6 +57,8 @@ struct QuickPreviewItem {
     bool read_only = false;
     // 1-based place in the listing and its length; 0 when unknown.
     int position = 0, count = 0;
+    // Quick Look from a folder listing: the rows around it (null elsewhere).
+    std::shared_ptr<const QuickPreviewGallery> gallery;
 };
 
 enum class QuickPreviewAction : int {
@@ -43,12 +87,13 @@ struct QuickPreviewOptions {
     bool prefer_system = false;
     int volume_percent = 100;
     bool muted = false;
+    bool immersive = true;          // pictures / videos in the photo viewer layout
     bool operator==(const QuickPreviewOptions& other) const {
         return size_mode == other.size_mode && remember_size == other.remember_size &&
                EqualRect(&remembered, &other.remembered) && space_closes == other.space_closes &&
                loop == other.loop && key_hint_left == other.key_hint_left &&
                prefer_system == other.prefer_system && volume_percent == other.volume_percent &&
-               muted == other.muted;
+               muted == other.muted && immersive == other.immersive;
     }
 };
 

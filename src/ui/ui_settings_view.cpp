@@ -1553,6 +1553,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::PinnedNames: target=l.pinned_names_row;break;
     case I::AliasMark: target=l.alias_mark_row;break;
     case I::SettingsTreeSticky: target=l.tree_sticky_row;break;
+    case I::SettingsScrollPastEnd: target=l.scroll_past_end_row;break;
     case I::ThumbCache: target=l.thumb_cache_row;break;
     case I::SettingsVerticalTabs: target=l.vertical_tabs_row;break;
     case I::TrayHideWhenEmpty: target=l.tray_hide_row;break;
@@ -1578,6 +1579,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::GlobalSearchDoubleCtrl: target=l.global_search_double_ctrl_row;break;
     case I::GlobalSearchDoubleCtrlGap: target=l.global_search_gap_card;break;
     case I::GlobalSearchApps: target=l.global_search_apps_row;break;
+    case I::GlobalSearchAppsFirst: target=l.global_search_apps_first_row;break;
     case I::DialogJumpBar: target=l.dialog_jump_row;break;
     case I::DialogJumpAuto: target=l.dialog_jump_auto_row;break;
     case I::DialogAdaptiveLegacy: target=l.dialog_adaptive_row;break;

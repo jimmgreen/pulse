@@ -664,7 +664,10 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                               : WithAlpha(theme.text_secondary, 0.85f), brText_);
                 // Width measured exactly; let the ink use the right padding as slack
                 // so the trailing glyph is not shaved by the clip rect.
-                DrawTextEndEllipsis(compositor_, compositor_->AddressFormat(), brText_.get(), seg.text,
+                IDWriteTextFormat* crumb_fmt = EmbeddedPickerLayout()
+                    ? (i + 1 == placed.size() ? compositor_->TabActiveFormat() : compositor_->FileNameFormat())
+                    : compositor_->AddressFormat();
+                DrawTextEndEllipsis(compositor_, crumb_fmt, brText_.get(), seg.text,
                     text_left, seg.rc.top, (std::max)(0.0f, seg.rc.right - text_left),
                     seg.rc.bottom - seg.rc.top);
             }
@@ -683,7 +686,7 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             }
             if (placed.empty() && !vm.pane.path.empty()) {
                 MakeBrush(dc, theme.text, brText_);
-                DrawTextRect(dc, compositor_->AddressFormat(), brText_.get(), vm.pane.path,
+                DrawTextRect(dc, EmbeddedPickerLayout() ? compositor_->FileNameFormat() : compositor_->AddressFormat(), brText_.get(), vm.pane.path,
                     addrRc.left + 12.0f * scale_, addrRc.top,
                     addrRc.right - addrRc.left - 18.0f * scale_,
                     addrRc.bottom - addrRc.top);
@@ -691,15 +694,15 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             if (EmbeddedPickerLayout() && !vm.address_searching && !placed.empty() && strip.overflow <= 0.0f) {
                 const auto text = pulse::l10n::Get(pulse::l10n::StringId::PickerTypeToJump);
                 const float key_width = painter_.MeasureBadgeWidth(L"Ctrl L");
-                const float text_width = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->AddressFormat(), text);
+                const float text_width = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->SmallFormat(), text);
                 const float right = addrRc.right - (FavoritesButtonShown() ? 36.0f : 10.0f) * scale_;
                 const float hint_left = right - key_width - 6.0f * scale_ - text_width;
                 // Only use genuinely empty breadcrumb space; long paths keep their full viewport.
                 if (placed.back().rc.right + 26.0f * scale_ <= hint_left) {
                     painter_.DrawText(text, D2D1::RectF(hint_left, addrRc.top, right - key_width - 6.0f * scale_, addrRc.bottom),
-                        compositor_->AddressFormat(), theme.text_secondary);
-                    const float top = (addrRc.top + addrRc.bottom - 22.0f * scale_) * 0.5f;
-                    painter_.DrawBadge({D2D1::RectF(right - key_width, top, right, top + 22.0f * scale_),
+                        compositor_->SmallFormat(), theme.text_secondary);
+                    const float top = (addrRc.top + addrRc.bottom - 18.0f * scale_) * 0.5f;
+                    painter_.DrawBadge({D2D1::RectF(right - key_width, top, right, top + 18.0f * scale_),
                         L"Ctrl L", fluent::BadgeKind::Keycap});
                 }
             }

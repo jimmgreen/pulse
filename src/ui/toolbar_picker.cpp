@@ -976,7 +976,7 @@ private:
             }
             for (auto& h : ps.heads) moving |= h.Step(dt, motion::spring::Snappy);
         }
-        if (now - opened_at_ < 700 || now - page_at_ < 400 || now - enter_at_ < 500) moving = true;
+        if (now - opened_at_ < 110) moving = true;
         if (note_until_ && now < note_until_ + 50) moving = true;
         if (closing_at_) moving = true;
         scroll_ = std::clamp(scroll_, 0.0f, MaxScroll());
@@ -1301,17 +1301,11 @@ private:
         for (size_t i = 0; i < ps.tiles.size(); ++i)
             if (std::find(seq.begin(), seq.end(), i) == seq.end()) seq.push_back(i);   // fading out
         const bool lifting = drag_.active && drag_.page == page;
-        size_t order = 0;
         for (size_t i : seq) {
             if (i >= ps.tiles.size()) continue;
             const float shown = 1.0f - Clamp01(ps.tiles[i].gone.v);
             if (shown <= 0.01f) continue;
-            float enter = 1.0f;
-            if (animations_ && page == page_) {
-                const float delay = 20.0f + 9.0f * static_cast<float>(std::min<size_t>(order, 8));
-                enter = Clamp01((static_cast<float>(now - enter_at_) - delay) / 260.0f);
-            }
-            ++order;
+            const float enter = 1.0f;  // Tiles remain readable during container motion.
             if (lifting && i == drag_.tile) continue;   // drawn last, above the rest
             DrawTile(pal, page, i, TileRect(page, i, dx), alpha * shown * motion::EaseOutCubic(enter), now, enter);
         }
@@ -1327,6 +1321,7 @@ private:
             icons_ = IconBitmaps{};
             brush_.reset();
             dash_.reset();
+            shadow_.reset();
             compositor_.RecreateTextFormats(scale_);
             painter_.SetCompositor(&compositor_);
             painter_.SetScale(scale_);
@@ -1341,7 +1336,7 @@ private:
         const Palette pal = Colors(theme);
         card_color_ = pal.card;
 
-        // Open: Pop 0.94 -> 1 from the notch, fading in fast. Close: 110 ms to 0.97.
+        // One short container transition; content never waits for a stagger.
         float alpha = 1.0f, sc = 1.0f, ty = 0.0f;
         if (closing_at_) {
             const float k = animations_ ? Clamp01(static_cast<float>(now - closing_at_) / 110.0f) : 1.0f;
@@ -1352,10 +1347,8 @@ private:
                 return;
             }
         } else if (animations_) {
-            const float p = motion::SpringProgress(motion::spring::Pop, static_cast<float>(now - opened_at_));
-            alpha = Clamp01(p * 1.7f);
-            sc = 0.94f + 0.06f * p;
-            ty = -S(6.0f) * (1.0f - p);
+            const float p = motion::EaseOutCubic(Clamp01(static_cast<float>(now - opened_at_) / 110.0f));
+            sc = 0.985f + 0.015f * p;
         }
 
         dc->BeginDraw();
@@ -1364,13 +1357,19 @@ private:
         painter_.BeginFrame(theme, hc);
         const D2D1_RECT_F card = Card();
         const float radius = S(14.0f);
-        ComPtr<ID2D1Effect> shadow;
-        if (!hc) shadow = MakeShadow(card, radius);
+        if (!hc && (!shadow_.get() || shadow_card_.left != card.left || shadow_card_.top != card.top ||
+                    shadow_card_.right != card.right || shadow_card_.bottom != card.bottom ||
+                    shadow_scale_ != scale_ || shadow_dark_ != dark_)) {
+            shadow_ = MakeShadow(card, radius);
+            shadow_card_ = card;
+            shadow_scale_ = scale_;
+            shadow_dark_ = dark_;
+        }
         const D2D1_POINT_2F origin = D2D1::Point2F(std::clamp(notch_x_, card.left + S(20.0f), card.right - S(20.0f)), card.top - S(6.0f));
         dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, origin) * D2D1::Matrix3x2F::Translation(0.0f, ty));
         dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                              D2D1::IdentityMatrix(), alpha), nullptr);
-        if (shadow.get()) dc->DrawImage(shadow.get(), D2D1::Point2F(0.0f, S(8.0f)));
+        if (!hc && shadow_.get()) dc->DrawImage(shadow_.get(), D2D1::Point2F(0.0f, S(8.0f)));
         painter_.FillRoundedRect(card, radius, pal.card);
         painter_.StrokeRoundedRect(D2D1::RectF(card.left + 0.5f, card.top + 0.5f, card.right - 0.5f, card.bottom - 0.5f),
                                    radius, dark_ ? HexColor(0xFFFFFF, 0.09f) : HexColor(0x000000, 0.10f));
@@ -1485,18 +1484,10 @@ private:
             }
         }
 
-        // Grids: the incoming page slides in from 16 px, the outgoing one leaves.
+        // The tab indicator and grid height carry the transition; page text is immediate.
         const D2D1_RECT_F grid = GridRect();
         dc->PushAxisAlignedClip(grid, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        const float since = static_cast<float>(now - page_at_);
-        if (animations_ && page_at_ && since < 220.0f && from_page_ != page_) {
-            const float dir = page_ > from_page_ ? 1.0f : -1.0f;
-            const float e = motion::EaseOutCubic(Clamp01(since / 220.0f));
-            DrawPage(pal, from_page_, -S(16.0f) * dir * e, 1.0f - Clamp01(since / 130.0f), now);
-            DrawPage(pal, page_, S(16.0f) * dir * (1.0f - e), Clamp01(since / 130.0f), now);
-        } else {
-            DrawPage(pal, page_, 0.0f, 1.0f, now);
-        }
+        DrawPage(pal, page_, 0.0f, 1.0f, now);
         if (page_ == kTools && pages_[kTools].visible == 0)
             painter_.DrawText(spec_->empty_text, D2D1::RectF(grid.left, grid.top + S(30.0f), grid.right, grid.top + S(50.0f)),
                               small_fmt_.get(), pal.faint, fluent::HorizontalAlignment::Center);
@@ -1785,6 +1776,10 @@ private:
     std::vector<WrappedLayout> wrapped_layouts_;
     ComPtr<ID2D1SolidColorBrush> brush_;
     ComPtr<ID2D1StrokeStyle> dash_;
+    ComPtr<ID2D1Effect> shadow_;
+    D2D1_RECT_F shadow_card_{};
+    float shadow_scale_ = 0.0f;
+    bool shadow_dark_ = false;
     float formats_scale_ = 0.0f;
     float done_w_ = 0.0f;
     D2D1_COLOR_F accent_ = HexColor(0x0078D4);

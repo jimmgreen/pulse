@@ -189,6 +189,10 @@ inline bool SysCtxContains(const D2D1_RECT_F& r, float x, float y) {
 }
 
 inline bool SysCtxSwitchable(const SysCtxRowView& row) { return !row.locked && !row.read_only; }
+inline bool SysCtxPulseOnlyAction(const SysCtxRowView& row) { return row.read_only && row.pulse != 0; }
+inline const wchar_t* SysCtxPulseActionText(const SysCtxRowView& row) {
+    return l10n::Get(row.pulse == 2 ? l10n::StringId::SysCtxRestoreInPulse : l10n::StringId::SysCtxHideInPulse).c_str();
+}
 
 // 撤销 / 操作日志 / 全部还原: caption text after a 12 px glyph.
 inline constexpr float kSysCtxHeaderButtonDip = 26.0f;
@@ -554,6 +558,18 @@ inline float LayoutSettingsSysCtx(SettingsLayout& l, const WindowViewModel& vm, 
     o.local_card = D2D1::RectF(left, y, left + card_w, y + kCtxLayerCardDip * s);
     o.system_card = D2D1::RectF(left + card_w + gap, y, right, y + kCtxLayerCardDip * s);
     y += kCtxLayerCardDip * s + 12 * s;
+    const auto tree_text = l10n::Get(l10n::StringId::ContextTreeTitle);
+    const float tree_w = button_w(tree_text, L"\xE8A5");
+    o.tree_button = D2D1::RectF(left, y, left + tree_w, y + bh);
+    const float extension_w = button_w(l10n::Get(l10n::StringId::ContextTreeOtherType), L"\xE8A5");
+    float extension_left = o.tree_button.right + 12 * s;
+    if (extension_left + extension_w > right) { extension_left = left; y += bh + 6 * s; }
+    o.extension_button = D2D1::RectF(extension_left, y, extension_left + extension_w, y + bh);
+    y += bh + 6 * s;
+    const auto tree_note = l10n::Get(l10n::StringId::ContextTreeScope);
+    const float note_h = SysCtxWrappedHeight(painter, tree_note, right - left, s);
+    o.tree_note = D2D1::RectF(left, y, right, y + note_h);
+    y += note_h + 12 * s;
     if (!v) return y;
 
     if (v->pending == 0 && !v->message.empty() && v->state == SysCtxView::State::Ready) {
@@ -639,6 +655,13 @@ inline float LayoutSettingsSysCtx(SettingsLayout& l, const WindowViewModel& vm, 
             o.rows.push_back(r);
             o.more.push_back(D2D1::RectF(row_right - 36 * s, mid - 14 * s, row_right - 8 * s, mid + 14 * s));
             o.switches.push_back(D2D1::RectF(row_right - 88 * s, mid - 11 * s, row_right - 44 * s, mid + 11 * s));
+            if (SysCtxPulseOnlyAction(v->rows[i])) {
+                const float w = painter ? painter->MeasureButtonWidth(SysCtxPulseActionText(v->rows[i]), L"")
+                                        : SysCtxTextWidth(nullptr, SysCtxPulseActionText(v->rows[i]), s) + 12 * s;
+                o.pulse_buttons.push_back(D2D1::RectF(row_right - 44 * s - w, mid - 14 * s, row_right - 44 * s, mid + 14 * s));
+            } else {
+                o.pulse_buttons.push_back({});
+            }
             // Leftovers: switching a dead entry on or off means little; the row
             // offers to delete it instead (the switch stays in 详情).
             if (v->rows[i].deletable) {
@@ -660,6 +683,7 @@ inline float LayoutSettingsSysCtx(SettingsLayout& l, const WindowViewModel& vm, 
         o.switches.clear();
         o.more.clear();
         o.removes.clear();
+        o.pulse_buttons.clear();
         o.empty = {};
         o.detail = {};
         ly = o.list_head.bottom;
@@ -736,7 +760,10 @@ inline int HitTestSettingsSysCtx(const SettingsLayout& l, const WindowViewModel&
     const SysCtxView* v = vm.settings_sysctx.get();
     const SysCtxLayout& o = l.sysctx;
     if (SysCtxContains(o.local_card, x, y)) return kSysCtxLocalLayer;
+    if (SysCtxContains(o.tree_button, x, y)) return kSysCtxTree;
     if (!v) return -1;
+    if (SysCtxContains(o.extension_button, x, y))
+        return v->state == SysCtxView::State::Ready ? kSysCtxOtherType : -1;
     if (SysCtxContains(o.pending_bar, x, y)) {
         if (SysCtxContains(o.apply, x, y)) return kSysCtxApply;
         if (SysCtxContains(o.discard, x, y)) return kSysCtxDiscard;
@@ -789,6 +816,8 @@ inline int HitTestSettingsSysCtx(const SettingsLayout& l, const WindowViewModel&
     for (size_t i = 0; i < o.rows.size() && i < v->rows.size(); ++i) {
         if (!SysCtxContains(o.rows[i], x, y)) continue;
         if (SysCtxContains(o.more[i], x, y)) return kSysCtxMoreBase + static_cast<int>(i);
+        if (i < o.pulse_buttons.size() && SysCtxContains(o.pulse_buttons[i], x, y))
+            return v->state == SysCtxView::State::Ready ? kSysCtxPulseBase + static_cast<int>(i) : -1;
         if (i < o.removes.size() && SysCtxContains(o.removes[i], x, y))
             return v->state == SysCtxView::State::Ready ? kSysCtxRemoveBase + static_cast<int>(i) : -1;
         if (SysCtxContains(o.switches[i], x, y) && SysCtxSwitchable(v->rows[i]) && !v->rows[i].deletable)

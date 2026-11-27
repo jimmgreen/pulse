@@ -35,10 +35,13 @@ enum SysCtxHit : int {
     kSysCtxOverview = 12,     // scene list: the 概览 row
     kSysCtxDetailPulse = 13,  // detail panel: 在 Pulse 右键菜单中显示 (ContextMenuPrefs)
     kSysCtxDetailDelete = 14, // detail panel: 删除残留项 (queued)
+    kSysCtxOtherType = 17,   // inspect a user-entered file extension on the worker
+    kSysCtxTree = 16,        // organize observed submenus inside Pulse only
     kSysCtxClean = 15,        // list head: 清理残留 (every leftover of the scene, queued)
     kSysCtxSlowSkipBase = 9000,    // + 概览 slow row: Pulse 跳过 (ContextMenuPrefs)
     kSysCtxSlowToggleBase = 9200,  // + 概览 slow row: 禁用 in Windows
     kSysCtxMarkRestoreBase = 9400, // + 概览 mark row: 还原 a ContextMenuManager mark
+    kSysCtxPulseBase = 13000, // + row index: hide/restore in Pulse when Windows is read-only
     kSysCtxRemoveBase = 11000,     // + row index: a leftover's own 删除 / 撤回 button (queued)
 };
 
@@ -76,6 +79,7 @@ struct SysCtxRowView {
     std::wstring subtitle;   // publisher · program, or why it is broken
     std::wstring icon_path;  // .exe/.ico for the shell icon cache; empty: glyph
     const wchar_t* glyph = L"\xE8A5";
+    uint16_t depth = 0;      // registry cascade depth; child actions are Pulse-only
     bool on = true;          // state after the queued change, if any
     bool pending = false;    // queued change, not written yet
     bool machine = false;    // HKLM (all users) rather than HKCU
@@ -218,6 +222,7 @@ struct SysCtxLayout {
     bool wide = false;                  // three columns; otherwise details open under the row
     D2D1_RECT_F intro{}, undo{}, log{}, restore{};
     D2D1_RECT_F local_card{}, system_card{};
+    D2D1_RECT_F tree_button{}, extension_button{}, tree_note{};
     D2D1_RECT_F scenes_card{};
     std::vector<D2D1_RECT_F> scenes;
     D2D1_RECT_F overview_row{};         // 概览, above the groups
@@ -226,6 +231,7 @@ struct SysCtxLayout {
     std::vector<D2D1_RECT_F> filters, subs;
     D2D1_RECT_F rows_top{}, empty{};
     std::vector<D2D1_RECT_F> rows, switches, more;
+    std::vector<D2D1_RECT_F> pulse_buttons; // read-only Windows rows: explicit Pulse-only action
     std::vector<D2D1_RECT_F> removes;   // per row: 删除 / 撤回 in the switch's place (leftovers only)
     SysCtxOverviewLayout overview;      // when SysCtxView::overview.shown (rows stay empty)
     D2D1_RECT_F side_card{}, tab_preview{}, tab_detail{}, side_body{};

@@ -814,22 +814,29 @@ float LayoutExtensionDetail(SettingsLayout& l, const WindowViewModel& vm, float 
         left, right, y, s, font, painter, item.installed, action_label);
     store_view::LayoutStatusBanners(l, view, false, false, false, left, right, s, font, y, painter);
 
-    l10n::StringId tab_labels[4]{};
-    int tab_actions[4]{};
+    // The same tabs, in the same order, as the package's settings page: 设置, 右键菜单, its own tabs
+    // (支持格式, ...), then 概览 and 关于 — so switching between the two pages never hides a tab.
+    constexpr int kTabs = SettingsLayout::DetailHeader::kMaxTabs;
+    std::wstring tab_titles[kTabs];
+    int tab_actions[kTabs]{};
     int tab_count = 0;
     if (item.installed && item.settings_package >= 0) {
-        tab_labels[tab_count] = I::SzTabSettings;
+        tab_titles[tab_count] = l10n::Get(I::SzTabSettings);
         tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailOpenSettings);
         if (item.has_menu_tab) {
-            tab_labels[tab_count] = I::SzTabMenu;
+            tab_titles[tab_count] = l10n::Get(I::SzTabMenu);
             tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailOpenMenu);
         }
+        for (size_t k = 0; k < item.plugin_tabs.size() && k < 6 && tab_count + 2 < kTabs; ++k) {
+            tab_titles[tab_count] = item.plugin_tabs[k];
+            tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailPluginTabBase) + static_cast<int>(k);
+        }
     }
-    tab_labels[tab_count] = I::StoreDetailTabOverview;
+    tab_titles[tab_count] = l10n::Get(I::StoreDetailTabOverview);
     tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailTabBase);
-    tab_labels[tab_count] = I::SzTabAbout;
+    tab_titles[tab_count] = l10n::Get(I::SzTabAbout);
     tab_actions[tab_count++] = static_cast<int>(PackAction::StoreDetailTabBase) + 1;
-    y = LayoutExtensionDetailTabsSpec(d, tab_labels, tab_actions, tab_count, left, right, y, s, font, painter);
+    y = LayoutExtensionDetailTabsCustom(d, tab_titles, tab_actions, tab_count, left, right, y, s, font, painter);
 
     if (view.detail_tab == 1) {
         const float ml = left, mr = right;

@@ -43,6 +43,18 @@
 namespace pulse::ui {
 
 namespace {
+// Static holds need one deadline wake-up, not a stream of animation frames.
+// Window-owned timers disappear with the HWND; each pane has independent slots.
+void WakePaneAt(HWND hwnd, int pane, UINT_PTR channel, uint64_t deadline, uint64_t now) {
+    if (!hwnd || pane < 0) return;
+    const UINT_PTR id = 0x504100 + static_cast<UINT_PTR>(pane) * 4 + channel;
+    if (!deadline || deadline <= now) { KillTimer(hwnd, id); return; }
+    SetTimer(hwnd, id, static_cast<UINT>(std::clamp<uint64_t>(deadline - now, 10, USER_TIMER_MAXIMUM)),
+        [](HWND window, UINT, UINT_PTR timer, DWORD) {
+            KillTimer(window, timer);
+            InvalidateRect(window, nullptr, FALSE);
+        });
+}
 // Attribute wall time and Luma fallback deltas to the current row phase.
 class RowPerfScope {
 public:
@@ -143,9 +155,6 @@ static CloudSwapPose CloudSwapFor(const void* owner, const std::wstring& path, i
 
 
 namespace {
-// This PC tiles: the capacity bar grows in over this long, once per visit.
-constexpr float kCapacityRevealMs = 700.0f;
-
 // This PC tiles: the bar follows the text column, up to 360 DIP, and stops
 // short of the tile's edge (and the scrollbar next to the right column).
 float DriveTileBarWidth(const D2D1_RECT_F& name_rect, float scale) {
@@ -536,7 +545,9 @@ void MainRenderer::DrawPaneSizeSlider(const PaneViewModel& pane, int pane_index,
         dc->PopAxisAlignedClip();
     }
     if (motion && dip > 0.0f && motion_now_ < motion->label_until) {
-        RequestMotionFrame();
+        const uint64_t fade_at = motion->label_until - 250;
+        if (motion_now_ >= fade_at) RequestMotionFrame();
+        WakePaneAt(notify_hwnd_, pane_index, 0, fade_at, motion_now_);
         const float a = std::clamp(static_cast<float>(motion->label_until - motion_now_) / 250.0f, 0.0f, 1.0f);
         const float cy = (label_at.top + label_at.bottom) * 0.5f;
         const float right = label_at.left - 6.0f * scale_;
@@ -1252,6 +1263,138 @@ float IconNameLineDip() noexcept {
 }
 }
 
+// ---- List view columns (File Explorer: each column as wide as its longest name) ----
+namespace {
+// Widths of a pane's names, per view row: an estimate from cached character
+// advances for every row, the exact layout width for the rows that decide a
+// column (its widest). Kept while the rows and the text inputs stay the same,
+// so a resize only rebuilds the column split.
+struct ListColumnsCache {
+    std::weak_ptr<const std::vector<fs::DirEntry>> snapshot;
+    std::weak_ptr<const PaneViewModel::FilterMap> order;
+    const void* entries = nullptr;     // vm.entries without a snapshot
+    bool has_snapshot = false, ordered = false;
+    size_t count = 0;
+    float scale = 0.0f;
+    uint64_t font = 0, alias = 0, extensions = 0;
+    std::vector<float> text_px;
+    std::vector<uint8_t> exact;        // 1: text_px measured exactly
+    // Layouts hold the columns for one paint or hit test; the previous split
+    // stays alive across one rebuild.
+    std::shared_ptr<const ListColumns> columns, previous;
+    ULONGLONG used = 0;
+};
+std::vector<ListColumnsCache>& ListColumnsCaches() {
+    static std::vector<ListColumnsCache> caches;
+    return caches;
+}
+struct NameAdvances {
+    const void* format = nullptr;
+    uint64_t font = 0;
+    std::vector<float> advance;        // per UTF-16 unit; < 0: not measured yet
+};
+float EstimateNameWidth(std::wstring_view name, NameAdvances& table, Compositor* compositor, IDWriteTextFormat* format) {
+    float width = 0.0f;
+    for (size_t i = 0; i < name.size(); ++i) {
+        wchar_t ch = name[i];
+        if (IS_HIGH_SURROGATE(ch) && i + 1 < name.size() && IS_LOW_SURROGATE(name[i + 1])) {
+            ch = L'\x4E2D';  // a full-width stand-in for a supplementary character
+            ++i;
+        }
+        float& advance = table.advance[static_cast<size_t>(ch)];
+        if (advance < 0.0f) {
+            // One line has a fixed overhead besides its glyphs: the step from one
+            // copy to four leaves the character's own advance.
+            const float one = typography::MeasureLine(compositor, format, std::wstring(1, ch));
+            const float four = typography::MeasureLine(compositor, format, std::wstring(4, ch));
+            advance = std::max(0.0f, (four - one) / 3.0f);
+        }
+        width += advance;
+    }
+    return width;
+}
+// The name as the List view draws it (alias rules included).
+std::wstring ListDisplayName(const ListEntryView& e) {
+    const std::wstring shown = ShownName(e);
+    if (e.alias.empty()) return shown;
+    return app::AliasStore::Instance().Display() == app::AliasDisplay::Both ? e.alias + L"\u2003\u2003" + shown : e.alias;
+}
+const ListColumns* PaneListColumns(Compositor* compositor, const PaneViewModel& vm, float height, float scale) {
+    if (vm.view_mode != ViewMode::List || vm.content_results || !compositor) return nullptr;
+    IDWriteTextFormat* format = compositor->FileNameFormat();
+    const size_t count = vm.EntryCount();
+    if (!format || count == 0) return nullptr;
+    const uint64_t font = typography::Generation();
+    const uint64_t alias = app::AliasStore::Instance().Revision();
+    const uint64_t extensions = KnownExtensionsRevision(vm.show_file_extensions);
+    static NameAdvances table;
+    if (table.format != format || table.font != font || table.advance.empty()) {
+        table.format = format; table.font = font; table.advance.assign(65536, -1.0f);
+    }
+    const auto same = [](const auto& weak, const auto& strong) {
+        return !weak.expired() && !weak.owner_before(strong) && !strong.owner_before(weak);
+    };
+    const bool ordered = vm.filter_map != nullptr;
+    auto& caches = ListColumnsCaches();
+    ListColumnsCache* hit = nullptr;
+    for (auto& c : caches) {
+        const bool source = vm.snapshot ? (c.has_snapshot && same(c.snapshot, vm.snapshot))
+                                        : (!c.has_snapshot && c.entries == vm.entries.data());
+        if (source && c.ordered == ordered && (!ordered || same(c.order, vm.filter_map)) && c.count == count) { hit = &c; break; }
+    }
+    if (hit && (hit->scale != scale || hit->font != font || hit->alias != alias || hit->extensions != extensions)) {
+        hit->text_px.clear();   // same rows, other text inputs: measure again
+        hit->columns.reset();
+    }
+    if (!hit) {
+        if (caches.size() >= 6) {
+            caches.erase(std::min_element(caches.begin(), caches.end(),
+                [](const ListColumnsCache& a, const ListColumnsCache& b) { return a.used < b.used; }));
+        }
+        caches.emplace_back();
+        hit = &caches.back();
+        hit->has_snapshot = vm.snapshot != nullptr;
+        if (vm.snapshot) hit->snapshot = vm.snapshot; else hit->entries = vm.entries.data();
+        hit->ordered = ordered;
+        if (ordered) hit->order = vm.filter_map;
+        hit->count = count;
+    }
+    hit->used = GetTickCount64();
+    if (hit->text_px.size() != count) {
+        hit->scale = scale; hit->font = font; hit->alias = alias; hit->extensions = extensions;
+        hit->text_px.assign(count, 0.0f);
+        hit->exact.assign(count, 0);
+        for (size_t row = 0; row < count; ++row) {
+            const int src = vm.SourceIndex(static_cast<int>(row));
+            if (src < 0) continue;
+            const auto at = static_cast<size_t>(src);
+            if (vm.snapshot) { if (at < vm.snapshot->size()) hit->text_px[row] = EstimateNameWidth((*vm.snapshot)[at].name, table, compositor, format); }
+            else if (at < vm.entries.size()) hit->text_px[row] = EstimateNameWidth(vm.entries[at].name, table, compositor, format);
+        }
+    }
+    const int rows = ListRowsPerColumn(height, scale);
+    if (hit->columns && hit->columns->rows_per_column == rows) return hit->columns.get();
+    // Each column is decided by its widest name: measure that one exactly (a
+    // hidden extension or an alias can make another row the widest instead).
+    const size_t per = static_cast<size_t>(rows);
+    for (size_t first = 0; first < count; first += per) {
+        const size_t end = std::min(count, first + per);
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            size_t widest = first;
+            for (size_t i = first + 1; i < end; ++i) if (hit->text_px[i] > hit->text_px[widest]) widest = i;
+            if (hit->exact[widest]) break;
+            hit->exact[widest] = 1;
+            const int src = vm.SourceIndex(static_cast<int>(widest));
+            if (src < 0) continue;
+            hit->text_px[widest] = typography::MeasureLine(compositor, format, ListDisplayName(MakeVisibleEntry(vm, static_cast<size_t>(src))));
+        }
+    }
+    hit->previous = std::move(hit->columns);
+    hit->columns = std::make_shared<const ListColumns>(BuildListColumns(hit->text_px, rows, scale));
+    return hit->columns.get();
+}
+}
+
 ViewLayoutParams MainRenderer::ListRowHeightDip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     // Icon grids: the folder's name block and the icon size instead (every
     // ViewLayout of a pane comes through here, so paint, hit testing and
@@ -1263,6 +1406,11 @@ ViewLayoutParams MainRenderer::ListRowHeightDip(const PaneViewModel& vm, const D
         return params;
     }
     const float base = ListRowHeightDip(vm);
+    if (vm.view_mode == ViewMode::List) {
+        ViewLayoutParams params(base);
+        params.list_columns = PaneListColumns(compositor_, vm, pane_bounds.bottom - pane_bounds.top, scale_);
+        return params;
+    }
     if (vm.view_mode != ViewMode::Details || !vm.is_search || vm.content_results) return base;
     return DetailsColumns(pane_bounds, vm).two_line ? std::max(base, kDetailsTwoLineMinRowDip) : base;
 }
@@ -5650,7 +5798,6 @@ constexpr uint64_t kFolderSizePendingLimitMs = 10000;
 
 void MainRenderer::DrawListSkeleton(const D2D1_RECT_F& viewport, const Theme& theme,
                                     int pane_index) {
-    list_loading_active_ = true;
     if (pane_index < 0 || pane_index >= static_cast<int>(list_loading_since_.size())) return;
     const ULONGLONG now = GetTickCount64();
     uint64_t& since = list_loading_since_[pane_index];
@@ -5660,7 +5807,13 @@ void MainRenderer::DrawListSkeleton(const D2D1_RECT_F& viewport, const Theme& th
     }
     const uint64_t age = now - since;
     // Fast folders finish before this and never show placeholders.
-    if (age < 150 || IsHighContrast()) return;
+    if (age < 150) {
+        WakePaneAt(notify_hwnd_, pane_index, 1, since + 150, now);
+        return;
+    }
+    WakePaneAt(notify_hwnd_, pane_index, 1, 0, now);
+    if (IsHighContrast()) return;
+    list_loading_active_ = list_loading_active_ || list_loading_animate_;
     ID2D1DeviceContext* dc = compositor_->Dc();
     const float appear = list_loading_animate_
         ? std::min(1.0f, static_cast<float>(age - 150) / 200.0f) : 1.0f;
@@ -5718,44 +5871,25 @@ void MainRenderer::DrawListSkeleton(const D2D1_RECT_F& viewport, const Theme& th
 }
 
 float MainRenderer::CapacityReveal(const PaneViewModel& vm, int pane_index) {
-    // This PC tiles and its details view (and the overview card above it):
-    // the capacity bars grow from empty once per visit, after the listing
-    // lands. Safe to ask more than once a frame: the answer is the same.
-    NavEnter* nav = pane_index >= 0 && pane_index < static_cast<int>(nav_enter_.size())
-        ? &nav_enter_[static_cast<size_t>(pane_index)] : nullptr;
-    if (!nav) return 1.0f;
-    const bool grows = vm.view_mode == ViewMode::Tiles || vm.this_pc_columns;
-    if (nav->capacity_path != vm.path) {
-        nav->capacity_path = vm.path;
-        nav->capacity_pending = grows && motion::SystemAnimationsEnabled() && !IsHighContrast();
-        nav->capacity_start = 0;
-    }
-    if (nav->capacity_pending && !vm.loading) {
-        nav->capacity_pending = false;
-        // Drives list first; a folder of files has none to grow.
-        const size_t probe = std::min<size_t>(vm.EntryCount(), 64);
-        for (size_t k = 0; k < probe; ++k) {
-            const ListEntryView& probe_entry = MakeVisibleEntry(vm, k);
-            if (probe_entry.drive_used >= 0.0f && !probe_entry.device) {
-                nav->capacity_start = motion_now_;
-                break;
-            }
-        }
-    }
-    if (nav->capacity_pending) {
-        RequestMotionFrame();
-        return 0.0f;
-    }
-    if (nav->capacity_start) {
-        const float t = static_cast<float>(motion_now_ - nav->capacity_start) / kCapacityRevealMs;
-        if (t >= 1.0f || !grows) {
-            nav->capacity_start = 0;
-        } else {
-            RequestMotionFrame();
-            return motion::EaseOutCubic(t);
-        }
-    }
+    // Capacity is data, not progress: present its real proportion immediately.
+    (void)vm;
+    (void)pane_index;
     return 1.0f;
+}
+
+// 滚动到最后一项之后: a list that does not fit scrolls on past its last item,
+// half its height at most (two rows at least), with the last row still in
+// sight so the pane never looks empty. List view flows sideways: none.
+static float ScrollPastEndRoom(bool on, const PaneViewModel& vm, const D2D1_RECT_F& list,
+                        const ViewLayout& layout, float scale) {
+    if (!on || vm.view_mode == ViewMode::List || vm.column_strip.Active() || layout.MaxScrollY() <= 0.0f)
+        return 0.0f;
+    const float view_h = list.bottom - list.top;
+    const auto& m = layout.Metrics();
+    const float row = m.pitch_y > 0.0f ? m.pitch_y : m.cell_height;
+    if (view_h <= 0.0f || row <= 0.0f) return 0.0f;
+    const float room = (std::min)(view_h - row - 10.0f * scale, (std::max)(2.0f * row, 0.5f * view_h));
+    return (std::max)(0.0f, room);
 }
 
 void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, float h,
@@ -5793,45 +5927,25 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         uint64_t& since = folder_size_pending_since_[static_cast<size_t>(pane_index)];
         if (vm.folder_size_pending.empty()) {
             since = 0;
+            WakePaneAt(notify_hwnd_, pane_index, 2, 0, motion_now_);
         } else {
             if (since == 0) since = motion_now_;
             folder_size_pending_age = motion_now_ - since;
             // Past kFolderSizePendingLimitMs the placeholders give way to the
             // calculate offer instead of shimmering indefinitely.
-            if (folder_size_pending_age <= kFolderSizePendingLimitMs) folder_size_anim_active_ = true;
+            WakePaneAt(notify_hwnd_, pane_index, 2,
+                folder_size_pending_age < 150 ? since + 150 : since + kFolderSizePendingLimitMs + 1,
+                motion_now_);
         }
     }
     const bool folder_size_animate = motion::SystemAnimationsEnabled() && !IsHighContrast();
     const std::wstring folder_size_offer = pulse::l10n::Get(pulse::l10n::StringId::FolderSizeCalculate);
     const std::wstring folder_size_scanning = pulse::l10n::Get(pulse::l10n::StringId::Calculating);
     const size_t entryCount = vm.EntryCount();
-    // Motion v2 "nav": a pane that changed folders lets the new rows enter
-    // from the direction of travel once its listing has arrived.
-    NavEnter* nav = pane_index >= 0 && pane_index < static_cast<int>(nav_enter_.size())
-        ? &nav_enter_[static_cast<size_t>(pane_index)] : nullptr;
-    if (nav) {
-        if (nav->path != vm.path) {
-            const bool animate = !nav->path.empty() && !vm.is_search && motion::SystemAnimationsEnabled() &&
-                                 !IsHighContrast();
-            const auto under = [](const std::wstring& child, const std::wstring& parent) {
-                if (parent.empty() || child.size() <= parent.size()) return false;
-                if (_wcsnicmp(child.c_str(), parent.c_str(), parent.size()) != 0) return false;
-                return parent.back() == L'\\' || child[parent.size()] == L'\\';
-            };
-            nav->dir = under(vm.path, nav->path) ? 1 : under(nav->path, vm.path) ? -1 : 0;
-            nav->pending = animate;
-            nav->start = 0;
-            nav->path = vm.path;
-        }
-        if (nav->pending && !vm.loading) {
-            nav->pending = false;
-            if (entryCount > 0) nav->start = motion_now_;
-        }
-        if (nav->start && motion_now_ - nav->start > 130u + motion::SpringSettleMs(motion::spring::Smooth))
-            nav->start = 0;
-        if (nav->start || nav->pending) RequestMotionFrame();
-    }
-    // This PC: the capacity bars grow from empty, once per visit.
+    // Navigation presents ready rows immediately; only same-folder layout
+    // changes use the short shared-element transition below.
+    if (pane_index >= 0 && pane_index < static_cast<int>(nav_enter_.size()))
+        nav_enter_[pane_index] = {};
     const float capacity_reveal = CapacityReveal(vm, pane_index);
 
     ItemCheckMotion* checks = item_checks_ && pane_index >= 0 &&
@@ -5906,7 +6020,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             ? &list_shift_[pane_index] : nullptr;
     if (shift) {
         shift->BeginFrame(list_context, vm.scroll_x, vm.scroll_y, entryCount, motion_frame_,
-                          motion_now_, !vm.is_search && !vm.loading && !(nav && nav->start), arrangement,
+                          motion_now_, !vm.is_search && !vm.loading, arrangement,
                           detailsView);
     }
     // View-mode switch: items travel from their previous cell/icon to the new
@@ -5957,13 +6071,8 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     if (!hover_drawn && pane_index >= 0 && pane_index < static_cast<int>(list_hover_motion_.size()))
         list_hover_motion_[pane_index].Hide();
 
-    // Mid-morph the list draws twice: shapes (backgrounds, icons) first, then
-    // every label inside one faded layer - one layer per pane, not per row.
-    // Spread invisible text preparation across the frames before the fade-in.
-    // Preparing every cold label in the first frame blocks the icon motion.
-    // Once text becomes visible, always draw the complete label pass.
-    const float text_alpha = morphing ? morph->TextOpacity() : 1.0f;
-    const int passes = morphing ? 2 : 1;
+    // Labels remain readable from the first frame of the short transition.
+    const int passes = 1;
     AiListPainter* const ai_painter = g_ai_list_pane == pane_index && g_ai_list_painter && g_ai_list_painter->On() &&
                                       !morphing ? g_ai_list_painter : nullptr;
     if (!ai_painter && !AiGhostEntries().empty() && g_ai_list_pane == pane_index) AiGhostEntries().clear();
@@ -6067,19 +6176,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         }
     } fast_glide_guard(thumbnail_cache_, fast_glide);
     for (int pass = 0; pass < passes; ++pass) {
-        const bool draw_shapes = pass == 0;
-        const bool draw_text = !morphing || pass == 1;
-        const bool text_layer = morphing && pass == 1 && text_alpha < 0.999f;
-        if (text_layer) {
-            // Never exactly 0: Direct2D skips the content of a fully
-            // transparent layer, which would defeat the warm-up above.
-            // Keep the warm-up layer at the minimum nonzero opacity.
-            dc->PushLayer(D2D1::LayerParameters1(viewport, nullptr, D2D1_ANTIALIAS_MODE_ALIASED,
-                              D2D1::IdentityMatrix(), std::max(text_alpha, 1.0f / 255.0f), nullptr,
-                              D2D1_LAYER_OPTIONS1_NONE), nullptr);
-        }
-        const bool warm_text = morphing && pass == 1 && text_alpha <= 0.0f;
-        const auto warm_start = std::chrono::steady_clock::now();
+        const bool draw_shapes = true;
+        const bool draw_text = true;
+        const bool text_layer = false;
         int morph_order = 0;
         // Icon grids: names the rename card lies over fade to 38%, so the
         // card reads as floating above them.
@@ -6105,11 +6204,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         if (drawn_rows && !frame_partial_) drawn_rows->clear();
         uint32_t prefetch_pixels = 0;  // grid request size, for the next screen
         for (int i = startIdx; i >= 0 && i <= endIdx; ++i) {
-            if (warm_text) {
-                if (i < morph->TextWarmupNext()) { ++morph_order; continue; }
-                if (std::chrono::steady_clock::now() - warm_start >= std::chrono::milliseconds(8)) break;
-                morph->AdvanceTextWarmup(i + 1);
-            }
             D2D1_RECT_F cell = layout.ItemRect(i);
             if (cell.right < x || cell.left > x + w || cell.bottom < y || cell.top > y + h) continue;
             if (cell.bottom - cell.top < 0.5f) continue;   // row inside a collapsed group
@@ -6214,9 +6308,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 thumbRect.right += dx;
                 nameRc.left = std::min(nameRc.right, nameRc.left + dx);
             }
-            // Landing: a row a drag just dropped here stays hidden while the
-            // drag's cards fly onto it, then fades in (its flash runs on).
-            float row_land_hide = 0.0f;
+            // Give the flight its target without hiding the real, ready row.
             if (!vm.landing_names.empty() && vm.landing_names.contains(e.name)) {
                 if (draw_shapes) {
                     D2D1_MATRIX_3X2_F m{};
@@ -6228,10 +6320,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     const D2D1_POINT_2F b = at(cell.right, cell.bottom);
                     landing_rects_.push_back(D2D1::RectF(a.x, a.y, b.x, b.y));
                 }
-                row_land_hide = vm.landing_reveal_at == 0 || motion_now_ < vm.landing_reveal_at ? 1.0f
-                    : 1.0f - (std::min)(1.0f, static_cast<float>(motion_now_ - vm.landing_reveal_at) / 140.0f);
-                if (row_land_hide > 0.0f) RequestMotionFrame();
-                if (row_land_hide >= 1.0f) continue;
+
             }
             if (change && iconGrid) {
                 const float icon_inset = std::min(18 * scale_, (iconRect.bottom - iconRect.top) * 0.3f);
@@ -6255,22 +6344,10 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const float row_dx = std::round(row_shift.x + morph_sample.cell.left - cell.left -
                                             14.0f * scale_ * row_leave * row_leave + ai_row.dx);
             const float row_dy = std::round(row_shift.y + morph_sample.cell.top - cell.top);
-            // Nav entry: smooth spring, 40 ms + 9 ms per visible row (max 90).
-            float nav_dx = 0.0f, nav_dy = 0.0f, nav_alpha = 1.0f;
-            if (nav && nav->start && !morph_item) {
-                const int order = (std::max)(0, i - startIdx);
-                const float delay = 40.0f + (std::min)(static_cast<float>(order) * 9.0f, 90.0f);
-                const float p = motion::SpringProgress(motion::spring::Smooth,
-                                                       static_cast<float>(motion_now_ - nav->start) - delay);
-                nav_alpha = (std::clamp)(p, 0.0f, 1.0f);
-                if (nav->dir != 0) nav_dx = static_cast<float>(nav->dir) * 16.0f * scale_ * (1.0f - p);
-                else nav_dy = 6.0f * scale_ * (1.0f - p);
-            }
             const float row_appear = shift ? shift->Appear(row_key) : 1.0f;
-            const RowShiftTransform row_transform(dc, row_dx + std::round(nav_dx), row_dy + std::round(nav_dy));
-            const float row_opacity = (1.0f - row_leave) * (1.0f - row_land_hide) * nav_alpha * row_appear *
-                                      ai_row.opacity;
-            if (nav_alpha <= 0.0f || row_appear <= 0.0f) continue;
+            const RowShiftTransform row_transform(dc, row_dx, row_dy);
+            const float row_opacity = (1.0f - row_leave) * row_appear * ai_row.opacity;
+            if (row_appear <= 0.0f) continue;
             struct RowFade {
                 ID2D1DeviceContext* dc;
                 bool on;
@@ -6324,8 +6401,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             // A marquee sweeps across many rows: hover feedback (row highlight,
             // link pill) would flicker under the pointer and animate every link.
             bool hover = (src == vm.hover_index) && !vm.marquee_active;
-            bool cut = e.record_only || vm.cut_names.contains(e.name);
-            const float hidden_alpha = HiddenEntryAlpha(e.attrs);
+            // Reuse the existing faded row treatment without changing clipboard semantics.
+            // High contrast keeps informational rows fully legible.
+            const bool muted = !IsHighContrast() && vm.muted_indices.contains(src);
+            bool cut = e.record_only || vm.cut_names.contains(e.name) || muted;
+            const float hidden_alpha = HiddenEntryAlpha(e.attrs) * (muted ? 0.55f : 1.0f);
             // Text follows the row's own time; the mark may take a folder's
             // newest change inside (change tracking), so a folder whose files
             // changed today reads as fresh without bolding its own date.
@@ -6466,7 +6546,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             row_perf.Next(frame_perf_.row_icons_us, frame_perf_.row_icons_fallbacks);
             bool drewCloudThumbnail = false;  // the cloud badge goes inside a picture
             if (draw_shapes && morph_item) {
-                DrawMorphIcon(e, vm, morph_sample, row_dx, row_dy, iconRect,
+                auto icon_sample = morph_sample;
+                if (muted) icon_sample.opacity *= 0.55f;
+                DrawMorphIcon(e, vm, icon_sample, row_dx, row_dy, iconRect,
                               static_cast<ViewMode>(morph->FromMode()), theme);
             } else if (draw_shapes) {
                 const float snappedIconW = std::max(1.0f, std::round(iconRect.right - iconRect.left));
@@ -6690,7 +6772,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                                      selected ? 1 : 0, hover, check_tick, !hover && !selected ? 0.5f : 1.0f);
                 }
             }
-            // Mid-morph the labels are drawn in a second, faded pass.
+            // Text shares the same opaque pass as the short geometry transition.
             row_perf.Next(frame_perf_.row_text_us, frame_perf_.row_text_fallbacks);
             if (!draw_text) continue;
 
@@ -7508,6 +7590,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                                 MakeBrush(dc, base, brFillInput_);
                                 dc->FillRoundedRectangle(D2D1::RoundedRect(bar, barH * 0.5f, barH * 0.5f), brFillInput_.get());
                                 if (folder_size_animate) {
+                                    folder_size_anim_active_ = true;
                                     // A soft highlight sweeps across the bar every 1.4 s.
                                     const float cx = bar.left - barW + 3.0f * barW *
                                         static_cast<float>(motion_now_ % 1400) / 1400.0f;
@@ -7833,6 +7916,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             expanded_overflow_index_ = expanded_name.source;
         }
     }
+    if (morphing) DrawMorphFrom(vm, *morph, viewport, theme);
+    if (shift) shift->EndFrame();
+    DrawGroupHeaders(vm, layout, viewport, theme, hover_region, hover_control_index, pane_index,
+                     pane_focused, split_mode);
+
+    // Rename UI floats above list content, including sticky group headers.
     if (vm.rename_index >= 0 && vm.ViewIndex(vm.rename_index) >= 0) {
         // On top of the neighbouring cells it overlaps in icon and tile views.
         dc->PushAxisAlignedClip(D2D1::RectF(x, y, x + w, y + h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -7894,10 +7983,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     } else if (pane_index >= 0 && pane_index < static_cast<int>(rename_pop_.size())) {
         rename_pop_[static_cast<size_t>(pane_index)] = {};
     }
-    if (morphing) DrawMorphFrom(vm, *morph, viewport, theme);
-    if (shift) shift->EndFrame();
-    DrawGroupHeaders(vm, layout, viewport, theme, hover_region, hover_control_index, pane_index,
-                     pane_focused, split_mode);
 
     if (vm.marquee_active) {
         D2D1_RECT_F clip = D2D1::RectF(x, y, x + w, y + h);
@@ -7932,7 +8017,8 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         dc->PopAxisAlignedClip();
     }
     {
-        fluent::ScrollbarSpec vbar = PaneScrollbarSpec(vm, viewport, layout.ContentHeight(), scale_);
+        fluent::ScrollbarSpec vbar = PaneScrollbarSpec(vm, viewport,
+            layout.ContentHeight() + ScrollPastEndRoom(scroll_past_end_, vm, viewport, layout, scale_), scale_);
         if (split_mode) vbar.viewport.bottom = (std::max)(vbar.viewport.top, vbar.viewport.bottom - 5.0f * scale_);
         if (dim_pane) vbar.opacity *= 0.45f + 0.55f * std::clamp(vbar.expand_progress, 0.0f, 1.0f);
         painter_.DrawScrollbar(vbar);
@@ -8043,7 +8129,7 @@ void MainRenderer::DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& l
                      (!split_mode || pane_focused) ? theme.text_secondary : theme.text_disabled, 0.62f);
         x += 22.0f * scale_;
         const D2D1_RECT_F select_rc = GroupSelectRect(rc, scale_);
-        const bool show_select = hot && GroupSelectVisible(rc, scale_);
+        const bool show_select = hot && vm.group_select && GroupSelectVisible(rc, scale_);
         const float text_right = (show_select ? select_rc.left : rc.right) - 8.0f * scale_;
 
         if (vm.group_by == 5 && !g.label.empty()) {
@@ -8194,7 +8280,8 @@ void MainRenderer::DrawScrollbar(const PaneViewModel& vm, float x, float y, floa
     const D2D1_RECT_F list = D2D1::RectF(x, y, x + w, y + h);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(),
                       vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
-    painter_.DrawScrollbar(PaneScrollbarSpec(vm, list, layout.ContentHeight(), scale_));
+    painter_.DrawScrollbar(PaneScrollbarSpec(vm, list,
+        layout.ContentHeight() + ScrollPastEndRoom(scroll_past_end_, vm, list, layout, scale_), scale_));
 }
 bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_RECT_F& full_bounds,
                                           D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const {
@@ -8202,10 +8289,11 @@ bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_REC
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     const auto list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
-    max_scroll = layout.MaxScrollY();
+    const float past_end = ScrollPastEndRoom(scroll_past_end_, vm, list, layout, scale_);
+    max_scroll = layout.MaxScrollY() + past_end;
     // The drawn bar's thumb (DrawScrollbar), a little wider to grab.
     const D2D1_RECT_F drawn = fluent::ScrollbarThumbRect(
-        PaneScrollbarSpec(vm, list, layout.ContentHeight(), scale_), scale_);
+        PaneScrollbarSpec(vm, list, layout.ContentHeight() + past_end, scale_), scale_);
     if (drawn.bottom <= drawn.top) return false;
     track = D2D1::RectF(list.right - 14 * scale_, list.top, list.right, list.bottom);
     thumb = D2D1::RectF(track.left, drawn.top, track.right, drawn.bottom);
@@ -8218,6 +8306,15 @@ float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F&
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
     return layout.MaxScrollY();
+}
+
+float MainRenderer::ScrollPastEndForPane(const PaneViewModel& vm, const D2D1_RECT_F& full_bounds) const {
+    if (!scroll_past_end_) return 0.0f;
+    const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
+    const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
+    D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    return ScrollPastEndRoom(true, vm, list, layout, scale_);
 }
 
 float MainRenderer::MaxScrollXForPane(const PaneViewModel& vm,

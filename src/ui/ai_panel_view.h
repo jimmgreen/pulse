@@ -180,7 +180,7 @@ enum class AiBlockKind : uint8_t {
     Confirm,    // amber confirmation, decided → one quiet line
     Result,     // 已整理 … with folder tags, 撤销 / 在 Pulse 中查看
     Acts,       // copy / retry / thumb + meta under a finished answer
-    Working,    // ✦ shimmer line while waiting for the next thing
+    Working,    // Activity spark and stable text while waiting for the next thing
     Note,       // centred line between rules (你撤销了这次整理)
     Error,      // the turn failed: tile + title + sub (+ detail, hint) + buttons
     Cut,        // amber strip under a partial answer: 回答中途断开了 · 重试
@@ -590,7 +590,7 @@ struct AiBlockView {
 // 语音输入: the composer while the microphone listens, and the mic button.
 struct AiVoiceView {
     bool available = false;           // the mic button is there
-    bool listening = false;           // .composer.listen: the filled mic and its ring
+    bool listening = false;           // Filled mic, live voice levels and recording time
     bool menu_open = false;           // the chevron's menu
     uint64_t shake_at = 0;            // the mic shakes (a precheck failed), ms
     std::array<float, 14> levels{};   // the waveform, oldest first, 0..1
@@ -750,7 +750,7 @@ public:
     // to their own target, so switching modes crosses over.
     void SetState(bool open, AiPanelMode mode, bool animate);
     bool IsOpen() const noexcept { return open_; }
-    // New chat: the empty state's spark breathes again.
+    // New chat: reset the empty-state opening timestamp.
     void Rewake(uint64_t now_ms);
     AiPanelMode Mode() const noexcept { return mode_; }
     // Something of the panel is on screen (open, or still closing).
@@ -760,7 +760,7 @@ public:
     // Once per frame before layout: samples the motion. True while it runs.
     bool Tick(uint64_t now_ms);
     bool Animating() const noexcept { return dock_anim_ || float_anim_ || conv_anim_ || peek_anim_; }
-    // Decorative motion of the open panel (the breathing spark, spinners).
+    // Decorative activity of the open panel (running sparks and spinners).
     bool WantsDecorFrame() const noexcept { return (open_ && (decor_ || conv_decor_)) || chip_decor_; }
 
     // Width of the docked column this frame, in px (0 when floating or closed).

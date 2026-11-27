@@ -31,6 +31,7 @@ struct ExtensionStoreItem {
     bool installed = false;
     int installed_index = -1;
     bool has_menu_tab = false;
+    std::vector<std::wstring> plugin_tabs; // the package's own extra settings tabs (支持格式, ...)
 };
 // One row of a plugin's context-menu preview (manifest quickSettings menu preview).
 struct SevenZipMenuRow {

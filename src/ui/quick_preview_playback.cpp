@@ -116,7 +116,7 @@ float QuickPreviewWindow::PlaybackHeight() const noexcept {
 }
 D2D1_RECT_F QuickPreviewWindow::PlaybackRect() const {
     // Directly above the footer.
-    const float bottom = static_cast<float>(compositor_.Height()) - FooterHeight();
+    const float bottom = static_cast<float>(compositor_.Height()) - FooterHeight() - GalleryReserve();
     return D2D1::RectF(0, bottom - PlaybackHeight(),
         static_cast<float>(compositor_.Width()), bottom);
 }
@@ -657,7 +657,7 @@ void QuickPreviewWindow::DrawPlayback(ID2D1DeviceContext* dc, ID2D1SolidColorBru
         const auto state = video_.Snapshot();
         const bool picture = video_.active() && !VideoPreview::IsAudio(item_.path) && state.ready &&
             SUCCEEDED(state.error) && !CodecCardVisible(state) && !Palette().high_contrast;
-        if (!picture) {
+        if (!picture && !Immersive()) {   // the photo viewer is dark: light ink as on video
             DrawPlaybackChrome(dc, brush);
             return;
         }

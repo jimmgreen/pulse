@@ -40,7 +40,7 @@ std::vector<index::Term> NameHighlightTerms(std::wstring_view filter, std::wstri
     const auto query = index::ParseQuery(search);
     for (const auto& group : query.groups) for (const auto& term : group) {
         if (term.name.empty() || term.name_not || term.name_in_path ||
-            term.name_how == index::NameHow::Any || term.name.find(L':') != std::wstring::npos) continue;
+            term.name_how == index::NameHow::Any || term.name_how == index::NameHow::Regex || term.name.find(L':') != std::wstring::npos) continue;
         terms.push_back(term);
     }
     return terms;

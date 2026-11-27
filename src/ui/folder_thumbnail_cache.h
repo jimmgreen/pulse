@@ -17,12 +17,12 @@ public:
     void SetDeviceContext(ID2D1DeviceContext* dc) { cache_.SetDeviceContext(dc); }
     void SetNotifyWindow(HWND hwnd) { cache_.SetNotifyWindow(hwnd); }
     void AddNotifyWindow(HWND hwnd) { cache_.AddNotifyWindow(hwnd); }
-    void RemoveNotifyWindow(HWND hwnd) { cache_.RemoveNotifyWindow(hwnd); }
+    void RemoveNotifyWindow(HWND hwnd);
     void Reset();
     void Refresh();
     void TrimForBackground(size_t max_bytes);
     size_t TrimInactiveWorkingSet();
-    void BeginFrame();
+    void BeginFrame(HWND owner = nullptr, bool full = true);
     void ShareUploadBudget(ThumbnailCache& other) { cache_.ShareUploadBudget(other); }
     bool TakeUploadFrameRequest() {
         const bool compact = cache_.folder_revisit_->TakeUploadFrameRequest();
@@ -45,10 +45,14 @@ private:
         bool admitted = false;
         bool blocked = false;
         size_t estimate = 0;
+        HWND generation_owner = nullptr;
     };
     static constexpr uint64_t kSettleMs = 80;
     bool visibility_changed_ = false;
+    void RetireInvisibleLocked();
     ThumbnailCache cache_;
     std::unordered_map<std::wstring, Visible> visible_;
+    std::unordered_map<HWND, std::unordered_set<std::wstring>> owner_visible_;
+    HWND frame_owner_ = nullptr;
 };
 } // namespace pulse::ui

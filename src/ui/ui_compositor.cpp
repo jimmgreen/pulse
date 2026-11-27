@@ -745,7 +745,7 @@ bool Compositor::FrameCopyEnabled() noexcept {
     return g_frame_copy_enabled.load(std::memory_order_relaxed);
 }
 
-void Compositor::CopyFrame() {
+void Compositor::CopyFrame(const RECT* dirty) {
     if (!FrameCopyEnabled() || !dc_.get() || !targetBitmap_.get()) {
         frameCopy_.reset();
         return;
@@ -759,9 +759,21 @@ void Compositor::CopyFrame() {
         const auto props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
             targetBitmap_->GetPixelFormat(), 96.0f, 96.0f);
         if (FAILED(dc_->CreateBitmap(size, nullptr, 0, &props, &frameCopy_))) return;
+        dirty = nullptr;
     }
-    // GPU to GPU; the frame's drawing has already ended.
-    if (FAILED(frameCopy_->CopyFromBitmap(nullptr, targetBitmap_.get(), nullptr)))
+    // Present1 repairs pixels outside the dirty region during presentation.
+    // A pre-Present whole-buffer copy can therefore contain stale pixels.
+    // Preserve our coherent snapshot outside the region actually redrawn.
+    D2D1_RECT_U source{};
+    D2D1_POINT_2U destination{};
+    if (dirty) {
+        source = D2D1::RectU(static_cast<UINT32>(std::max<LONG>(0, dirty->left)),
+            static_cast<UINT32>(std::max<LONG>(0, dirty->top)),
+            std::min<UINT32>(size.width, static_cast<UINT32>(std::max<LONG>(0, dirty->right))),
+            std::min<UINT32>(size.height, static_cast<UINT32>(std::max<LONG>(0, dirty->bottom))));
+        destination = D2D1::Point2U(source.left, source.top);
+    }
+    if (FAILED(frameCopy_->CopyFromBitmap(dirty ? &destination : nullptr, targetBitmap_.get(), dirty ? &source : nullptr)))
         frameCopy_.reset();
     else
         ++frameCopySerial_;
@@ -823,10 +835,11 @@ HRESULT Compositor::Present(const RECT* dirty) {
 #endif
     if (device_lost_) return DXGI_ERROR_DEVICE_REMOVED;
     EnsureAwake();
+    const bool partial = dirty && CanPresentPartial();
     if (hwnd_) UpdateTextRenderingParams(
         MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
     PULSE_PICKER_TRACE_POINT("copy-frame-before");
-    CopyFrame();
+    CopyFrame(partial ? dirty : nullptr);
     PULSE_PICKER_TRACE_POINT("copy-frame-after");
     if (captureNext_) {
         captureNext_ = false;
@@ -841,7 +854,7 @@ HRESULT Compositor::Present(const RECT* dirty) {
     }
     HRESULT hr = E_UNEXPECTED;
     if (swapChain_.get()) {
-        if (dirty && CanPresentPartial()) {
+        if (partial) {
             DXGI_PRESENT_PARAMETERS params{};
             RECT rect = *dirty;
             params.DirtyRectsCount = 1;

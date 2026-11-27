@@ -9,6 +9,7 @@
 #include "operation_flight.h"
 #include "drag_drop.h"
 #include "ui_renderer.h"
+#include "sidebar_collapse_motion.h"
 #include "window_action_icon.h"
 #include "device_crumbs.h"
 #include "vfs_crumbs.h"
@@ -43,6 +44,18 @@
 #include <string_view>
 
 namespace pulse::ui {
+namespace {
+using IntegrationTabPlateObserver = void (*)(const MainRenderer*, uint64_t, uint64_t, float, D2D1_RECT_F, D2D1_RECT_F);
+thread_local IntegrationTabPlateObserver integration_tab_plate_observer = nullptr;
+}
+// Test-only readback of the geometry already used by a real submitted frame.
+// No renderer/class layout, animation timing or target is changed by observation.
+void SetAnimationIntegrationTabPlateObserver(IntegrationTabPlateObserver observer) {
+    if (observer && (!GetEnvironmentVariableW(L"PULSE_TEST_ANIMATION_INTEGRATION", nullptr, 0) ||
+                     !GetEnvironmentVariableW(L"PULSE_TEST_ISOLATED_DESKTOP", nullptr, 0) ||
+                     !GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0))) return;
+    integration_tab_plate_observer = observer;
+}
 namespace {
 // Tokens the three status-bar mockups use that Theme has no slot for
 // (pane_layout / drag_undo / file_ops_mockup.html :root): the accent made
@@ -269,7 +282,7 @@ void MainRenderer::ApplySidebarCollapse(bool animate) {
 
 float MainRenderer::SidebarFullWidth(float window_width) const {
     const float window_dip = window_width / scale_;
-    const bool details_open = details_visible_ && window_dip >= kDetailsVisibleWindowDip;
+    const bool details_open = details_visible_ && window_dip >= DetailsVisibleWindowDip(EmbeddedPickerLayout(), embedded_picker_preview_forced_, embedded_picker_preview_min_dip_);
     const float max_dip = MaxSidebarWidthDip(window_dip, details_width_, details_open,
                                              2.0f * margin_ / scale_);
     return (std::min)(sidebar_width_dip_, max_dip) * scale_;
@@ -279,7 +292,7 @@ float MainRenderer::SidebarFullWidth(float window_width) const {
 // the panel back temporarily and widening it restores what the user dragged.
 float MainRenderer::DetailsPanelWidth(float window_w) const {
     const float window_dip = window_w / scale_;
-    if (window_dip < kDetailsVisibleWindowDip) return 0.0f;
+    if (window_dip < DetailsVisibleWindowDip(EmbeddedPickerLayout(), embedded_picker_preview_forced_, embedded_picker_preview_min_dip_)) return 0.0f;
     const float open = details_anim_ ? details_value_ : (details_visible_ ? 1.0f : 0.0f);
     if (open <= 0.0f) return 0.0f;
     const float max_dip = MaxDetailsWidthDip(window_dip, sidebar_width_dip_,
@@ -290,7 +303,7 @@ float MainRenderer::DetailsPanelWidth(float window_w) const {
 
 float MainRenderer::SidebarMaxWidthDip(float window_w) const {
     const float window_dip = window_w / scale_;
-    const bool details_open = details_visible_ && window_dip >= kDetailsVisibleWindowDip;
+    const bool details_open = details_visible_ && window_dip >= DetailsVisibleWindowDip(EmbeddedPickerLayout(), embedded_picker_preview_forced_, embedded_picker_preview_min_dip_);
     return MaxSidebarWidthDip(window_dip, details_width_, details_open, 2.0f * margin_ / scale_);
 }
 
@@ -1050,7 +1063,9 @@ void MainRenderer::BreadcrumbLayout(const PaneViewModel& vm, float w,
     const float avail = std::max(0.0f, addr.right - addr.left - 2 * margin_ - hint);
 
     IDWriteFactory2* dwrite = compositor_ ? compositor_->DwriteFactory() : nullptr;
-    IDWriteTextFormat* fmt = compositor_ ? compositor_->AddressFormat() : nullptr;
+    IDWriteTextFormat* fmt = compositor_
+        ? (EmbeddedPickerLayout() ? compositor_->FileNameFormat() : compositor_->AddressFormat())
+        : nullptr;
 
     const auto navigation = ToolbarLayoutAt(w, 0);
     const size_t keep = navigation.merged_search ? 1 : navigation.navigation_tier == NavigationTier::Narrow ? 2 : 0;
@@ -1403,8 +1418,7 @@ bool MainRenderer::NonHoverMotionActive() const {
     for (const auto& motion : list_shift_) if (motion.Active(m)) return true;
     for (const auto& motion : view_morph_) if (motion.Active(m)) return true;
     for (const auto& motion : link_pill_motion_) if (motion.Active(m)) return true;
-    if ((task_pill_done_at_ != 0 && now - task_pill_done_at_ < task_pill_hold_ms_ + 400) ||
-        (task_pill_pop_at_ != 0 && now - task_pill_pop_at_ < kTaskPillPopMs + 40))
+    if (task_pill_pop_at_ != 0 && now - task_pill_pop_at_ < kTaskPillPopMs + 40)
         return true;
     if (ticks_active_ || motion_frame_wanted_) return true;
     if (m < tab_motion_until_ || m < row_leave_until_ || m < mtime_flash_until_ ||
@@ -1487,7 +1501,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
     last_frame_overlay_ = OverlayUp(vm);
     painted_selections_ = FrameSelections(vm);
     thumbnail_cache_.AdvanceFrame(notify_hwnd_);
-    folder_thumbnail_cache_.BeginFrame();
+    folder_thumbnail_cache_.BeginFrame(notify_hwnd_, !frame_partial_);
     struct FolderFrameScope {
         FolderThumbnailCache& cache;
         ThumbnailCache& thumbnails;
@@ -1527,7 +1541,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
             collapse_value_ = target;
             collapse_anim_ = false;
         } else {
-            const float p = motion::SpringProgress(motion::spring::Smooth, ms);
+            const float p = SidebarCollapseProgress(ms);
             collapse_value_ = std::clamp(collapse_from_ + (target - collapse_from_) * p, 0.0f, 1.0f);
         }
     }
@@ -2699,6 +2713,9 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         tab_plate_.SetAnimationsEnabled(tab_anim_on_);
         plateRc = tab_plate_.Update(2, static_cast<int64_t>(vm.tabs[i].id),
             D2D1::RectF(lefts[i], 0.0f, lefts[i] + w, 1.0f), motion_frame_, tnow, kTabPlateSpring);
+        if (integration_tab_plate_observer)
+            integration_tab_plate_observer(this, motion_frame_, tnow, scale_, plateRc,
+                D2D1::RectF(lefts[i], 0.0f, lefts[i] + w, 1.0f));
         plateGliding = tab_plate_.Active(tnow) &&
                        (std::fabs(plateRc.left - lefts[i]) > 0.5f || std::fabs(plateRc.right - lefts[i] - w) > 0.5f);
         if (plateGliding) {
@@ -2943,6 +2960,14 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         // separates it from the command row.
         FillRect(dc, brStrokeDivider_.get(), 0.0f, h - 1.0f, right, 1.0f);
     }
+    // Title buttons and caption buttons share one icon box (title_bar_icons.html): 18 DIP, the grid's own
+    // 1.75 weight, so the caption shapes (13 of the 24 units) end up as heavy as the pill's.
+    struct TitleIconScope {
+        float* box;
+        float saved;
+        ~TitleIconScope() { *box = saved; }
+    } title_icon_scope{&icon_box_dip_, icon_box_dip_};
+    icon_box_dip_ = 18.0f;
     if (chrome.count > 0) {
     // The title buttons (界面布局 › 标题栏按钮): one quiet pill, a hairline
     // wherever the list has a divider, so they read as app actions rather
@@ -2980,7 +3005,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             const D2D1_COLOR_F settingsFill = settingsSelected
                 ? WithAlpha(theme.accent, IsHovered(vm, HitTestResult::SettingsButton) ? 0.26f : 0.18f)
                 : IsHovered(vm, HitTestResult::SettingsButton) ? theme.fill_hover : kTransparent;
-            DrawButton(rc, theme, settingsFill, kIconSettings, L"S",
+            DrawButton(rc, theme, settingsFill, command_icons::kGlyphTitleSettings, L"S",
                 settingsSelected && !IsHighContrast() ? theme.accent : theme.text, true, true);
             if (settingsSelected) {
                 MakeBrush(dc, theme.accent, brAccent_);
@@ -2991,16 +3016,10 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             break;
         }
         case kTitleButtonTheme: {
-            // The solid half shows the current theme: right in light, left in dark.
-            D2D1_MATRIX_3X2_F previous{};
-            dc->GetTransform(&previous);
-            if (vm.dark) {
-                dc->SetTransform(D2D1::Matrix3x2F::Rotation(180.0f, D2D1::Point2F(
-                    center, (rc.top + rc.bottom) * 0.5f)) * previous);
-            }
+            // The solid half shows the current theme: right in light, left in dark (two shapes, no rotation).
             DrawButton(rc, theme, IsHovered(vm, HitTestResult::ThemeToggle) ? theme.fill_hover : kTransparent,
-                kIconTheme, L"T", theme.text, true, true);
-            dc->SetTransform(previous);
+                vm.dark ? command_icons::kGlyphTitleThemeDark : command_icons::kGlyphTitleTheme, L"T", theme.text,
+                true, true);
             break;
         }
         case kTitleButtonLayout:
@@ -3049,8 +3068,8 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         MakeBrush(dc, vm.button_pressed ? theme.danger_hover : theme.danger, brDanger_);
         FillRect(dc, brDanger_.get(), closeRc.left, closeRc.top, ctrlW, ctrlH);
     }
-    DrawIconText(closeRc.left, closeRc.top, ctrlW, ctrlH, kIconClose, L"x",
-        IsHovered(vm, HitTestResult::Close) ? HexColor(0xFFFFFF) : theme.text, 0.66f);
+    DrawIconText(closeRc.left, closeRc.top, ctrlW, ctrlH, command_icons::kGlyphCapClose, L"x",
+        IsHovered(vm, HitTestResult::Close) ? HexColor(0xFFFFFF) : theme.text);
     cx -= ctrlW;
     D2D1_RECT_F maxRc = D2D1::RectF(cx, ctrlY, cx + ctrlW, ctrlY + ctrlH);
     if (IsHovered(vm, HitTestResult::Maximize)) {
@@ -3058,15 +3077,15 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         FillRect(dc, brFillHover_.get(), maxRc.left, maxRc.top, ctrlW, ctrlH);
     }
     DrawIconText(maxRc.left, maxRc.top, ctrlW, ctrlH,
-        vm.maximized ? kIconRestore : kIconMaximize, vm.maximized ? L"[]" : L"\u25A1",
-        theme.text, 0.66f);
+        vm.maximized ? command_icons::kGlyphCapRestore : command_icons::kGlyphCapMaximize,
+        vm.maximized ? L"[]" : L"\u25A1", theme.text);
     cx -= ctrlW;
     D2D1_RECT_F minRc = D2D1::RectF(cx, ctrlY, cx + ctrlW, ctrlY + ctrlH);
     if (IsHovered(vm, HitTestResult::Minimize)) {
         MakeBrush(dc, theme.fill_hover, brFillHover_);
         FillRect(dc, brFillHover_.get(), minRc.left, minRc.top, ctrlW, ctrlH);
     }
-    DrawIconText(minRc.left, minRc.top, ctrlW, ctrlH, kIconMinimize, L"_", theme.text, 0.66f);
+    DrawIconText(minRc.left, minRc.top, ctrlW, ctrlH, command_icons::kGlyphCapMinimize, L"_", theme.text);
 }
 
 void MainRenderer::DrawTeachBubble(const WindowViewModel& vm, const D2D1_RECT_F& rect,

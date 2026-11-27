@@ -663,6 +663,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.tree_sticky_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 79; return r;
                 }
+                if (ContainsPt(lay.scroll_past_end_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 84; return r;
+                }
                 if (ContainsPt(lay.vertical_tabs_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 23; return r;
                 }
@@ -747,6 +750,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
                 if (vm.settings_global_search_enabled && ContainsPt(lay.global_search_apps_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 43; return r;
+                }
+                if (vm.settings_global_search_enabled && vm.settings_global_search_apps && ContainsPt(lay.global_search_apps_first_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 47; return r;
                 }
                 if (ContainsPt(lay.search_pinyin_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 9; return r;
@@ -899,7 +905,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.region = HitTestResult::SettingsToggle; r.index = 31; return r;
                 }
             } else if (vm.settings_page == kSettingsPageNativeExtensions && lay.native_head.on &&
-                       (ContainsPt(lay.native_head.enable, x, y) || ContainsPt(lay.native_head.more, x, y))) {
+                       (ContainsPt(lay.native_head.enable, x, y) || ContainsPt(lay.native_head.enable_label, x, y) ||
+                        ContainsPt(lay.native_head.more, x, y))) {
                 r.region = HitTestResult::SettingsPackAction;
                 r.index = static_cast<int>(ContainsPt(lay.native_head.more, x, y) ? PackAction::StoreDetailMore : PackAction::StoreDetailEnable);
                 return r;
@@ -1299,6 +1306,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             const auto& slot = slots[i];
             if (!ContainsPt(slot.rc, x, y)) continue;
             if (slot.clip.bottom > slot.clip.top && !ContainsPt(slot.clip, x, y)) continue;
+            if (slot.content_bottom > 0.0f && y >= slot.content_bottom) continue;  // cut off by the edge
             if (slot.kind == SidebarSlot::RailMore) continue; // decoration only
             if (slot.kind == SidebarSlot::TrayRelease) {
                 r.region = HitTestResult::TrayRelease;
@@ -1616,10 +1624,23 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             LayoutDetailsPanel(panel, scale_, vm.details,
                                compositor_ ? compositor_->DwriteFactory() : nullptr,
                                compositor_ ? compositor_->SmallFormat() : nullptr,
-                               compositor_, previewH, hitRects);
+                               compositor_, previewH, hitRects, EmbeddedPickerLayout() && vm.details.preview_only);
             if (ContainsPt(hitRects.preview_enable, x, y)) { r.region = HitTestResult::DetailsPreviewEnable; return r; }
             if (ContainsPt(hitRects.preview, x, y)) { r.region = HitTestResult::DetailsPreview; return r; }
             if (ContainsPt(hitRects.preview_toggle, x, y)) { r.region = HitTestResult::DetailsPreviewToggle; return r; }
+            if (EmbeddedPickerLayout() && vm.details.preview_only) {
+                if (vm.details.picker_save_mode) {
+                    if (!vm.details.picker_save_to_tray) {
+                        if (ContainsPt(hitRects.save_after_show, x, y)) r.region = HitTestResult::DetailsSaveAfterShow;
+                        else if (ContainsPt(hitRects.save_after_copy, x, y)) r.region = HitTestResult::DetailsSaveAfterCopy;
+                    }
+                    return r;
+                }
+                if (ContainsPt(hitRects.open, x, y)) r.region = HitTestResult::DetailsOpen;
+                else if (ContainsPt(hitRects.copy_path, x, y)) r.region = HitTestResult::DetailsCopyPath;
+                else if (ContainsPt(hitRects.new_tab, x, y)) r.region = HitTestResult::DetailsNewTab;
+                return r;
+            }
             if (vm.details.preview_only && vm.details.preview_enabled) return r;
             if (ContainsPt(hitRects.rename, x, y)) { r.region = HitTestResult::DetailsRename; return r; }
             if (ContainsPt(hitRects.open, x, y)) { r.region = HitTestResult::DetailsOpen; return r; }
@@ -1784,6 +1805,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         const float extra = PaneExtraTop(paneVm, scale_, paneRc.right - paneRc.left, compositor_) + EmbeddedPickerRecentHeight();
+        // PaneListRect adds the picker band itself; extra counts it for the manual offsets below.
+        const float listExtra = extra - EmbeddedPickerRecentHeight();
         const float recentTop = paneRc.top + pane_header_height_ + EmbeddedPickerRecentHeight() + banner;
         const float filterExtra = (paneVm.is_recent ? kRecentControlsDip * scale_ : 0.0f) +
                                   (paneVm.is_query_search ? kSearchFiltersDip * scale_ : 0.0f);
@@ -2007,7 +2030,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 return out;
             }
             if (const ListGroups* groups = paneVm.Groups()) {
-                const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
+                const D2D1_RECT_F list = PaneListRect(paneRc, listExtra, paneVm.view_mode);
                 const ViewLayout grouped(paneVm.view_mode, list, paneVm.EntryCount(),
                                          paneVm.scroll_x, paneVm.scroll_y, scale_,
                                          ListRowHeightDip(paneVm, list), groups);
@@ -2019,7 +2042,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
                 if (g >= 0) {
                     const D2D1_RECT_F content = DetailsContentRect(header, scale_);
-                    out.region = GroupSelectVisible(content, scale_) &&
+                    out.region = paneVm.group_select && GroupSelectVisible(content, scale_) &&
                                  ContainsPt(GroupSelectRect(content, scale_), x, y)
                         ? HitTestResult::GroupSelect : HitTestResult::GroupHeader;
                     out.index = g;
@@ -2029,7 +2052,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
             // 滚动时固定上级: the pinned folders cover the rows under them.
             if (paneVm.tree && paneVm.view_mode == ViewMode::Details) {
-                const StickyTree sticky = StickyTreeRows(paneVm, PaneListRect(paneRc, extra, paneVm.view_mode));
+                const StickyTree sticky = StickyTreeRows(paneVm, PaneListRect(paneRc, listExtra, paneVm.view_mode));
                 for (const TreePin& pin : sticky.pins) {
                     const float top = sticky.top + pin.y;
                     if (y >= top && y < top + sticky.row_h) {
@@ -2046,6 +2069,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 out.region=HitTestResult::Pane; return out;
             }
             if (idx >= 0) {
+                bool onName = false;
                 if (idx != paneVm.rename_index) {
                     int viewRow = paneVm.ViewIndex(idx);
                     // Details tree placeholders (loading, empty, more...) carry
@@ -2053,7 +2077,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     const DetailsTreeRow* treeRow = paneVm.tree ? paneVm.tree->At(viewRow) : nullptr;
                     if (treeRow && treeRow->kind != TreeRowKind::Entry) viewRow = -1;
                     if (viewRow >= 0 && compositor_ && compositor_->DwriteFactory()) {
-                        const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
+                        const D2D1_RECT_F list = PaneListRect(paneRc, listExtra, paneVm.view_mode);
                         const DetailsColumnLayout columns = DetailsColumns(list, paneVm);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
                                           paneVm.scroll_x, paneVm.scroll_y, scale_,
@@ -2146,6 +2170,21 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             NameMatchRanges(entry.name, NameHighlightTerms(paneVm.filter_text,
                                 paneVm.is_search ? paneVm.search_query : L"")),
                             row_actions_);
+                        // 放到文件名上: the icon, or the name as drawn (icon grids:
+                        // the whole name block under the icon), a little slop around.
+                        {
+                            const float slop = 4.0f * scale_;
+                            const auto inside = [&](const D2D1_RECT_F& r) {
+                                return r.right > r.left && x >= r.left - slop && x < r.right + slop &&
+                                       y >= r.top - slop && y < r.bottom + slop;
+                            };
+                            const bool icon_grid = paneVm.view_mode == ViewMode::ExtraLargeIcons ||
+                                paneVm.view_mode == ViewMode::LargeIcons || paneVm.view_mode == ViewMode::MediumIcons;
+                            onName = inside(layout.ThumbnailRect(viewRow)) ||
+                                (icon_grid ? inside(nameRc)
+                                      : trail.name_w > 0.0f && x >= trail.name_x - slop &&
+                                        x < trail.name_x + trail.name_w + slop && y >= cell.top && y < cell.bottom);
+                        }
                         // A tag dot: the front one wins where they overlap (dot 0
                         // is drawn last), so the first dot whose right edge is
                         // past the pointer.
@@ -2188,6 +2227,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
                 out.region = HitTestResult::Row;
                 out.index = idx;
+                out.on_name = onName;
             } else {
                 out.region = HitTestResult::Pane;
             }

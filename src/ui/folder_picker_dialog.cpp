@@ -1,14 +1,22 @@
 #include "view_zoom.h"
 #include "picker_legacy_child.h"
 #include "picker_navigation_root.h"
+#include "picker_details_tree.h"
 #include "../picker_inprocess/picker_ui_api_v2.h"
 #include "picker_hover_preview.h"
-#include "picker_recent_thumbnail_cache.h"
+#include "picker_preview_layout.h"
 #include "quick_preview_window.h"
 #include "../common/picker_shell_namespace.h"
 #include "../common/picker_places_snapshot.h"
+#include "../common/picker_tray_consume.h"
+#include "../common/drag_shake_detector.h"
+#include <filesystem>
+#include <thread>
+#include "../common/preview_extensions.h"
+#include "../common/preview_diagnostics.h"
 #if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
 #include "../bench/picker_jump_ui_test_api.h"
+#include "../app/picker_appearance.h"
 #include "../bench/picker_embedded_layout_test.h"
 #endif
 #include "../common/picker_places_saved.h"
@@ -22,18 +30,33 @@
 #include "../bench/picker_interaction_test_api.h"
 #endif
 #include "../common/picker_user_storage.h"
+#include "../common/picker_pulse_open.h"
 #include "picker_custom_layout.h"
 #include "../common/picker_owner_guard.h"
 #include "picker_proof_trace.h"
 #include "picker_marquee.h"
+#include "picker_sidebar_model.h"
+#include "picker_format_segments.h"
+#include "picker_incoming_files.h"
+#include "picker_save_suggestions.h"
+#include "picker_save_feedback.h"
+#include "picker_save_delivery.h"
+#include "picker_image_dimensions.h"
+#include "picker_tray_delivery.h"
+#include "picker_save_draft_probe.h"
+#include "picker_save_advisory.h"
+#include "../index/search_kinds.h"
 #include "picker_blank_click.h"
 #include "../app/create_rename_intent.h"
 #include "../app/jump_match.h"
+#include "../app/picker_list_order.h"
+#include "../app/picker_tag_catalog.h"
 #include "edit_host.h"
 #include "../fs/drive_kind.h"
 #include "../common/windows_compat.h"
 #include "../common/navigation_known_folders.h"
 #include "folder_picker_dialog.h"
+#include "picker_archive_session.h"
 #include "picker_shell_filtered_listing.h"
 #include "../common/picker_navigation.h"
 #include "../common/picker_layout_settings.h"
@@ -67,18 +90,19 @@
 #include <dwmapi.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #if defined(PULSE_PICKER_INPROCESS_PROOF)
 #include <cstdio>
 #endif
 #include <cwctype>
+#include <array>
+#include <map>
 #include <memory>
-#include <mutex>
+#include <set>
 #include <deque>
 #include <source_location>
 #include <filesystem>
-#include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -148,22 +172,31 @@ constexpr UINT kPickerFrameMessage = WM_APP + 9;
 constexpr UINT kHoverListingMessage = WM_APP + 10;
 constexpr DWORD kInitialFolderTimeoutMs = 5000;
 constexpr UINT_PTR kSharedPlacesTimer = 0x504c;
+constexpr UINT_PTR kSaveDraftTimer = 0x5051;
+constexpr UINT_PTR kImageDimensionsTimer = 0x5052;
 constexpr UINT_PTR kJumpContextTimer = 0x504d;
 constexpr UINT kCustomUpdateMessage = WM_APP + 5;
 constexpr UINT kTextUpdateMessage = WM_APP + 11;
 constexpr UINT kPropertyValidationMessage = WM_APP + 12;
 constexpr UINT kNavigationRootMessage = WM_APP + 13;
 constexpr UINT kNavigationRootListingMessage = WM_APP + 14;
+constexpr UINT kGitRootMessage = WM_APP + 15;
+constexpr UINT kTreeListingMessage = WM_APP + 16;
 constexpr int kLegacyChildFocus = -100;
 constexpr int kCustomFocusBase = 1000;
+// Open filter bar chips beside the type chips (kPickContextFilterBase + type).
+constexpr int kPickFilterMore = 544;
+constexpr int kPickTimeMenu = 545;      // time menu (includes only-new in open modes)
+constexpr int kPickCompactFilters = 546;
+constexpr int kPickCategoryBase = 550;  // + category (0 all .. kPickerCategoryCount - 1)
 constexpr int kCustomEditBase = 2000;
 constexpr size_t PULSE_CUSTOM_EDIT_MAX = 32767;
 constexpr UINT_PTR kLoadTimer = 1;
 constexpr UINT_PTR kSearchTimer = 2;
 constexpr UINT_PTR kMotionTimer = 3;
 constexpr UINT_PTR kMarqueeTimer = 4;
+constexpr float kListWheelDip = 220.0f;  // one wheel notch in the List view (the main window's step)
 constexpr UINT_PTR kHoverTimer = 5;
-constexpr UINT_PTR kRecentThumbnailTimer = 6;
 constexpr int kPathEditId = 101;
 constexpr int kFilenameEditId = 102;
 constexpr int kSearchEditId = 103;
@@ -178,6 +211,16 @@ constexpr float kSidebarDip = 208.0f;
 // app::SidebarSectionId so the shared renderer sees familiar values.
 constexpr int kGroupQuick = 1;
 constexpr int kGroupDrives = 3;
+constexpr int kGroupPickerTray = 50;
+constexpr int kGroupAppCommon = 2;      // 「{程序} 常用」 (kPickerAppCommonSection)
+constexpr int kGroupProgramPlaces = 6;  // 程序提供的位置
+constexpr int kGroupHiddenNotice = 60;  // header-less: 已隐藏 N 组 · 显示
+constexpr UINT_PTR kCommonForgetTimer = 0x5053;
+constexpr DWORD kCommonUndoMs = 5000;
+constexpr wchar_t kCommonUndoToken[] = L"pulse:common-undo";
+constexpr wchar_t kShowHiddenGroupsToken[] = L"pulse:show-hidden-groups";
+constexpr wchar_t kHiddenGroupPrefix[] = L"pulse:sidebar-group:";
+constexpr wchar_t kPickerTrayPrefix[] = L"pulse-picker-tray:";
 
 // Where the last pick of each mode was made, and how it was viewed, for this
 // session.
@@ -198,6 +241,23 @@ std::vector<PickerPlace> KnownPlaces() {
         {&FOLDERID_Documents, l10n::StringId::PickerDocuments, L"\xE8B7"},
         {&FOLDERID_Pictures, l10n::StringId::PickerPictures, L"\xE8B7"},
         {&FOLDERID_Profile, l10n::StringId::PickerHome, L"\xE8B7"},
+    };
+    std::vector<PickerPlace> places;
+    for (const Known& k : known) {
+        std::wstring path = known_folders::CurrentPath(*k.id);
+        if (!path.empty()) places.push_back({l10n::Get(k.label), std::move(path), k.glyph});
+    }
+    return places;
+}
+
+// 此电脑's four everyday folders (Home is reached from the address row).
+std::vector<PickerPlace> StandardPlaces() {
+    struct Known { const KNOWNFOLDERID* id; l10n::StringId label; const wchar_t* glyph; };
+    const Known known[] = {
+        {&FOLDERID_Desktop, l10n::StringId::Desktop, L"\xE7F4"},
+        {&FOLDERID_Downloads, l10n::StringId::Downloads, L"\xE896"},
+        {&FOLDERID_Documents, l10n::StringId::PickerDocuments, L"\xE8A5"},
+        {&FOLDERID_Pictures, l10n::StringId::PickerPictures, L"\xEB9F"},
     };
     std::vector<PickerPlace> places;
     for (const Known& k : known) {
@@ -348,7 +408,8 @@ public:
         mode_index_ = mode_ == PickerMode::Image ? 1 : mode_ == PickerMode::File ? 2 : mode_ == PickerMode::Save ? 3 : 0;
         allow_multiselect_ = spec.allow_multiselect && mode_ != PickerMode::Save;
         options_.filters = spec.filters;
-        options_.show_hidden = spec.show_hidden;
+        options_.show_hidden = spec.show_hidden || spec.show_hidden_files;
+        options_.show_protected_os_files = spec.show_hidden || spec.show_protected_os_files;
         options_.no_dereference_links = spec.no_dereference_links;
         options_.advisory_file_filters = spec.advisory_file_filters && !(mode_ == PickerMode::Save && (spec.native_options & FOS_STRICTFILETYPES));
         options_.native_options = spec.native_options;
@@ -364,6 +425,8 @@ public:
             } else options_.filters = {{l10n::Get(l10n::StringId::AllFiles_2).c_str(), L"*.*"}};
         }
         options_.filter_index = options_.filters.empty() ? 0 : (std::min)(spec.filter_index, options_.filters.size() - 1);
+        if (spec.enable_archive_selection && !spec.shell_item_filter && (mode_ == PickerMode::File || mode_ == PickerMode::Image))
+            options_.archive = std::make_shared<PickerArchiveSession>([] { return picker_places::Read().archive_worker; });
         view_mode_ = g_last_view[mode_index_];
         persist_layout_ = spec.persist_layout && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR",nullptr,0)==0;
         if (persist_layout_ && picker_layout::Load(static_cast<int>(mode_),layout_settings_)) {
@@ -390,26 +453,28 @@ public:
         normal_primary_text_ = chrome_.primary_text;
         chrome_.cancel_text = spec.has_cancel_button_label ? spec.cancel_button_label : l10n::Get(l10n::StringId::Cancel);
         chrome_.hosted_edit = true;
+        LoadSavedFormats();
+        if (mode_ == PickerMode::File || mode_ == PickerMode::Image) {
+            options_.category_of = MakeCategoryOf();
+            FILETIME now{}; GetSystemTimeAsFileTime(&now);
+            opened_at_ = (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+            if (persist_layout_) { try { options_.new_since = picker_layout::LoadLastOpened(static_cast<int>(mode_)); } catch (...) { } }
+        }
+        if (persist_layout_) {
+            try { picker_flags_ = saved_flags_ = picker_layout::LoadFlags(static_cast<int>(mode_)); } catch (...) { }
+            try { app_pinned_places_ = picker_layout::LoadAppPinned(); } catch (...) { }
+        }
+        original_file_path_ = spec.original_file_path;
+        if (original_file_path_.empty() && mode_ == PickerMode::Save && !spec.filename.empty() && IsPickerDiskPath(spec.filename)) {
+            original_file_path_ = spec.filename;
+        }
         UpdateFilterText();
         focus_ = kPickList;
 
         pulse_places_ = spec.read_shared_places ? spec.read_shared_places() : picker_places::Read();
         if (!pulse_places_.shared_available && !spec.read_shared_places) {
-            try {
-                auto slot = std::make_shared<SavedPlacesSlot>();
-                saved_places_ = slot;
-                std::thread([slot = std::move(slot)]() noexcept {
-                    try {
-                        auto saved = picker_places::ReadSaved();
-                        if (slot->cancelled.load(std::memory_order_acquire)) return;
-                        std::lock_guard lock(slot->mutex);
-                        if (!slot->cancelled.load(std::memory_order_acquire)) {
-                            slot->snapshot = std::move(saved);
-                            slot->ready.store(true, std::memory_order_release);
-                        }
-                    } catch (...) { }
-                }).detach();
-            } catch (...) { saved_places_.reset(); }
+            try { saved_places_ = std::async(std::launch::async, [] { return picker_places::ReadSaved(); }); }
+            catch (...) { }
         }
         PickerProofPhase("known-places-before");
         RefreshKnownPlaces();
@@ -459,7 +524,7 @@ public:
                           static_cast<int>(kDefaultHeight * scale_));
         if (persist_layout_) picker_layout::RestorePlacement(hwnd_,owner_,layout_settings_);
         loader_ = std::make_unique<PickerLoader>(hwnd_, kListingMessage, kValidationMessage,
-            spec_.on_dialog_event ? kFolderCommitMessage : 0, kSaveDirectoriesMessage);
+            spec_.on_dialog_event ? kFolderCommitMessage : 0, kSaveDirectoriesMessage, spec_.enable_save_followup);
         if (!spec_.navigation_root.empty()) navigation_root_.Set(hwnd_, kNavigationRootListingMessage, spec_.navigation_root, options_);
         AddClipboardFormatListener(hwnd_);
         PickerProofPhase("clipboard-before");
@@ -577,6 +642,36 @@ public:
         if (result_.empty()) return false;
         out.paths = result_;
         out.filter_index = options_.filter_index;
+        out.navigation_source = archive_source_;
+        if (spec_.enable_tray_consume && (mode_ == PickerMode::File || mode_ == PickerMode::Image) &&
+            (picker_flags_ & picker_layout::kFlagRemoveTrayAfterOpen))
+            out.on_result_delivered = PickerTrayDelivery(std::move(tray_pickups_), out.paths);
+        if ((spec_.enable_save_followup || saving_to_tray_) && mode_ == PickerMode::Save && save_before_ && out.paths.size() == 1 &&
+            pulse_places_.save_followup_available) {
+            picker_save::Request request;
+            request.path = out.paths.front(); request.before = *save_before_;
+            request.source_pid = GetCurrentProcessId();
+            static std::atomic<uint64_t> sequence{0};
+            request.request_id = (GetTickCount64() << 24) ^ (static_cast<uint64_t>(request.source_pid) << 8) ^ ++sequence;
+            if (!request.request_id) request.request_id = ++sequence;
+            wchar_t image[32768]{};
+            const DWORD length = GetModuleFileNameW(nullptr, image, static_cast<DWORD>(std::size(image)));
+            if (length && length < std::size(image)) request.app_name = PickerLeafName(std::wstring(image, length));
+            request.notify_if_no_tab = !saving_to_tray_ && (picker_flags_ & picker_layout::kFlagShowAfterSave) != 0;
+            request.copy_path = !saving_to_tray_ && (picker_flags_ & picker_layout::kFlagCopyAfterSave) != 0;
+            request.stage_to_tray = saving_to_tray_;
+            auto save_delivery = PickerSaveDelivery(pulse_places_, std::move(request));
+            out.on_result_delivered = [previous = std::move(out.on_result_delivered), save_delivery = std::move(save_delivery)] {
+                if (previous) previous();
+                save_delivery();
+            };
+        }
+        if (archive_delivery_) {
+            out.on_result_delivered = [lease = std::move(archive_delivery_), tray = std::move(out.on_result_delivered)] {
+                lease->Commit();
+                if (tray) tray();
+            };
+        }
         return true;
     }
 
@@ -614,6 +709,7 @@ public:
         create_rename_intents_.clear();
         select_after_paths_.clear();
         external_listing_.reset();
+        BindListOrder(path, !SamePickerPath(path, current_));
         auto load_options = options_;
         load_options.search.clear();
         const HWND navigation_window = hwnd_;
@@ -646,7 +742,7 @@ public:
         current_ = path;
         selected_ = anchor_ = -1;
         selected_set_.clear(); select_after_.clear(); typeahead_.clear();
-        scroll_ = 0; error_.clear();
+        scroll_ = 0; scroll_x_ = 0; error_.clear();
         embedded_folder_pending_ = true;
         external_navigation_ = false;
         OnListing(std::move(listing));
@@ -724,6 +820,7 @@ private:
             if ((spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0) ||
                 (spec_.owner_guard && !spec_.owner_guard->Alive())) return;
         }
+        if (moved) KeepSelectionInBasket();
         if (push_history && moved) history_.Navigate(current_);
         if (moved && searching_) {
             // A search belongs to the folder it was started in.
@@ -732,7 +829,17 @@ private:
             options_.search.clear();
             if (search_edit_) { setting_edits_ = true; SetWindowTextW(search_edit_, L""); setting_edits_ = false; }
         }
+        ClearTree();
         current_ = path;
+        if (mode_ == PickerMode::Save) {
+            saving_to_tray_ = !current_.empty() && SamePickerPath(current_, picker_places::DefaultPickerShelfDirPath());
+            if (moved) {
+                save_total_files_cached_ = -1;
+                StartGitRootProbe(current_);
+            }
+        } else {
+            saving_to_tray_ = false;
+        }
         if (spec_.on_dialog_event && moved) {
             embedded_folder_pending_ = true;
             embedded_folder_committed_ = false;
@@ -740,15 +847,17 @@ private:
         current_verified_ = verified;
         entries_.clear();
         DismissHover();
+        image_dimensions_.Reset();
         snapshot_.reset();
         typeahead_.clear();
         selected_ = -1;
         selected_set_.clear();
         anchor_ = -1;
+        if (moved && !basket_.empty() && filename_from_selection_) SyncSelectedNames();  // the name lists what the basket keeps
         chrome_.pressed = kPickNone;
         validating_ = false;
         chrome_.notice.clear();
-        if (moved) scroll_ = 0.0f;
+        if (moved) scroll_ = scroll_x_ = 0.0f;
         reload_notice_.clear();
         error_.clear();
         waiting_ = true;
@@ -756,6 +865,7 @@ private:
         select_after_ = std::move(select_after);
         EndAddressEdit(false);
         UpdateChosen();
+        BindListOrder(path, moved);
         if (loader_) loader_->Load(++generation_, path, mode_, options_);
         if (hwnd_) {
             // Navigation can hide the auto-jump notice. Reclaim its reserved
@@ -785,9 +895,9 @@ private:
 
     void Reload() {
         const std::wstring keep = SelectedEntry() ? SelectedEntry()->path : std::wstring();
-        const float scroll = scroll_;
+        const float scroll = scroll_, scroll_x = scroll_x_;
         Navigate(current_, false, keep, current_verified_);
-        scroll_ = scroll;
+        scroll_ = scroll; scroll_x_ = scroll_x;
     }
 
     bool WaitInitialFolderCommit() {
@@ -861,10 +971,10 @@ private:
                 return;
             }
             if (spec_.on_dialog_event && !initial_show_allowed_) {
-                FailPaintedEdit(listing->error);
+                FailPaintedEdit(listing->error, "initial-listing");
                 return;
             }
-            error_ = ErrorText(listing->error, listing->path);
+            error_ = ArchiveError(listing->error, listing->path);
             if (error_.empty()) error_ = l10n::Get(l10n::StringId::PickerOpenFailed);
         }
         initial_load_ = false;
@@ -884,11 +994,23 @@ private:
             waiting_ = loading_ = false;
         }
         if (new_folder_draft_) EndRename(false);
+        if (TreeEligible() && !listing->error) {
+            tree_.Reset(*listing);
+            auto view = tree_.Build();
+            listing->entries = std::move(view.entries);
+            listing->snapshot = std::move(view.snapshot);
+            tree_rows_ = std::move(view.rows);
+        }
         entries_ = std::move(listing->entries);
         diagnostics::runtime::Event("picker_listing_published", {
             {"window", reinterpret_cast<uintptr_t>(hwnd_)}, {"generation", generation_},
             {"filter_ms", GetTickCount64() - listing_received_at}, {"rows", entries_.size()}});
         snapshot_ = std::move(listing->snapshot);
+        snapshot_order_ = order_;
+        counts_valid_ = listing->counted;
+        filter_counts_ = std::move(listing->filter_counts);
+        category_counts_ = listing->category_counts;
+        new_count_ = listing->new_count;
         if (current_.empty()) RefreshDrivesFromListing();
         if (!select_after_.empty() && select_after_paths_.empty()) select_after_paths_.push_back(select_after_);
         int arrival = -1;
@@ -907,6 +1029,7 @@ private:
             select_after_paths_.clear();
             select_after_.clear();
         }
+        RestoreBasketSelection();
         if (arrival >= 0) EnsureVisible(arrival);
         ClampScroll();
         UpdateChosen();
@@ -947,7 +1070,10 @@ private:
         }
     }
 
+    #include "picker_details_tree_controller.inc"
+
     const PickerEntry* SelectedEntry() const {
+        if (TreePlaceholder(selected_)) return nullptr;
         if (selected_ < 0 || selected_ >= static_cast<int>(entries_.size())) return nullptr;
         return &entries_[static_cast<size_t>(selected_)];
     }
@@ -964,6 +1090,137 @@ private:
         chrome_.filter_text = options_.filters.empty()
             ? l10n::Get(l10n::StringId::AllFiles_2).c_str()
             : options_.filters[options_.filter_index].label;
+        chrome_.filter_static = mode_ != PickerMode::Folder && options_.filters.size() <= 1;
+        SyncFormatSegments();
+    }
+
+    // Save: the program's types as segments, 更多 for the rest, *.* last.
+    void SyncFormatSegments() {
+        chrome_.formats.clear();
+        chrome_.format_count = options_.filters.size();
+        chrome_.format_selected = -1;
+        chrome_.format_note.clear();
+        chrome_.format_static_text.clear();
+        if (mode_ == PickerMode::Save && options_.filter_index < options_.filters.size()) {
+            const auto& filter = options_.filters[options_.filter_index];
+            chrome_.format_note = PickerFormatNote(filter);
+            if (chrome_.filter_static) {
+                chrome_.format_static_text = PickerFormatStaticText(filter);
+                if (PickerFilterIsAny(filter)) chrome_.format_note.clear(); // Already explained by the static label.
+            }
+        }
+        if (mode_ != PickerMode::Save || options_.filters.empty() || options_.filters.size() > 64) return;
+        // Formats used in this dialog stay among the segments, so clicking one never
+        // swaps the others out from under the pointer.
+        if (options_.filter_index < options_.filters.size() && !PickerFilterIsAny(options_.filters[options_.filter_index])) {
+            recent_formats_.erase(std::remove(recent_formats_.begin(), recent_formats_.end(), options_.filter_index), recent_formats_.end());
+            recent_formats_.insert(recent_formats_.begin(), options_.filter_index);
+        }
+        const auto labels = PickerFormatLabels(options_.filters);
+        auto recent = recent_formats_;
+        recent.insert(recent.end(), saved_formats_.begin(), saved_formats_.end());
+        const auto order = PickerFormatSegmentOrder(options_.filters, options_.filter_index, recent);
+        size_t regular = 0, shown = 0;
+        for (const auto& filter : options_.filters) if (!PickerFilterIsAny(filter)) ++regular;
+        for (const int index : order) if (index >= 0 && !PickerFilterIsAny(options_.filters[static_cast<size_t>(index)])) ++shown;
+        for (const int index : order) {
+            PickerFormatSegment segment;
+            if (index == kPickerFormatMore) {
+                segment.text = l10n::Get(l10n::StringId::More) + L" " + std::to_wstring(regular - shown);
+            } else {
+                const auto filter = static_cast<size_t>(index);
+                segment.text = labels[filter];
+                segment.filter = index;
+                segment.any = PickerFilterIsAny(options_.filters[filter]);
+                if (filter == options_.filter_index) chrome_.format_selected = static_cast<int>(chrome_.formats.size());
+            }
+            chrome_.formats.push_back(std::move(segment));
+        }
+    }
+
+    bool FormatSegmentsShown() const { return !chrome_layout_.format_segments.empty(); }
+
+    void ActivateFormat(int segment) {
+        if (segment < 0 || static_cast<size_t>(segment) >= chrome_.formats.size()) return;
+        const auto& format = chrome_.formats[static_cast<size_t>(segment)];
+        if (format.filter >= 0) { ApplyFilter(static_cast<size_t>(format.filter)); return; }
+        const auto anchor = static_cast<size_t>(segment) < chrome_layout_.format_segments.size()
+            ? chrome_layout_.format_segments[static_cast<size_t>(segment)] : chrome_layout_.filter;
+        ShowFormatList(anchor);
+    }
+
+    // 更多: every type the program passed, searchable by name or extension.
+    void ShowFormatList(const D2D1_RECT_F& anchor) {
+        if (options_.filters.empty()) return;
+        const auto labels = PickerFormatLabels(options_.filters);
+        const auto lower = [](std::wstring text) {
+            for (auto& c : text) c = static_cast<wchar_t>(std::towlower(c));
+            return text;
+        };
+        const auto build = [this, labels, lower](const std::wstring& typed) {
+            std::wstring query = lower(typed);
+            while (!query.empty() && std::iswspace(query.front())) query.erase(query.begin());
+            while (!query.empty() && std::iswspace(query.back())) query.pop_back();
+            if (query.rfind(L"*.", 0) == 0) query.erase(0, 2);
+            else if (!query.empty() && query.front() == L'.') query.erase(0, 1);
+            std::vector<FluentMenuItem> items;
+            for (size_t i = 0; i < options_.filters.size() && i < 64; ++i) {
+                const auto& filter = options_.filters[i];
+                const auto name = PickerFilterName(filter);
+                const auto extensions = PickerFilterExtensions(filter);
+                if (!query.empty() && lower(labels[i]).find(query) == std::wstring::npos &&
+                    lower(name).find(query) == std::wstring::npos &&
+                    std::none_of(extensions.begin(), extensions.end(), [&](const std::wstring& e) { return e.rfind(query, 0) == 0; }))
+                    continue;
+                FluentMenuItem item;
+                item.command = static_cast<int>(i) + 1;
+                item.text = labels[i];
+                if (name != labels[i]) { item.detail = name; item.detail_inline = true; }
+                std::wstring shown;
+                for (size_t e = 0; e < extensions.size() && e < 4; ++e) shown += (e ? L" ." : L".") + extensions[e];
+                if (extensions.size() > 4) shown += L" \u2026";
+                item.shortcut = shown;
+                item.radio_group = true;
+                item.radio = i == options_.filter_index;
+                item.current = i == options_.filter_index;
+                items.push_back(std::move(item));
+            }
+            return items;
+        };
+        menu_.SetTheme(dark_, accent_);
+        menu_.SetFilterPlaceholder(l10n::Get(l10n::StringId::PickerFormatSearch));
+        menu_.SetFilterMinWidth(360.0f);
+        const RECT screen = ScreenRect(anchor);
+        const int command = TrackPickerPopup(POINT{screen.left, screen.top}, build(std::wstring()), build);
+        if (done_ || command <= 0) return;
+        ApplyFilter(static_cast<size_t>(command - 1));
+    }
+
+    // Save types this program saved with before, as filter indices (most recent first).
+    void LoadSavedFormats() {
+        saved_format_patterns_.clear();
+        saved_formats_.clear();
+        if (!persist_layout_ || mode_ != PickerMode::Save) return;
+        try { saved_format_patterns_ = picker_layout::LoadRecentFormats(static_cast<int>(mode_)); } catch (...) { return; }
+        for (const auto& pattern : saved_format_patterns_)
+            for (size_t i = 0; i < options_.filters.size(); ++i)
+                if (CompareStringOrdinal(options_.filters[i].pattern.c_str(), -1, pattern.c_str(), -1, TRUE) == CSTR_EQUAL) {
+                    if (std::find(saved_formats_.begin(), saved_formats_.end(), i) == saved_formats_.end()) saved_formats_.push_back(i);
+                    break;
+                }
+    }
+
+    void SaveUsedFormat() noexcept {
+        if (!persist_layout_ || mode_ != PickerMode::Save || result_.empty() || options_.filter_index >= options_.filters.size()) return;
+        const auto& used = options_.filters[options_.filter_index];
+        if (PickerFilterIsAny(used) || used.pattern.empty()) return;
+        try {
+            std::vector<std::wstring> patterns{used.pattern};
+            for (const auto& pattern : saved_format_patterns_)
+                if (CompareStringOrdinal(pattern.c_str(), -1, used.pattern.c_str(), -1, TRUE) != CSTR_EQUAL &&
+                    patterns.size() < picker_layout::kMaxRecentFormats) patterns.push_back(pattern);
+            picker_layout::SaveRecentFormats(static_cast<int>(mode_), patterns);
+        } catch (...) { }
     }
 
     bool StopEmbeddedInitialization() {
@@ -979,7 +1236,11 @@ private:
         if (!spec_.on_dialog_event || done_) return S_OK;
         ++embedded_callback_depth_;
         HRESULT hr = E_FAIL;
-        try { hr = spec_.on_dialog_event(hwnd_, kind, embedded_state_, proposed); } catch (...) {}
+        try {
+            const auto host_path = kind == PickerDialogEvent::FolderChanging && options_.archive && options_.archive->Contains(proposed)
+                ? PickerParent(options_.archive->ArchiveFor(proposed)) : proposed;
+            hr = spec_.on_dialog_event(hwnd_, kind, embedded_state_, host_path);
+        } catch (...) {}
         --embedded_callback_depth_;
         if (!embedded_callback_depth_ && !pending_navigation_.empty() && !done_ &&
             !PostMessageW(hwnd_, kEmbeddedNavigationMessage, 0, 0)) FailPaintedEdit(ERROR_FUNCTION_FAILED);
@@ -998,10 +1259,12 @@ private:
             std::sort(indices.begin(),indices.end());
             for(int index:indices) if(index>=0 && static_cast<size_t>(index)<entries_.size()) selections.push_back(entries_[static_cast<size_t>(index)].path);
         } else if(const auto* selected=SelectedEntry()) selections.push_back(selected->path);
+        if (InArchive()) selections.clear();
         const std::wstring selection=selections.empty() ? std::wstring{} : selections.front();
         const bool selection_changed = embedded_state_.selections != selections;
         const bool type_changed = embedded_state_.filter_index != options_.filter_index;
-        const std::wstring published_folder = current_.empty() && current_verified_ ? picker_navigation::kComputerPath : current_;
+        const std::wstring published_folder = InArchive() ? PickerParent(options_.archive->ArchiveFor(current_))
+            : current_.empty() && current_verified_ ? picker_navigation::kComputerPath : current_;
         const bool changed = selection_changed || type_changed || embedded_state_.folder != published_folder ||
             embedded_state_.filename != filename_text_ || embedded_state_.validating != validating_;
         // The first published snapshot is valid even when every field equals
@@ -1052,21 +1315,19 @@ private:
     }
 
     void UpdateChosen() {
+        std::erase_if(selected_set_, [&](int i) { return TreePlaceholder(i); });
         if (pending_overwrite_ && (!validating_ || overwrite_generation_ != generation_)) ClearOverwrite();
         PublishEmbeddedState();
         const bool no_embedded_folder = spec_.on_dialog_event && !embedded_folder_committed_;
         if (filename_edit_) EnableWindow(filename_edit_, !validating_ && !waiting_ && !no_embedded_folder);
         if (!no_embedded_folder) RestoreSaveFocus();
         chosen_.clear();
-        if (validating_ || waiting_ || no_embedded_folder || !HasRequiredInteraction()) return;
-        if (!filename_text_.empty()) {
-            chosen_ = filename_text_;
-            return;
+        if (!validating_ && !waiting_ && !no_embedded_folder && HasRequiredInteraction()) {
+            if (!filename_text_.empty()) chosen_ = filename_text_;
+            else if (mode_ == PickerMode::Folder && error_.empty())
+                chosen_ = PickerChosenPath(mode_, current_, SelectedEntry());
         }
-        // Folder mode: the selected folder, else the folder being shown. This
-        // PC itself is not a folder that can be returned.
-        if (mode_ == PickerMode::Folder && error_.empty())
-            chosen_ = PickerChosenPath(mode_, current_, SelectedEntry());
+        RefreshSaveDraft();
     }
 
     void ClearOverwrite() {
@@ -1113,6 +1374,7 @@ private:
     }
 
     void SetFilename(std::wstring text) {
+        save_format_notice_.clear(); save_format_notice_filename_.clear();
         filename_text_ = std::move(text);
         setting_edits_ = true;
         if (filename_edit_) SetWindowTextW(filename_edit_, filename_text_.c_str());
@@ -1120,17 +1382,74 @@ private:
         UpdateChosen();
     }
 
+    // ---- the multi-select basket (HTML 多选篮): picks survive changing folders ----
+
+    bool BasketEnabled() const { return allow_multiselect_ && mode_ == PickerMode::File; }
+
+    // The files picked here last. Opening a folder starts with a click that selects
+    // just the folder, so that click keeps them; clearing the selection drops them.
+    void RememberFilePicks() {
+        if (!BasketEnabled()) return;
+        if (selected_set_.empty()) { last_file_picks_.clear(); return; }
+        std::vector<int> picked(selected_set_.begin(), selected_set_.end());
+        std::sort(picked.begin(), picked.end());
+        std::vector<BasketItem> files;
+        for (int index : picked) {
+            if (index < 0 || static_cast<size_t>(index) >= entries_.size()) continue;
+            const auto& entry = entries_[static_cast<size_t>(index)];
+            if (entry.kind == PickerEntryKind::File || entry.kind == PickerEntryKind::Image)
+                files.push_back({entry.path, entry.name, entry.size});
+        }
+        if (!files.empty()) last_file_picks_ = std::move(files);
+    }
+
+    void KeepSelectionInBasket() {
+        if (!BasketEnabled() || !filename_from_selection_ || editing_selection_names_) { last_file_picks_.clear(); return; }
+        for (auto& pick : last_file_picks_) {
+            if (std::any_of(basket_.begin(), basket_.end(), [&](const BasketItem& item) { return SamePickerPath(item.path, pick.path); })) continue;
+            basket_.push_back(std::move(pick));
+        }
+        last_file_picks_.clear();
+    }
+
+    // Back in a folder: its basket files are selected rows again.
+    void RestoreBasketSelection() {
+        if (basket_.empty()) return;
+        bool restored = false;
+        for (auto it = basket_.begin(); it != basket_.end();) {
+            int found = -1;
+            if (SamePickerPath(PickerParent(it->path), current_))
+                for (size_t i = 0; i < entries_.size(); ++i)
+                    if (SamePickerPath(entries_[i].path, it->path)) { found = static_cast<int>(i); break; }
+            if (found < 0) { ++it; continue; }
+            selected_set_.insert(found);
+            if (selected_ < 0) selected_ = anchor_ = found;
+            it = basket_.erase(it);
+            restored = true;
+        }
+        if (restored) { filename_from_selection_ = true; SyncSelectedNames(); }
+    }
+
     void SyncSelectedNames() {
+        std::erase_if(selected_set_, [&](int i) { return TreePlaceholder(i); });
+        RememberFilePicks();
         std::vector<int> picked(selected_set_.begin(), selected_set_.end());
         std::sort(picked.begin(), picked.end());
         std::wstring text;
+        // Files kept from other folders go first, as full paths.
+        const size_t total = basket_.size() + picked.size();
+        for (const auto& item : basket_) {
+            if (!text.empty()) text += L" ";
+            text += total > 1 ? L"\"" + item.path + L"\"" : item.path;
+        }
         for (int i : picked) {
             if (i < 0 || i >= static_cast<int>(entries_.size())) continue;
             const PickerEntry& entry = entries_[static_cast<size_t>(i)];
             // Folders are opened, not returned: they do not go into the name.
             if (mode_ != PickerMode::Folder && (entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive)) continue;
             if (!text.empty()) text += L" ";
-            text += picked.size() > 1 ? L"\"" + entry.name + L"\"" : entry.name;
+            const auto name = TreeSelectionName(entry);
+            text += total > 1 ? L"\"" + name + L"\"" : name;
         }
         if (mode_ != PickerMode::Save || !text.empty()) { SetFilename(std::move(text)); filename_from_selection_ = true; }
     }
@@ -1139,6 +1458,7 @@ private:
                 bool reveal = true) {
         if (validating_) { ++generation_; validating_ = false; }
         editing_selection_names_ = false;
+        if (TreePlaceholder(index)) return;
         const int count = static_cast<int>(entries_.size());
         if (!count) { selected_ = -1; selected_set_.clear(); UpdateChosen(); return; }
         index = std::clamp(index, 0, count - 1);
@@ -1151,7 +1471,7 @@ private:
                 anchor_ = anchor;
                 if (!toggle) selected_set_.clear();
                 for (int i = (std::min)(anchor, index); i <= (std::max)(anchor, index); ++i)
-                    selected_set_.insert(i);
+                    if (!TreePlaceholder(i)) selected_set_.insert(i);
             } else if (allow_multiselect_ && toggle) {
                 if (!selected_set_.erase(index)) selected_set_.insert(index);
                 anchor_ = index;
@@ -1170,16 +1490,34 @@ private:
     void ClearSelection() {
         selected_ = -1;
         selected_set_.clear();
+        last_file_picks_.clear();
         anchor_ = -1;
         if (mode_ != PickerMode::Folder && mode_ != PickerMode::Save) SetFilename(L"");
         UpdateChosen();
         Invalidate();
     }
 
+    bool InArchive() const { return options_.archive && options_.archive->Contains(current_); }
+
+    std::wstring ArchiveError(DWORD error, const std::wstring& path) const {
+        if (options_.archive && options_.archive->Contains(path)) {
+            if (error == ERROR_MOD_NOT_FOUND) return l10n::Get(l10n::StringId::ArchivePluginRequired);
+            if (error == ERROR_PASSWORD_RESTRICTION) return l10n::Get(l10n::StringId::PickerArchivePassword);
+        }
+        return ErrorText(error, path);
+    }
+
     void OpenEntry(int index) {
+        if (TreePlaceholder(index)) return;
         if (index < 0 || index >= static_cast<int>(entries_.size())) return;
         const PickerEntry entry = entries_[static_cast<size_t>(index)];
-        if (entry.kind == PickerEntryKind::Image || entry.kind == PickerEntryKind::File) {
+        if (entry.archive && options_.archive) {
+            std::erase_if(last_file_picks_, [&](const auto& pick) { return SamePickerPath(pick.path, entry.path); });
+            std::erase_if(basket_, [&](const auto& pick) { return SamePickerPath(pick.path, entry.path); });
+            options_.archive->Register(entry.path);
+            SetFilename(L"");
+            Navigate(entry.path, true, {}, true);
+        } else if (entry.kind == PickerEntryKind::Image || entry.kind == PickerEntryKind::File) {
             SubmitSelection();
         } else {
             if (mode_ != PickerMode::Save) SetFilename(L"");
@@ -1199,12 +1537,15 @@ private:
         });
     }
 
-    void ValidateNames(std::vector<std::wstring> names, bool typed_names = false, bool directories_checked = false) {
+    void ValidateNames(std::vector<std::wstring> names, bool typed_names = false, bool directories_checked = false,
+                       bool incoming_files = false, bool add_to_selection = false,
+                       const std::vector<picker_places::SelectedItem>* selection_items = nullptr) {
         if (!loader_ || validating_ || waiting_ || names.empty()) {
             TraceFolderSubmit(!loader_ ? L"no_loader" : validating_ ? L"already_validating" :
                 waiting_ ? L"listing_pending" : L"no_candidate");
             return;
         }
+        if (mode_ == PickerMode::Save) save_before_.reset();
         if (!allow_multiselect_ && names.size() > 1) {
             TraceFolderSubmit(L"too_many_candidates", names.size());
             chrome_.notice = l10n::Get(l10n::StringId::SelectOneFileHere).c_str();
@@ -1212,10 +1553,14 @@ private:
             return;
         }
         validation_navigation_only_ = false;
+        validation_incoming_files_ = incoming_files;
+        validation_add_selection_ = add_to_selection;
+        validation_selection_items_ = add_to_selection ? (selection_items ? *selection_items : spec_.pulse_selected_items) : std::vector<picker_places::SelectedItem>{};
         create_consent_paths_.clear();
         share_consent_paths_.clear(); share_consent_targets_.clear(); share_consent_save_identity_.reset(); share_consent_save_parent_.reset();
         RememberSaveFocus();
         validating_ = true;
+        if (mode_ == PickerMode::Save) { save_draft_probe_.Cancel(); save_draft_due_ = 0; }
         chrome_.notice = l10n::Get(l10n::StringId::CheckingTheSelectedItems).c_str();
         UpdateChosen();
         if (mode_ == PickerMode::Save) {
@@ -1250,7 +1595,8 @@ private:
         Invalidate();
     }
 
-    void SubmitSelection() {
+    void SubmitSelection(bool allow_live_conflict = false) {
+        if (mode_ == PickerMode::Save && (save_name_invalid_ || (chrome_.live_conflict && !allow_live_conflict))) return;
         TraceFolderSubmit(L"submit_enter");
         if (done_) { TraceFolderSubmit(L"already_closed"); return; }
         if (!legacy_browse_ok_) return;
@@ -1278,7 +1624,8 @@ private:
                 const auto& entry = entries_[static_cast<size_t>(index)];
                 if (entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive) names.push_back(entry.path);
             }
-        } else if (mode_ == PickerMode::File && filename_from_selection_ && !selected_set_.empty()) {
+        } else if ((mode_ == PickerMode::File || mode_ == PickerMode::Image) && filename_from_selection_ && (!selected_set_.empty() || !basket_.empty())) {
+            for (const auto& item : basket_) names.push_back(item.path);
             std::vector<int> picked(selected_set_.begin(), selected_set_.end());
             std::sort(picked.begin(), picked.end());
             for (int index : picked) if (index >= 0 && static_cast<size_t>(index) < entries_.size()) {
@@ -1366,7 +1713,7 @@ private:
         chrome_.notice.clear();
         if (validation->save_access_diagnostic && (validation->save_access_diagnostic->cleanup == SaveAccessCleanup::Unconfirmed ||
             validation->save_access_diagnostic->cleanup_error != ERROR_SUCCESS)) {
-            FailPaintedEdit(validation->error ? validation->error : ERROR_FUNCTION_FAILED); return;
+            FailPaintedEdit(validation->error ? validation->error : ERROR_FUNCTION_FAILED, "save-access-cleanup"); return;
         }
         if (validation->error == ERROR_SHARING_VIOLATION && (spec_.native_options & FOS_SHAREAWARE) && !validation->paths.empty()) {
             const bool same_save_identity = !validation->save_snapshot ||
@@ -1408,7 +1755,7 @@ private:
             if (spec_.validate_local_save_access_v1) ClearEmbeddedCandidate();
             chrome_.notice = validation->error == ERROR_UNSUPPORTED_TYPE
                 ? l10n::Get(l10n::StringId::TheSelectedFileDoesNotMatchTheFileType).c_str()
-                : ErrorText(validation->error, validation->failed_path);
+                : ArchiveError(validation->error, validation->failed_path);
             if (chrome_.notice.empty()) chrome_.notice = l10n::Get(l10n::StringId::PickerOpenFailed);
             if (waiting_ && loader_) loader_->Load(++generation_, current_, mode_, options_);
             UpdateChosen();
@@ -1416,12 +1763,17 @@ private:
             return;
         }
         if (!validation->navigate.empty()) {
+            if (validation_incoming_files_) {
+                chrome_.notice = l10n::Get(l10n::StringId::TheSelectedFileDoesNotMatchTheFileType);
+                UpdateChosen(); Invalidate(); return;
+            }
             TraceFolderSubmit(L"validation_navigates");
             if (mode_ != PickerMode::Folder && mode_ != PickerMode::Save) SetFilename(L"");
             Navigate(validation->navigate, true);
             FocusList();
             return;
         }
+        if (mode_ == PickerMode::Save && validation->save_before) save_before_ = validation->save_before;
         if (validation->paths.empty()) { TraceFolderSubmit(L"validation_empty"); UpdateChosen(); return; }
         if (!legacy_browse_ok_ || std::any_of(validation->paths.begin(),validation->paths.end(),
                 [this](const auto& path){return !WithinLegacyRoot(path);})) {
@@ -1431,6 +1783,19 @@ private:
         if (validation_navigation_only_) {
             Navigate(PickerParent(validation->paths.front()), true, validation->paths.front());
             FocusList();
+            return;
+        }
+        if (validation_add_selection_ && BasketEnabled()) {
+            for (const auto& path : validation->paths) {
+                if (std::any_of(basket_.begin(), basket_.end(), [&](const auto& item) { return SamePickerPath(item.path, path); })) continue;
+                uint64_t bytes = 0;
+                for (const auto& item : validation_selection_items_)
+                    if (SamePickerPath(item.path, path)) { bytes = item.size; break; }
+                basket_.push_back({path, PickerLeafName(path), bytes});
+            }
+            filename_from_selection_ = true;
+            RestoreBasketSelection();
+            SyncSelectedNames(); UpdateChosen(); SyncVm(); Relayout(); Invalidate();
             return;
         }
         if (mode_ == PickerMode::Save && !validation->save_snapshot) {
@@ -1569,7 +1934,10 @@ private:
         }
         if (spec_.owner_guard && !spec_.owner_guard->Alive()) { result_.clear(); done_ = true; return; }
         result_ = std::move(validation->paths);
-        g_last_folder[mode_index_] = current_.empty() ? PickerParent(result_.front()) : current_;
+        archive_delivery_ = std::move(validation->archive_delivery);
+        archive_source_ = std::move(validation->archive_source);
+        g_last_folder[mode_index_] = !archive_source_.empty() ? PickerParent(archive_source_)
+            : current_.empty() ? PickerParent(result_.front()) : current_;
         g_last_view[mode_index_] = view_mode_;
         done_ = true;
         PostMessageW(hwnd_, WM_NULL, 0, 0);
@@ -1578,7 +1946,7 @@ private:
     void SyncDetailsPreview() {
         const auto bounds = renderer_.DetailsPreviewBounds();
         const auto& details = vm_.details;
-        if (!vm_.details_visible || !details.has_selection || waiting_ || !IsWindowVisible(hwnd_) || IsIconic(hwnd_) ||
+        if (InArchive() || !vm_.details_visible || details.picker_save_mode || !details.has_selection || waiting_ || !IsWindowVisible(hwnd_) || IsIconic(hwnd_) ||
             bounds.right <= bounds.left || bounds.bottom <= bounds.top || picker_shell::IsParsingName(details.path)) {
             details_preview_.Close(); return;
         }
@@ -1628,6 +1996,9 @@ private:
     void PersistCapturedLayout() noexcept {
         if (!persist_layout_ || !layout_shown_ || layout_saved_ || !layout_captured_) return;
         layout_saved_ = true;
+        SaveUsedFormat();
+        if (opened_at_) { try { picker_layout::SaveLastOpened(static_cast<int>(mode_), opened_at_); } catch (...) { } }
+        if (picker_flags_ != saved_flags_) { try { picker_layout::SaveFlags(static_cast<int>(mode_), picker_flags_); } catch (...) { } }
         try {
             const bool saved=picker_layout::Save(static_cast<int>(mode_),layout_settings_);
             diagnostics::runtime::Event("picker_layout_save",{{"success",saved?1u:0u},{"mode",static_cast<uint32_t>(mode_)}});
@@ -1640,11 +2011,10 @@ private:
     }
 
     void Close() noexcept {
+        CommitCommonForget();
         done_ = true;
-        if (saved_places_) {
-            saved_places_->cancelled.store(true, std::memory_order_release);
-            saved_places_.reset();
-        }
+        image_dimensions_.Reset();
+        frame_pump_.Disarm();
         const HWND hwnd = hwnd_;
         if (hwnd && IsWindow(hwnd)) {
             CaptureLayoutForSave();
@@ -1664,6 +2034,7 @@ private:
         DismissHover();
         ole_drop_.Revoke();
         queued_drop_.reset();
+        queued_use_files_.clear();
         operation_session_.Cancel();
         CancelPlacesDrag();
         EndMarquee(false);
@@ -1675,12 +2046,18 @@ private:
         KillTimer(hwnd_, kMotionTimer);
         KillTimer(hwnd_, kSharedPlacesTimer);
         KillTimer(hwnd_, kJumpContextTimer);
+        KillTimer(hwnd_, kSaveDraftTimer);
+        KillTimer(hwnd_, kImageDimensionsTimer);
         // Stop the loader first: after this no listing can be posted, so the
         // ones already queued are all that must be freed.
         PickerProofPhase("close-loader-before");
+        save_draft_probe_.Cancel();
         loader_.reset();
+        ClearTree();
         PickerProofPhase("close-loader-after");
         MSG pending{};
+        while (PeekMessageW(&pending, hwnd_, kTreeListingMessage, kTreeListingMessage, PM_REMOVE))
+            PickerLoader::Take(pending.lParam);
         while (PeekMessageW(&pending, hwnd_, kListingMessage, kListingMessage, PM_REMOVE))
             PickerLoader::Take(pending.lParam);
         while (PeekMessageW(&pending, hwnd_, kFolderCommitMessage, kFolderCommitMessage, PM_REMOVE))
@@ -1734,7 +2111,6 @@ private:
                     {"has_name", spec_.host_app_name.empty() ? 0u : 1u},
                     {"has_icon", spec_.host_app_icon_pixels ? 1u : 0u}});
                 app_icon_bitmap_.reset();
-                recent_thumbs_.clear();
                 if (!SamePickerPath(original, spec_.initial_path)) {
                     if (!jump_context_touched_ && generation_ == initial_jump_generation_ && spec_.allow_auto_jump)
                         Navigate(spec_.initial_path, true);
@@ -1752,14 +2128,13 @@ private:
         else {
             pulse_places_.shared_available = false;
             pulse_places_.endpoint = nullptr;
-            if (saved_places_ && saved_places_->ready.load(std::memory_order_acquire)) {
+            if (saved_places_.valid() && saved_places_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
                 try {
-                    std::lock_guard lock(saved_places_->mutex);
-                    pulse_places_.workspaces = std::move(saved_places_->snapshot.workspaces);
-                    pulse_places_.networks = std::move(saved_places_->snapshot.networks);
-                    pulse_places_.starred_items = std::move(saved_places_->snapshot.starred_items);
-                    pulse_places_.starred_groups = std::move(saved_places_->snapshot.starred_groups);
-                    saved_places_.reset();
+                    auto saved = saved_places_.get();
+                    pulse_places_.workspaces = std::move(saved.workspaces);
+                    pulse_places_.networks = std::move(saved.networks);
+                    pulse_places_.starred_items = std::move(saved.starred_items);
+                    pulse_places_.starred_groups = std::move(saved.starred_groups);
                 } catch (...) { }
             }
         }
@@ -1769,15 +2144,116 @@ private:
     void CancelPlacesDrag() {
         const bool captured = places_drag_.pending || places_drag_.active;
         places_drag_ = {};
+        tray_drop_armed_ = false;
+        shake_detector_.Reset();
         vm_.drag_badge.clear();
         SetDragVisualFeedback({});
         vm_.sidebar_drop_index = -1;
         if (captured && hwnd_ && GetCapture() == hwnd_) ReleaseCapture();
     }
 
+    bool IncomingFilesReady() const {
+        return !done_ && !waiting_ && !validating_ && !operating_ && !queued_drop_ && queued_use_files_.empty();
+    }
+
+    bool DropOnListBlank(POINT point) {
+        const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
+        return hit.chrome == kPickNone && (hit.main.region == HitTestResult::Pane || hit.main.region == HitTestResult::None) &&
+            ContainsRect(renderer_.PaneListRect(vm_.pane, PaneBounds()), static_cast<float>(point.x), static_cast<float>(point.y));
+    }
+
+    bool CanUseIncoming(const std::vector<std::wstring>& paths) const {
+        return IncomingFilesReady() && PickerCanUseIncomingFiles(paths, mode_, options_, allow_multiselect_) &&
+            std::all_of(paths.begin(), paths.end(), [this](const auto& path) { return WithinLegacyRoot(path); });
+    }
+
+    void SyncPulseSelection() {
+        const auto previous = std::move(chrome_.pulse_selection);
+        chrome_.pulse_selection.clear();
+        const auto cancel_stale_press = [&] {
+            const bool changed = previous.size() != chrome_.pulse_selection.size() ||
+                !std::equal(previous.begin(), previous.end(), chrome_.pulse_selection.begin(),
+                    [](const auto& a, const auto& b) { return a.path == b.path && a.enabled == b.enabled; });
+            if (!changed) return;
+            if (chrome_.pressed == kPickPulseUse || chrome_.pressed == kPickPulseMore ||
+                (chrome_.pressed >= kPickPulseFileBase && chrome_.pressed < kPickPulseFileBase + 64)) chrome_.pressed = kPickNone;
+            if (focus_ >= kPickPulseFileBase && focus_ < kPickPulseFileBase + 64) focus_ = kPickList;
+        };
+        if (!spec_.pulse_selection_available || (mode_ != PickerMode::File && mode_ != PickerMode::Image)) { chrome_.pulse_folder.clear(); cancel_stale_press(); return; }
+        bool compatible = false;
+        std::wstring common_parent;
+        bool same_parent = true;
+        for (const auto& item : spec_.pulse_selected_items) {
+            const bool enabled = !item.is_directory && WithinLegacyRoot(item.path) &&
+                PickerCanUseIncomingFiles({item.path}, mode_, options_, false);
+            compatible |= enabled;
+            const bool in_basket = std::any_of(basket_.begin(), basket_.end(),
+                [&](const BasketItem& b) { return SamePickerPath(b.path, item.path); });
+            chrome_.pulse_selection.push_back({PickerLeafName(item.path), item.path, enabled, in_basket});
+            if (same_parent) {
+                const std::wstring parent = PickerParent(item.path);
+                if (parent.empty()) same_parent = false;
+                else if (common_parent.empty()) common_parent = parent;
+                else if (!SamePickerPath(common_parent, parent)) same_parent = false;
+            }
+        }
+        if (!compatible) chrome_.pulse_selection.clear();
+        cancel_stale_press();
+        chrome_.pulse_logo = renderer_.PulseLogoBitmap();
+        chrome_.pulse_caption = l10n::Get(l10n::StringId::PickerPulseSelection);
+        chrome_.pulse_folder = !chrome_.pulse_selection.empty() && same_parent && !common_parent.empty()
+            ? PickerLeafName(common_parent) : std::wstring();
+        chrome_.pulse_use_text = l10n::Get(BasketEnabled() ? l10n::StringId::PickerAddAllSelection : l10n::StringId::PickerUseSelection);
+        chrome_.pulse_use_primary = !BasketEnabled();
+        chrome_.pulse_selection_enabled = IncomingFilesReady();
+    }
+
+    void UsePulseSelection(int index = -1) {
+        if (!IncomingFilesReady()) return;
+        const std::wstring requested = index >= 0 && static_cast<size_t>(index) < chrome_.pulse_selection.size()
+            ? chrome_.pulse_selection[index].path : std::wstring();
+        // Refresh at activation, not just paint, so a removed/changed main-window
+        // selection cannot be submitted from an old displayed chip.
+        if (spec_.poll_jump_context) RefreshJumpContext();
+        SyncPulseSelection();
+        std::vector<std::wstring> paths;
+        if (index >= 0) {
+            const auto found = std::find_if(chrome_.pulse_selection.begin(), chrome_.pulse_selection.end(),
+                [&](const auto& item) { return item.enabled && SamePickerPath(item.path, requested); });
+            if (found == chrome_.pulse_selection.end()) return;
+            paths.push_back(found->path);
+        } else for (const auto& item : chrome_.pulse_selection) {
+            if (!item.enabled) continue;
+            paths.push_back(item.path);
+            if (!BasketEnabled()) break;
+        }
+        if (!CanUseIncoming(paths)) return;
+        user_interacted_ = true;
+        ValidateNames(std::move(paths), false, false, true, BasketEnabled());
+    }
+
+    void ShowPulseSelectionMenu() {
+        if (!IncomingFilesReady()) return;
+        SyncPulseSelection();
+        const auto snapshot = chrome_.pulse_selection;
+        std::vector<FluentMenuItem> items;
+        for (size_t i = 0; i < snapshot.size(); ++i) {
+            FluentMenuItem item; item.command = static_cast<int>(i) + 1;
+            item.text = snapshot[i].text; item.detail = snapshot[i].path; item.enabled = snapshot[i].enabled;
+            items.push_back(std::move(item));
+        }
+        menu_.SetTheme(dark_, accent_);
+        const int chosen = TrackPickerDropdown(ScreenRect(chrome_layout_.pulse_more), std::move(items));
+        if (chosen <= 0 || static_cast<size_t>(chosen) > snapshot.size()) return;
+        // A live source update during the menu must not retarget the same index.
+        SyncPulseSelection();
+        for (size_t i = 0; i < chrome_.pulse_selection.size(); ++i)
+            if (SamePickerPath(chrome_.pulse_selection[i].path, snapshot[chosen - 1].path)) { UsePulseSelection(static_cast<int>(i)); break; }
+    }
+
     PickerPlacesDrop ResolveFilesystemDrop(const std::vector<std::wstring>& sources, POINT point,
-                                          DWORD keys, DWORD allowed, DWORD preferred = 0) {
-        if (done_ || waiting_ || validating_ || operating_ || queued_drop_ || sources.empty() ||
+                                          DWORD keys, DWORD allowed, DWORD preferred = 0, bool explicit_transfer = false) {
+        if (InArchive() || !IncomingFilesReady() || sources.empty() ||
             std::any_of(sources.begin(), sources.end(), [](const auto& source) {
                 return !IsPickerDiskPath(source);
             })) return {};
@@ -1788,7 +2264,7 @@ private:
             const auto& entry = entries_[hit.main.index];
             if (entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive)
                 target.destination = entry.path;
-        } else if (hit.chrome == kPickNone &&
+        } else if ((explicit_transfer || (mode_ != PickerMode::File && mode_ != PickerMode::Image)) && hit.chrome == kPickNone &&
                    (hit.main.region == HitTestResult::Pane || hit.main.region == HitTestResult::None) &&
                    ContainsRect(renderer_.PaneListRect(vm_.pane, PaneBounds()),
                                 static_cast<float>(point.x), static_cast<float>(point.y)) && current_verified_) {
@@ -1803,7 +2279,11 @@ private:
         }
         if (target.destination.empty() || !IsPickerDiskPath(target.destination) ||
             DropIntoOwnFolder(sources, target.destination)) return {};
-        target.effect = ComputeDropEffect(keys, sources.front(), target.destination,
+        // A folder row is the explicit copy/move destination. Copy unless Shift
+        // requests a move, independent of whether source and target share a drive.
+        const DWORD transfer_keys = (keys & MK_SHIFT) ? keys : keys | MK_CONTROL;
+        if (!(allowed & ((keys & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY))) return {};
+        target.effect = ComputeDropEffect(transfer_keys, sources.front(), target.destination,
                                          allowed & (DROPEFFECT_COPY | DROPEFFECT_MOVE), preferred);
         if (target.effect == DROPEFFECT_MOVE && std::all_of(sources.begin(), sources.end(),
             [&](const auto& source) { return SamePickerPath(PickerParent(source), target.destination); })) return {};
@@ -1811,6 +2291,7 @@ private:
     }
 
     void ShowFilesystemDrop(const PickerPlacesDrop& target, POINT point) {
+        if (InArchive()) return;
         const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
         vm_.sidebar_drop_index = target.effect != DROPEFFECT_NONE && hit.main.region == HitTestResult::SidebarItem
             ? hit.main.index : -1;
@@ -1827,15 +2308,101 @@ private:
     void RegisterPickerDrop() {
         DropTargetCallbacks callbacks;
         callbacks.drag_over = [this](const auto& sources, POINT point, DWORD keys, DWORD allowed, DWORD preferred) {
-            const auto target = ResolveFilesystemDrop(sources, point, keys, allowed, preferred);
+            if (keys & MK_RBUTTON) right_file_drag_ = true;
+            else if (keys & MK_LBUTTON) right_file_drag_ = false;
+            if (!InArchive() && (mode_ == PickerMode::File || mode_ == PickerMode::Image) &&
+                shake_detector_.Feed(point.x, scale_, GetTickCount64())) {
+                tray_drop_armed_ = true;
+                tray_collapsed_ = false;
+                SyncVm();
+            }
+            if (DropOnListBlank(point) && CanUseIncoming(sources) && PickerUseFilesEffect(allowed)) {
+                incoming_dropzone_sources_ = sources;
+                const DWORD effect = PickerUseFilesEffect(allowed);
+                vm_.sidebar_drop_index = -1;
+                vm_.drag_badge = l10n::Get(l10n::StringId::PickerUseIncomingFiles);
+                vm_.drag_badge_x = static_cast<float>(point.x); vm_.drag_badge_y = static_cast<float>(point.y);
+                vm_.drag_badge_move = false;
+                SetDragVisualFeedback(vm_.drag_badge); Invalidate();
+                return effect;
+            }
+            incoming_dropzone_sources_.clear();
+            const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
+            std::vector<picker_places::StarredItem> tray_items;
+            for (const auto& s : sources) tray_items.push_back({s, 1, {}});
+            const auto place_target = ResolvePickerPlacesDrop(vm_, pulse_places_, hit.main, tray_items, keys);
+            if (place_target.tray) {
+                const DWORD effect = place_target.effect != DROPEFFECT_NONE
+                    ? ((allowed & DROPEFFECT_LINK) ? DROPEFFECT_LINK : (allowed & DROPEFFECT_COPY) ? DROPEFFECT_COPY : DROPEFFECT_NONE)
+                    : DROPEFFECT_NONE;
+                vm_.sidebar_drop_index = effect != DROPEFFECT_NONE && hit.main.region == HitTestResult::SidebarItem ? hit.main.index : -1;
+                vm_.drag_badge = effect != DROPEFFECT_NONE ? l10n::Get(l10n::StringId::PickerTrayDropBadge) : std::wstring();
+                vm_.drag_badge_x = static_cast<float>(point.x); vm_.drag_badge_y = static_cast<float>(point.y);
+                vm_.drag_badge_move = false;
+                SetDragVisualFeedback(vm_.drag_badge); Invalidate();
+                return effect;
+            }
+            const auto target = ResolveFilesystemDrop(sources, point, keys, allowed, preferred, right_file_drag_);
             ShowFilesystemDrop(target, point);
             return target.effect;
         };
-        callbacks.drag_leave = [this] { vm_.drag_badge.clear(); SetDragVisualFeedback({}); vm_.sidebar_drop_index = -1; Invalidate(); };
+        callbacks.drag_leave = [this] {
+            right_file_drag_ = false;
+            incoming_dropzone_sources_.clear();
+            tray_drop_armed_ = false;
+            shake_detector_.Reset();
+            vm_.drag_badge.clear(); SetDragVisualFeedback({}); vm_.sidebar_drop_index = -1; Invalidate();
+        };
         callbacks.drop = [this](const auto& sources, POINT point, DWORD keys, DWORD allowed, DWORD preferred) {
-            const auto target = ResolveFilesystemDrop(sources, point, keys, allowed, preferred);
+            const bool right = std::exchange(right_file_drag_, false) || (keys & MK_RBUTTON);
+            const bool open = mode_ == PickerMode::File || mode_ == PickerMode::Image;
+            incoming_dropzone_sources_.clear();
+            const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
+            std::vector<picker_places::StarredItem> tray_items;
+            for (const auto& s : sources) tray_items.push_back({s, 1, {}});
+            const auto place_target = ResolvePickerPlacesDrop(vm_, pulse_places_, hit.main, tray_items, keys);
+            tray_drop_armed_ = false;
+            shake_detector_.Reset();
+            auto target = ResolveFilesystemDrop(sources, point, keys, allowed, preferred, right);
+            bool use = open && DropOnListBlank(point) && CanUseIncoming(sources) && PickerUseFilesEffect(allowed);
             vm_.drag_badge.clear(); vm_.sidebar_drop_index = -1; Invalidate();
             SetDragVisualFeedback({});
+            if (!right && place_target.tray) {
+                if (place_target.effect == DROPEFFECT_NONE) {
+                    chrome_.notice = l10n::Get(l10n::StringId::PickerTrayStageUnavailable);
+                    Invalidate();
+                    return DWORD{DROPEFFECT_NONE};
+                }
+                const bool okay = StagePathsToTray(sources);
+                if (!okay) chrome_.notice = l10n::Get(l10n::StringId::PickerTrayStageUnavailable);
+                Invalidate();
+                return okay ? ((allowed & DROPEFFECT_LINK) ? DWORD{DROPEFFECT_LINK} : DWORD{DROPEFFECT_COPY}) : DWORD{DROPEFFECT_NONE};
+            }
+            if (right && open && (use || target.effect != DROPEFFECT_NONE)) {
+                const auto generation = generation_;
+                std::vector<FluentMenuItem> items;
+                FluentMenuItem item; item.command = 1; item.text = l10n::Get(l10n::StringId::PickerUseIncomingFiles);
+                item.enabled = CanUseIncoming(sources) && PickerUseFilesEffect(allowed); items.push_back(item);
+                const auto copy = ResolveFilesystemDrop(sources, point, MK_CONTROL, allowed, preferred, true);
+                const auto move = ResolveFilesystemDrop(sources, point, MK_SHIFT, allowed, preferred, true);
+                item.command = 2; item.text = l10n::Get(l10n::StringId::DropCopy) + PickerLeafName(copy.destination);
+                item.enabled = copy.effect == DROPEFFECT_COPY; items.push_back(item);
+                item.command = 3; item.text = l10n::Get(l10n::StringId::DropMove) + PickerLeafName(move.destination);
+                item.enabled = move.effect == DROPEFFECT_MOVE; items.push_back(item);
+                item.command = 4; item.text = l10n::Get(l10n::StringId::Cancel); item.enabled = true; items.push_back(item);
+                menu_.SetTheme(dark_, accent_);
+                const int chosen = TrackAt(point, std::move(items));
+                if (!IncomingFilesReady() || generation != generation_ || chosen <= 0 || chosen == 4) return DWORD{DROPEFFECT_NONE};
+                use = chosen == 1;
+                if (chosen == 2) target = copy;
+                if (chosen == 3) target = move;
+            }
+            if (use) {
+                if (!CanUseIncoming(sources) || !PickerUseFilesEffect(allowed)) return DWORD{DROPEFFECT_NONE};
+                queued_use_files_ = sources;
+                if (!PostMessageW(hwnd_, kPickerDropMessage, 0, 0)) { queued_use_files_.clear(); return DWORD{DROPEFFECT_NONE}; }
+                return PickerUseFilesEffect(allowed);
+            }
             if (target.effect == DROPEFFECT_NONE) return DWORD{DROPEFFECT_NONE};
             ops::OpRequest request;
             request.type = target.effect == DROPEFFECT_MOVE ? ops::OpType::Move : ops::OpType::Copy;
@@ -1852,6 +2419,13 @@ private:
     }
 
     void BeginPlacesDrag(int row, POINT point) {
+        if (InArchive()) {
+            focus_ = kPickList;
+            EndAddressEdit(false);
+            SetFocus(hwnd_);
+            Select(row, KeyDown(VK_SHIFT), KeyDown(VK_CONTROL));
+            return;
+        }
         if (row < 0 || row >= static_cast<int>(entries_.size())) return;
         CancelPlacesDrag();
         focus_ = kPickList;
@@ -1903,14 +2477,21 @@ private:
             const DWORD effect = DoFileDragDrop(paths, DROPEFFECT_COPY | DROPEFFECT_MOVE, {}, current_, dark_);
             ole_drag_out_ = false;
             if (!done_) {
-                if (queued_drop_) PostMessageW(hwnd_, kPickerDropMessage, 0, 0);
+                if (queued_drop_ || !queued_use_files_.empty()) PostMessageW(hwnd_, kPickerDropMessage, 0, 0);
                 else if (effect != DROPEFFECT_NONE) Reload();
             }
             return;
         }
+        if ((mode_ == PickerMode::File || mode_ == PickerMode::Image) &&
+            shake_detector_.Feed(point.x, scale_, GetTickCount64())) {
+            tray_drop_armed_ = true;
+            tray_collapsed_ = false;
+            SyncVm();
+        }
         const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
         drag.target = ResolvePickerPlacesDrop(vm_, pulse_places_, hit.main, drag.items, keys);
-        if (!drag.target.favorite) {
+        if (drag.target.pin && spec_.host_app_name.empty()) drag.target = {};
+        if (!drag.target.favorite && !drag.target.tray && !drag.target.pin) {
             std::vector<std::wstring> sources;
             for (const auto& item : drag.items) sources.push_back(item.path);
             drag.target = ResolveFilesystemDrop(sources, point, keys, DROPEFFECT_COPY | DROPEFFECT_MOVE);
@@ -1918,7 +2499,9 @@ private:
             drag.target.effect = DROPEFFECT_NONE;
         }
         vm_.sidebar_drop_index = drag.target.effect != DROPEFFECT_NONE && hit.main.region == HitTestResult::SidebarItem ? hit.main.index : -1;
-        vm_.drag_badge = drag.target.favorite && drag.target.effect != DROPEFFECT_NONE ? std::wstring(l10n::Get(l10n::StringId::FavoritesBarDropAdd)) :
+        vm_.drag_badge = drag.target.pin && drag.target.effect != DROPEFFECT_NONE ? l10n::Get(l10n::StringId::PickerPinToApp) :
+            drag.target.tray && drag.target.effect != DROPEFFECT_NONE ? l10n::Get(l10n::StringId::PickerTrayDropBadge) :
+            drag.target.favorite && drag.target.effect != DROPEFFECT_NONE ? std::wstring(l10n::Get(l10n::StringId::FavoritesBarDropAdd)) :
             drag.target.effect != DROPEFFECT_NONE ? std::wstring(l10n::Get(drag.target.effect == DROPEFFECT_MOVE ?
                 l10n::StringId::DropMove : l10n::StringId::DropCopy)) + PickerLeafName(drag.target.destination) : std::wstring();
         vm_.drag_badge_x = static_cast<float>(point.x);
@@ -1930,10 +2513,26 @@ private:
         Invalidate();
     }
 
+    bool StagePathsToTray(const std::vector<std::wstring>& paths) {
+        if (operating_ || done_ || paths.empty()) return false;
+        operating_ = true;
+        const bool okay = RunPickerStageTrayRequest(hwnd_, pulse_places_, paths);
+        operating_ = false;
+        if (done_) return false;
+        if (okay) {
+            if (spec_.poll_jump_context) RefreshJumpContext();
+            RefreshSharedPlaces();
+            Relayout();
+        }
+        return okay;
+    }
+
     void FinishPlacesDrag(POINT point, DWORD keys) {
         if (places_drag_.active) MovePlacesDrag(point, keys | MK_LBUTTON);
         auto drag = std::move(places_drag_);
         places_drag_ = {};
+        tray_drop_armed_ = false;
+        shake_detector_.Reset();
         vm_.drag_badge.clear();
         SetDragVisualFeedback({});
         vm_.sidebar_drop_index = -1;
@@ -1941,7 +2540,17 @@ private:
         if (drag.pending) {
             if (drag.deferred_click) Select(drag.row, drag.shift, drag.ctrl);
         } else if (drag.active && drag.target.effect != DROPEFFECT_NONE) {
-            if (drag.target.favorite) {
+            if (drag.target.pin) {
+                for (const auto& item : drag.items)
+                    if (item.kind == 2 && !IsPathPinnedToApp(item.path)) TogglePinPathToApp(item.path);
+                Relayout();
+            } else if (drag.target.tray) {
+                std::vector<std::wstring> paths;
+                for (const auto& item : drag.items) paths.push_back(item.path);
+                const bool okay = StagePathsToTray(paths);
+                if (done_) return;
+                chrome_.notice = okay ? std::wstring() : l10n::Get(l10n::StringId::PickerTrayStageUnavailable);
+            } else if (drag.target.favorite) {
                 operating_ = true;
                 const bool okay = RunPickerFavoriteRequest(hwnd_, pulse_places_, drag.items, drag.target.group, spec_.add_shared_favorites);
                 operating_ = false;
@@ -1955,6 +2564,8 @@ private:
                 request.dest_dir = drag.target.destination;
                 ExecuteOperation(std::move(request));
             }
+        } else if (drag.active && drag.target.tray) {
+            chrome_.notice = l10n::Get(l10n::StringId::PickerTrayStageUnavailable);
         } else if (drag.active && drag.target.favorite) {
             chrome_.notice = l10n::Get(l10n::StringId::PickerFavoritesUnavailable);
         }
@@ -2009,90 +2620,555 @@ private:
             if (!duplicate) places_.push_back(std::move(place));
         }
         places_.insert(places_.end(), spec_.bottom_places.begin(), spec_.bottom_places.end());
+        standard_places_ = StandardPlaces();
         fallback_ = known_folders::CurrentPath(mode_ == PickerMode::Image ? FOLDERID_Pictures : FOLDERID_Desktop);
     }
+    std::wstring TrayToken(uint64_t id) const {
+        return std::wstring(kPickerTrayPrefix) + std::to_wstring(spec_.pulse_tray_publisher_pid) + L":" +
+            std::to_wstring(spec_.pulse_tray_shelf_id) + L":" + std::to_wstring(spec_.pulse_tray_revision) + L":" + std::to_wstring(id);
+    }
+
+    bool TrayCompatible(const picker_places::TrayItem& item) const {
+        return item.exists && !item.inflight && !item.is_directory && WithinLegacyRoot(item.path) &&
+            PickerCanUseIncomingFiles({item.path}, mode_, options_, false);
+    }
+
+    bool TrayPathSelected(const std::wstring& path) const {
+        for (const auto& item : basket_) if (SamePickerPath(item.path, path)) return true;
+        for (const int index : selected_set_)
+            if (index >= 0 && static_cast<size_t>(index) < entries_.size() && SamePickerPath(entries_[index].path, path)) return true;
+        return false;
+    }
+
+    bool TrayConsumeAvailable() const {
+        return mode_ != PickerMode::Save && mode_ != PickerMode::Folder &&
+            spec_.enable_tray_consume && spec_.pulse_tray_available && spec_.pulse_tray_source &&
+            spec_.pulse_tray_endpoint && spec_.pulse_tray_publisher_pid &&
+            spec_.pulse_tray_endpoint_pid == spec_.pulse_tray_publisher_pid;
+    }
+
+    void RememberTrayPickup(const picker_places::TrayItem& item) {
+        if (!TrayConsumeAvailable()) return;
+        std::erase_if(tray_pickups_, [&](const auto& picked) { return SamePickerPath(picked.item.path, item.path); });
+        picker_places::Snapshot endpoint;
+        endpoint.endpoint = spec_.pulse_tray_endpoint; endpoint.endpoint_pid = spec_.pulse_tray_endpoint_pid;
+        endpoint.tray_source = spec_.pulse_tray_source; endpoint.tray_publisher_pid = spec_.pulse_tray_publisher_pid;
+        endpoint.tray_shelf_id = spec_.pulse_tray_shelf_id;
+        endpoint.tray_available = endpoint.shared_available = true;
+        tray_pickups_.push_back({std::move(endpoint), item});
+    }
+
+    bool HasSelectedTrayItem() const {
+        if (!spec_.pulse_tray_available || spec_.pulse_tray_items.empty()) return false;
+        for (const auto& item : spec_.pulse_tray_items)
+            if (TrayPathSelected(item.path)) return true;
+        return false;
+    }
+
+    bool HasCompatibleTrayItem() const {
+        if (!spec_.pulse_tray_available) return false;
+        for (const auto& item : spec_.pulse_tray_items)
+            if (TrayCompatible(item)) return true;
+        return false;
+    }
+
+    void ToggleSaveToTray() {
+        if (mode_ != PickerMode::Save || done_ || operating_) return;
+        if (saving_to_tray_) {
+            saving_to_tray_ = false;
+            if (!save_before_tray_dir_.empty() && !SamePickerPath(save_before_tray_dir_, current_)) {
+                Navigate(save_before_tray_dir_, true);
+            } else {
+                Relayout(); Invalidate();
+            }
+            return;
+        }
+        save_before_tray_dir_ = current_;
+        const std::wstring shelf_dir = picker_places::DefaultPickerShelfDirPath();
+        if (shelf_dir.empty()) return;
+        operating_ = true;
+        const bool ok = RunPickerPlacesRequest(hwnd_, [shelf_dir] {
+            std::error_code ec;
+            std::filesystem::create_directories(shelf_dir, ec);
+            return !ec || std::filesystem::is_directory(shelf_dir, ec);
+        });
+        operating_ = false;
+        if (done_ || !ok) return;
+        saving_to_tray_ = true;
+        Navigate(shelf_dir, true);
+    }
+
+    bool IsPathPinnedToApp(const std::wstring& path) const {
+        if (path.empty()) return false;
+        return std::any_of(app_pinned_places_.begin(), app_pinned_places_.end(),
+            [&](const auto& p) { return SamePickerPath(p, path); });
+    }
+
+    void TogglePinPathToApp(const std::wstring& path) {
+        if (path.empty() || !IsPickerDiskPath(path)) return;
+        const auto it = std::find_if(app_pinned_places_.begin(), app_pinned_places_.end(),
+            [&](const auto& p) { return SamePickerPath(p, path); });
+        if (it != app_pinned_places_.end()) {
+            app_pinned_places_.erase(it);
+        } else {
+            app_pinned_places_.insert(app_pinned_places_.begin(), path);
+            if (app_pinned_places_.size() > picker_layout::kMaxAppPinnedPlaces)
+                app_pinned_places_.resize(picker_layout::kMaxAppPinnedPlaces);
+        }
+        if (persist_layout_) {
+            try { picker_layout::SaveAppPinned(app_pinned_places_); } catch (...) { }
+        }
+        Relayout(); Invalidate();
+    }
+
+    void StartGitRootProbe(const std::wstring& dir) {
+        if (mode_ != PickerMode::Save) return;
+        if (SamePickerPath(dir, git_repo_dir_)) return;
+        git_repo_dir_ = dir;
+        git_repo_root_.clear();
+        const uint64_t gen = ++git_repo_generation_;
+        if (dir.empty() || !IsPickerDiskPath(dir) || !hwnd_) return;
+        const HWND target = hwnd_;
+        try {
+            std::thread([target, dir, gen] {
+                std::wstring found;
+                try {
+                    std::filesystem::path cur(dir);
+                    for (int depth = 0; depth < 24 && !cur.empty(); ++depth) {
+                        std::error_code ec;
+                        if (std::filesystem::exists(cur / L".git", ec)) {
+                            found = cur.wstring();
+                            break;
+                        }
+                        const auto parent = cur.parent_path();
+                        if (parent == cur) break;
+                        cur = parent;
+                    }
+                } catch (...) { }
+                auto* payload = new (std::nothrow) std::wstring(std::move(found));
+                if (!payload || !PostMessageW(target, kGitRootMessage, static_cast<WPARAM>(gen), reinterpret_cast<LPARAM>(payload))) {
+                    delete payload;
+                }
+            }).detach();
+        } catch (...) { }
+    }
+
+    void AppendPickerTray() {
+        tray_display_items_.clear();
+        if (mode_ == PickerMode::Save) {
+            SidebarGroup group;
+            group.id = kGroupPickerTray;
+            group.header = l10n::Get(l10n::StringId::PickerTrayTitle);
+            const uint64_t total = spec_.pulse_tray_total_count ? spec_.pulse_tray_total_count : spec_.pulse_tray_items.size();
+            if (total > 0) group.header += L"  " + std::to_wstring(total);
+            group.icon_glyph = L"\xE7B8";
+            group.collapsed = tray_collapsed_;
+            SidebarItem save_row;
+            save_row.path = TrayToken(0) + L":save_to_tray";
+            save_row.label = l10n::Get(l10n::StringId::PickerSaveToTray);
+            save_row.icon_glyph = L"\xE7B8";
+            save_row.accent_label = true;
+            save_row.selected_override = saving_to_tray_;
+            group.items.push_back(std::move(save_row));
+            vm_.sidebar.push_back(std::move(group));
+            return;
+        }
+        if (mode_ != PickerMode::File && mode_ != PickerMode::Image) return;
+        const bool has_items = spec_.pulse_tray_available && !spec_.pulse_tray_items.empty();
+        const bool has_overflow = !spec_.pulse_tray_available && spec_.pulse_tray_total_count > 0;
+        if (!has_items && !has_overflow && !tray_drop_armed_) return;
+        SidebarGroup group; group.id = kGroupPickerTray; group.header = l10n::Get(l10n::StringId::PickerTrayTitle);
+        if (!spec_.pulse_tray_shelf_name.empty()) group.header += L" · " + spec_.pulse_tray_shelf_name;
+        group.icon_glyph = L"\xE7B8"; group.collapsed = tray_collapsed_ && !tray_drop_armed_;
+        group.drop_highlight = tray_drop_armed_;
+        if (tray_drop_armed_) {
+            SidebarItem slot;
+            slot.path = TrayToken(0) + L":drop";
+            slot.label = l10n::Get(l10n::StringId::PickerTrayDropPrompt);
+            slot.icon_glyph = L"\xE7B8";
+            slot.drop_slot = true;
+            slot.accent_label = true;
+            group.items.push_back(std::move(slot));
+        }
+        if (!spec_.pulse_tray_available) {
+            if (has_overflow) {
+                SidebarItem row; row.label = l10n::Get(l10n::StringId::PickerTrayOverflow); row.path = TrayToken(0) + L":unavailable";
+                row.icon_glyph = L"\xE7BA"; group.items.push_back(std::move(row));
+            }
+            vm_.sidebar.push_back(std::move(group)); return;
+        }
+        const auto identity = TrayToken(0);
+        if (tray_page_identity_ != identity) { tray_page_identity_ = identity; tray_page_ = 0; }
+        std::vector<const picker_places::TrayItem*> ordered;
+        for (const auto& item : spec_.pulse_tray_items) if (TrayCompatible(item)) ordered.push_back(&item);
+        const size_t compatible = ordered.size();
+        for (const auto& item : spec_.pulse_tray_items) if (!TrayCompatible(item)) ordered.push_back(&item);
+        constexpr size_t page_size = 8;
+        const size_t page_count = std::max<size_t>(1, (ordered.size() + page_size - 1) / page_size);
+        tray_page_ = std::min(tray_page_, page_count - 1);
+        const size_t first = tray_expanded_ ? tray_page_ * page_size : 0;
+        const size_t shown = tray_expanded_ ? std::min(page_size, ordered.size() - first) : std::min<size_t>(5, compatible);
+        for (size_t i = first; i < first + shown; ++i) {
+            const auto& item = *ordered[i]; const bool enabled = TrayCompatible(item);
+            SidebarItem row; row.path = TrayToken(item.id);
+            row.label = item.label.empty() ? PickerLeafName(item.path) : item.label;
+            row.icon_glyph = item.is_directory ? L"\xE8B7" : L"\xE8A5";
+            row.icon_thumbnail_checkable = BasketEnabled() && enabled;
+            row.icon_thumbnail_checked = TrayPathSelected(item.path);
+            row.icon_thumbnail_check_enabled = enabled;
+            row.detail = item.source_label.empty() ? item.domain : item.source_label;
+            std::wstring extension(preview::DiagnosticExtension(item.path));
+            CharLowerBuffW(extension.data(), static_cast<DWORD>(extension.size()));
+            if (!item.is_directory && item.exists && preview::IsImageExtension(extension)) {
+                row.icon_path = item.path; row.icon_thumbnail = true;
+                row.icon_thumbnail_attrs = item.attrs; row.icon_thumbnail_size = item.size;
+            }
+            if (!enabled) {
+                row.badge = l10n::Get(!item.exists ? l10n::StringId::ShelfMissingTag : item.inflight ? l10n::StringId::PickerTrayBusy : l10n::StringId::PickerTrayIncompatible);
+                row.icon_color = HexColor(dark_ ? 0x888888 : 0x777777);
+                row.badge_color = row.icon_color;
+            }
+            tray_display_items_.push_back({row.path, item}); group.items.push_back(std::move(row));
+        }
+        if (!tray_expanded_ && shown < ordered.size()) {
+            SidebarItem more; more.path = TrayToken(0) + L":more"; more.icon_glyph = L"\xE70D";
+            const size_t hidden_count = ordered.size() - shown;
+            if (shown == compatible && !spec_.host_app_name.empty()) {
+                std::wstring text = l10n::Get(l10n::StringId::PickerTrayOthersUnsupported);
+                if (const auto pos = text.find(L"{count}"); pos != std::wstring::npos) text.replace(pos, 7, std::to_wstring(hidden_count));
+                if (const auto pos = text.find(L"{app}"); pos != std::wstring::npos) text.replace(pos, 5, spec_.host_app_name);
+                more.label = std::move(text);
+            } else {
+                more.label = FillPickerText(l10n::Get(l10n::StringId::PickerTrayOthers), std::to_wstring(hidden_count));
+            }
+            group.items.push_back(std::move(more));
+        }
+        if (tray_expanded_ && page_count > 1) {
+            const auto add_page = [&](bool previous) {
+                SidebarItem row;
+                row.path = identity + (previous ? L":prev:" : L":next:") + std::to_wstring(tray_page_);
+                row.icon_glyph = previous ? L"\xE70E" : L"\xE70D";
+                row.label = FillPickerText(l10n::Get(previous ? l10n::StringId::PickerTrayPreviousPage : l10n::StringId::PickerTrayNextPage),
+                    std::to_wstring(tray_page_ + 1) + L" / " + std::to_wstring(page_count));
+                group.items.push_back(std::move(row));
+            };
+            if (tray_page_ > 0) add_page(true);
+            if (tray_page_ + 1 < page_count) add_page(false);
+        }
+        if (tray_expanded_) {
+            SidebarItem collapse;
+            collapse.path = TrayToken(0) + L":collapse";
+            collapse.icon_glyph = L"\xE70E";
+            collapse.label = l10n::Get(l10n::StringId::PickerTrayCollapse);
+            group.items.push_back(std::move(collapse));
+        }
+        if (BasketEnabled() && compatible) {
+            SidebarItem all; all.path = TrayToken(0) + L":all"; all.icon_glyph = L"\xE710";
+            all.label = l10n::Get(l10n::StringId::PickerAddAllSelection); group.items.push_back(std::move(all));
+        }
+        vm_.sidebar.push_back(std::move(group));
+    }
+
+    void UsePickerTray(const std::wstring& token) {
+        if (!token.starts_with(kPickerTrayPrefix)) return;
+        if (mode_ == PickerMode::Save && token.ends_with(L":save_to_tray")) {
+            ToggleSaveToTray();
+            return;
+        }
+        if (!IncomingFilesReady()) return;
+        const auto old_prefix = TrayToken(0);
+        if (token == old_prefix + L":drop") return;
+        if (token == old_prefix + L":consume" && TrayConsumeAvailable()) {
+            picker_flags_ ^= picker_layout::kFlagRemoveTrayAfterOpen;
+            Relayout(); Invalidate(); return;
+        }
+        if (token == old_prefix + L":collapse") {
+            tray_expanded_ = false;
+            tray_page_ = 0;
+            Relayout(); Invalidate(); return;
+        }
+        const bool more = token == old_prefix + L":more";
+        const bool previous = token == old_prefix + L":prev:" + std::to_wstring(tray_page_);
+        const bool next = token == old_prefix + L":next:" + std::to_wstring(tray_page_);
+        if (more || previous || next) {
+            if (spec_.poll_jump_context) RefreshJumpContext();
+            if (!spec_.pulse_tray_available || old_prefix != TrayToken(0)) return;
+            tray_expanded_ = true;
+            if (more) tray_page_ = 0;
+            else if (previous && tray_page_ > 0) --tray_page_;
+            else if (next) ++tray_page_;
+            Relayout(); Invalidate(); return;
+        }
+        const bool all = token == old_prefix + L":all";
+        const auto shown = tray_display_items_;
+        auto found = std::find_if(shown.begin(), shown.end(), [&](const auto& row) { return row.first == token; });
+        if (!all && found == shown.end()) return;
+        const auto selected_item = all ? picker_places::TrayItem{} : found->second;
+        if (spec_.poll_jump_context) RefreshJumpContext();
+        if (!spec_.pulse_tray_available || old_prefix != TrayToken(0)) return;
+        std::vector<std::wstring> paths;
+        std::vector<picker_places::SelectedItem> metadata;
+        std::vector<picker_places::TrayItem> pickups;
+        for (const auto& item : spec_.pulse_tray_items) {
+            if (!all && (item.id != selected_item.id || item.path != selected_item.path)) continue;
+            if (!TrayCompatible(item)) continue;
+            if (!all && BasketEnabled() && TrayPathSelected(item.path)) {
+                std::erase_if(tray_pickups_, [&](const auto& picked) { return SamePickerPath(picked.item.path, item.path); });
+                std::erase_if(basket_, [&](const auto& picked) { return SamePickerPath(picked.path, item.path); });
+                std::erase_if(selected_set_, [&](int index) { return index >= 0 && static_cast<size_t>(index) < entries_.size() && SamePickerPath(entries_[index].path, item.path); });
+                filename_from_selection_ = true; SyncSelectedNames(); UpdateChosen(); Relayout(); Invalidate(); return;
+            }
+            if (all && TrayPathSelected(item.path)) continue;
+            if (std::any_of(paths.begin(), paths.end(), [&](const auto& path) { return SamePickerPath(path, item.path); })) continue;
+            pickups.push_back(item);
+            paths.push_back(item.path); metadata.push_back({item.path, false, item.size});
+            if (!BasketEnabled()) break;
+        }
+        if (paths.empty() || !IncomingFilesReady()) return;
+        size_t selected_files = basket_.size();
+        for (const int index : selected_set_) if (index >= 0 && static_cast<size_t>(index) < entries_.size() &&
+            (entries_[index].kind == PickerEntryKind::File || entries_[index].kind == PickerEntryKind::Image)) ++selected_files;
+        if (paths.size() + selected_files > PULSE_PICKER_UI_V2_MAX_PATHS) {
+            chrome_.notice = l10n::Get(l10n::StringId::PickerSelectionLimit);
+            Invalidate(); return;
+        }
+        user_interacted_ = true;
+        for (const auto& item : pickups) RememberTrayPickup(item);
+        ValidateNames(std::move(paths), false, false, true, BasketEnabled(), &metadata);
+    }
+
+    // 「{程序} 常用」: pinned, then most used, then the last place; no visit counts.
+    std::vector<PickerCommonRow> CommonRows() const {
+        PickerCommonInput input;
+        if (!spec_.host_app_name.empty()) input.pinned = app_pinned_places_;
+        for (const auto& place : spec_.app_recent_places) input.history.push_back({place.path, place.label});
+        input.last_location = spec_.last_location.path;
+        for (const auto& entry : pulse_places_.folders) {
+            if (entry.open || entry.pinned) continue;
+            picker_user_storage::Path parsed;
+            if (picker_user_storage::Parse(entry.path, parsed)) input.pulse_recent.push_back({parsed.value, entry.label});
+        }
+        for (const auto& item : pulse_places_.starred_items) if (item.kind == 2) input.favorites.push_back(item.path);
+        input.forgotten = common_forgotten_;
+        if (!common_forget_.path.empty()) input.forgotten.push_back(common_forget_.path);
+        // A same-name hint names the parent the way the sidebar does (桌面, not Desktop).
+        const auto parent_label = [this](const std::wstring& parent) {
+            for (const auto& place : standard_places_) if (SamePickerPath(place.path, parent)) return place.label;
+            return PickerLeafName(parent);
+        };
+        return BuildPickerCommonRows(input, [](const std::wstring& path) { return PickerLeafName(path); }, parent_label);
+    }
+
+    bool IsRemovableCommon(const std::wstring& path) const {
+        return std::any_of(common_rows_.begin(), common_rows_.end(),
+            [&](const auto& row) { return !row.pinned && !row.from_pulse && SamePickerPath(row.path, path); });
+    }
+
+    static std::wstring HiddenGroupToken(int id) { return kHiddenGroupPrefix + std::to_wstring(id); }
+    bool GroupHidden(int id) const {
+        const auto token = HiddenGroupToken(id);
+        return std::find(layout_settings_.hidden_places.begin(), layout_settings_.hidden_places.end(), token) !=
+            layout_settings_.hidden_places.end();
+    }
+    // The hidden places the place menu lists (hidden groups have their own menu and notice).
+    std::vector<std::wstring> HiddenPlacesOnly() const {
+        std::vector<std::wstring> out;
+        for (const auto& path : layout_settings_.hidden_places) if (!path.starts_with(kHiddenGroupPrefix)) out.push_back(path);
+        return out;
+    }
+
+    // Four groups in the order a choice is likely: this program's places, the staging
+    // tray, Pulse's favorites, This PC. A folder shows once among the groups that
+    // change; This PC is a fixed map and always complete.
     void BuildSidebar() {
         vm_.sidebar.clear();
         if (navigation_root_.Active()) { navigation_root_.Append(vm_.sidebar); return; }
-        auto add_context = [&](int id, const std::wstring& label, bool opened, bool skip_app_recent, size_t max_items) {
-            SidebarGroup group; group.id = id; group.header = label; group.collapsed = collapsed_[id - 1];
-            for (const auto& entry : pulse_places_.folders) {
-                if (max_items && group.items.size() >= max_items) break;
-                if (entry.open != opened || (!opened && entry.pinned)) continue;
-                picker_user_storage::Path parsed;
-                if (!picker_user_storage::Parse(entry.path, parsed)) continue;
-                if (skip_app_recent && std::any_of(spec_.app_recent_places.begin(), spec_.app_recent_places.end(),
-                    [&](const auto& place) { return SamePickerPath(place.path, parsed.value); })) continue;
-                group.items.push_back(PlaceItem({entry.label.empty() ? PickerLeafName(parsed.value) : entry.label, parsed.value, L"\xE8B7"}));
+        common_rows_ = CommonRows();
+        {
+            SidebarGroup common; common.id = kGroupAppCommon; common.collapsed = collapsed_[CollapseSlot(kGroupAppCommon)];
+            common.header = spec_.host_app_name.empty() ? l10n::Get(l10n::StringId::Recent)
+                : FillPickerText(l10n::Get(l10n::StringId::PickerAppCommonHeader), spec_.host_app_name);
+            common.rail_header = l10n::Get(l10n::StringId::PickerRailCommon);
+            if (!spec_.host_app_name.empty()) {
+                common.add_action = SidebarAddAction::PinToApp;
+                common.pin_active = IsPathPinnedToApp(current_);
             }
-            if (!group.items.empty()) vm_.sidebar.push_back(std::move(group));
-        };
-        // Prioritize recent folders at the top of the sidebar, capped so Favorites,
-        // Quick Access, Network, and This PC stay reachable without scrolling past
-        // dozens of older entries.
-        constexpr size_t kMaxAppRecentSidebar = 5;
-        bool has_app_recent = false;
-        if (!spec_.app_recent_places.empty()) {
-            // This program's own folders, most used first, with how often / how recently.
-            SidebarGroup recent; recent.id = 2; recent.collapsed = collapsed_[1];
-            recent.header = spec_.host_app_name.empty() ? l10n::Get(l10n::StringId::Recent)
-                : FillPickerText(l10n::Get(l10n::StringId::PickerJumpRecent), spec_.host_app_name);
-            for (const auto& place : spec_.app_recent_places) {
-                if (recent.items.size() >= kMaxAppRecentSidebar) break;
-                if (place.path.empty()) continue;
-                auto item = PlaceItem({place.label.empty() ? PickerLeafName(place.path) : place.label, place.path, L"\xE8B7"});
-                item.badge = place.detail;
-                recent.items.push_back(std::move(item));
+            for (const auto& row : common_rows_) {
+                auto item = PlaceItem({row.label, row.path, L"\xE8B7"});
+                item.ellipsize = true;
+                if (!row.hint.empty()) { item.detail = row.hint; item.detail_hint = true; }
+                if (row.last) {
+                    item.badge = l10n::Get(mode_ == PickerMode::Save ? l10n::StringId::PickerCommonLastSaved : l10n::StringId::PickerCommonLast);
+                    item.badge_color = accent_;
+                } else if (row.pinned) {
+                    item.badge = l10n::Get(l10n::StringId::PickerAppPinnedTag);
+                    item.badge_color = accent_;
+                } else if (row.from_pulse) {
+                    item.badge = l10n::Get(l10n::StringId::PickerCommonFromPulse);
+                }
+                item.removable = !row.pinned && !row.from_pulse;
+                common.items.push_back(std::move(item));
             }
-            if (!recent.items.empty()) {
-                has_app_recent = true;
-                vm_.sidebar.push_back(std::move(recent));
+            if (!common_forget_.path.empty()) {
+                SidebarItem undo;
+                undo.path = kCommonUndoToken;
+                undo.label = FillPickerText(l10n::Get(l10n::StringId::PickerCommonRemoved), common_forget_.label);
+                undo.icon_glyph = L"\xE7A7";
+                undo.ellipsize = true;
+                undo.badge = l10n::Get(l10n::StringId::Undo);
+                undo.badge_color = accent_;
+                common.items.push_back(std::move(undo));
             }
+            if (!common.items.empty()) vm_.sidebar.push_back(std::move(common));
         }
-        if (!(spec_.native_options & FOS_HIDEMRUPLACES))
-            add_context(5, l10n::Get(l10n::StringId::Recent), false, true, has_app_recent ? 5 : 6);
-        if (!spec_.places.empty()) {
-            SidebarGroup caller; caller.id = 6; caller.header = l10n::Get(l10n::StringId::PickerApplicationPlaces); caller.collapsed = collapsed_[5];
+        AppendPickerTray();
+        for (auto& group : vm_.sidebar) if (group.id == kGroupPickerTray) group.rail_header = l10n::Get(l10n::StringId::PickerRailTray);
+        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES)) {
+            AppendPickerFavoritesMerged(vm_, pulse_places_, collapsed_[CollapseSlot(kPickerFavoritesSection)],
+                folded_favorite_groups_, PickerLeafName, [this](const std::wstring& path) {
+                    return std::any_of(common_rows_.begin(), common_rows_.end(), [&](const auto& row) { return SamePickerPath(row.path, path); });
+                });
+        }
+        if (!spec_.places.empty() || !spec_.bottom_places.empty()) {
+            SidebarGroup caller; caller.id = kGroupProgramPlaces; caller.header = l10n::Get(l10n::StringId::PickerApplicationPlaces);
+            caller.rail_header = l10n::Get(l10n::StringId::PickerRailProgram);
+            caller.collapsed = collapsed_[CollapseSlot(kGroupProgramPlaces)];
             for (const auto& place : spec_.places) caller.items.push_back(PlaceItem(place));
+            for (const auto& place : spec_.bottom_places)
+                if (std::none_of(caller.items.begin(), caller.items.end(), [&](const auto& item) { return SamePickerPath(item.path, place.path); }))
+                    caller.items.push_back(PlaceItem(place));
             vm_.sidebar.push_back(std::move(caller));
         }
-        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES))
-            AppendPickerSharedPlaces(vm_, pulse_places_, collapsed_[6], collapsed_[7], folded_favorite_groups_, PickerLeafName);
-        SidebarGroup quick;
-        quick.id = kGroupQuick;
-        quick.header = l10n::Get(l10n::StringId::PickerQuickAccess);
-        quick.collapsed = collapsed_[0];
-        for (const PickerPlace& place : places_) {
-            if ((spec_.native_options & FOS_HIDEPINNEDPLACES) && std::none_of(spec_.bottom_places.begin(), spec_.bottom_places.end(), [&](const auto& added) { return SamePickerPath(added.path, place.path); })) continue;
-            if (std::any_of(spec_.places.begin(), spec_.places.end(), [&](const auto& added) { return SamePickerPath(added.path, place.path); })) continue;
-            quick.items.push_back(PlaceItem(place));
+        // 此电脑: the everyday folders (Pulse's quick-access pins, as in the main window,
+        // plus any of 桌面/下载/文档/图片 they leave out), the drives, the network places.
+        SidebarGroup pc;
+        pc.id = kGroupDrives;
+        pc.header = l10n::Get(l10n::StringId::ThisPc);
+        pc.rail_header = l10n::Get(l10n::StringId::PickerRailThisPc);
+        pc.collapsed = collapsed_[CollapseSlot(kGroupDrives)];
+        pc.navigable = true;
+        pc.navigation_path = L"";
+        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES)) {
+            const auto add = [&](PickerPlace place) {
+                if (place.path.empty() || std::any_of(pc.items.begin(), pc.items.end(),
+                    [&](const auto& item) { return SamePickerPath(item.path, place.path); })) return;
+                for (const auto& known : standard_places_)
+                    if (SamePickerPath(known.path, place.path)) { place.glyph = known.glyph; if (place.label.empty()) place.label = known.label; }
+                if (place.label.empty()) place.label = PickerLeafName(place.path);
+                pc.items.push_back(PlaceItem(place));
+            };
+            for (const auto& entry : pulse_places_.folders) {
+                if (!entry.pinned) continue;
+                picker_user_storage::Path parsed;
+                if (picker_user_storage::Parse(entry.path, parsed)) add({entry.label, parsed.value, L"\xE8B7"});
+            }
+            for (const auto& place : standard_places_) add(place);
         }
-        for (const auto& entry : pulse_places_.folders) {
-            if (!entry.pinned || (spec_.native_options & FOS_HIDEPINNEDPLACES)) continue;
-            if (std::any_of(pulse_places_.starred_items.begin(), pulse_places_.starred_items.end(),
-                [&](const auto& item) { return SamePickerPath(item.path, entry.path); })) continue;
-            picker_user_storage::Path parsed;
-            if (!picker_user_storage::Parse(entry.path, parsed) || std::any_of(quick.items.begin(), quick.items.end(), [&](const auto& item) { return SamePickerPath(item.path, parsed.value); })) continue;
-            quick.items.push_back(PlaceItem({entry.label.empty() ? PickerLeafName(parsed.value) : entry.label, parsed.value, L"\xE8B7"}));
+        const size_t before_drives = pc.items.size();
+        for (const auto& drive : drives_) pc.items.push_back(drive);
+        if (before_drives && pc.items.size() > before_drives) pc.items[before_drives].divider_above = true;
+        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES)) {
+            bool first = true;
+            for (const auto& entry : pulse_places_.networks) {
+                if (!picker_places::detail::DiskPath(entry.path) ||
+                    std::any_of(pc.items.begin(), pc.items.end(), [&](const auto& item) { return SamePickerPath(item.path, entry.path); })) continue;
+                SidebarItem item;
+                item.path = entry.path;
+                item.label = entry.label.empty() ? PickerLeafName(entry.path) : entry.label;
+                item.icon_glyph = L"\xE968";
+                item.divider_above = first && !pc.items.empty();
+                first = false;
+                pc.items.push_back(std::move(item));
+            }
         }
-        if (!quick.items.empty()) vm_.sidebar.push_back(std::move(quick));
-        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES))
-            AppendPickerNetworkPlaces(vm_, pulse_places_, collapsed_[8], PickerLeafName);
-        // Open Pulse tabs live in the top "已打开" Alt+1..9 strip and Ctrl+L jump popup;
-        // collapsed_[3] (group id 4) stays reserved so persisted collapsed_mask bits remain stable.
-
-        SidebarGroup drives;
-        drives.id = kGroupDrives;
-        drives.header = l10n::Get(l10n::StringId::ThisPc);
-        drives.collapsed = collapsed_[2];
-        drives.navigable = true;
-        drives.navigation_path = L"";
-        drives.items = drives_;
-        vm_.sidebar.push_back(std::move(drives));
-        FilterPickerHiddenPlaces(vm_, layout_settings_.hidden_places);
+        vm_.sidebar.push_back(std::move(pc));
+        FilterPickerHiddenPlaces(vm_, HiddenPlacesOnly());
+        int hidden_groups = 0;
+        for (auto& group : vm_.sidebar) {
+            group.hidden = GroupHidden(group.id);
+            if (group.hidden) ++hidden_groups;
+        }
+        if (hidden_groups) {
+            SidebarGroup notice; notice.id = kGroupHiddenNotice;
+            SidebarItem row;
+            row.path = kShowHiddenGroupsToken;
+            row.label = l10n::Get(l10n::StringId::PickerGroupsHiddenCount);
+            if (const auto at = row.label.find(L"{count}"); at != std::wstring::npos) row.label.replace(at, 7, std::to_wstring(hidden_groups));
+            row.icon_glyph = L"\xE7B3";
+            row.badge = l10n::Get(l10n::StringId::PickerGroupsShow);
+            row.badge_color = accent_;
+            notice.items.push_back(std::move(row));
+            vm_.sidebar.push_back(std::move(notice));
+        }
         // Shell filters apply to enumerated view objects, not unrelated navigation
         // shortcuts. Keep sidebar catalog data untouched and never rebind/probe it.
+    }
 
+    // × on a 常用 row: hidden at once, written after the undo window (or on close).
+    void ForgetCommon(const std::wstring& path) {
+        const auto row = std::find_if(common_rows_.begin(), common_rows_.end(),
+            [&](const auto& r) { return SamePickerPath(r.path, path); });
+        if (row == common_rows_.end() || row->pinned || row->from_pulse) return;
+        CommitCommonForget();
+        common_forget_.path = row->path;
+        common_forget_.label = row->label;
+        if (hwnd_) SetTimer(hwnd_, kCommonForgetTimer, kCommonUndoMs, nullptr);
+        Relayout(); Invalidate();
+    }
+    void UndoCommonForget() {
+        if (common_forget_.path.empty()) return;
+        common_forget_ = {};
+        if (hwnd_) KillTimer(hwnd_, kCommonForgetTimer);
+        Relayout(); Invalidate();
+    }
+    void CommitCommonForget() noexcept {
+        if (common_forget_.path.empty()) return;
+        const auto path = common_forget_.path;
+        common_forget_ = {};
+        if (hwnd_) KillTimer(hwnd_, kCommonForgetTimer);
+        try {
+            common_forgotten_.push_back(path);
+            std::erase_if(spec_.app_recent_places, [&](const auto& place) { return SamePickerPath(place.path, path); });
+            if (SamePickerPath(spec_.last_location.path, path)) spec_.last_location = {};
+            if (spec_.forget_recent_place) spec_.forget_recent_place(path);
+        } catch (...) {}
+    }
+
+    // Right click on a group title: fold it, hide it, or pick the groups shown.
+    void ShowSidebarGroupMenu(int index, POINT point) {
+        if (index < 0 || index >= static_cast<int>(vm_.sidebar.size())) return;
+        const SidebarGroup group = vm_.sidebar[static_cast<size_t>(index)];
+        std::vector<FluentMenuItem> items;
+        items.push_back(Item(1, l10n::Get(group.collapsed ? l10n::StringId::PickerGroupExpand : l10n::StringId::PickerGroupCollapse)));
+        items.push_back(Item(2, l10n::Get(l10n::StringId::PickerGroupHide), L"\xED1A"));
+        items.back().separator_after = true;
+        FluentMenuItem caption = Item(0, l10n::Get(l10n::StringId::PickerGroupsShown), L"", false);
+        items.push_back(std::move(caption));
+        std::vector<int> ids;
+        for (const auto& g : vm_.sidebar) {
+            // Empty groups are not drawn, so offering them would only confuse.
+            if (g.id == kGroupHiddenNotice || g.header.empty() || (g.items.empty() && !g.hidden)) continue;
+            FluentMenuItem row = Item(10 + static_cast<int>(ids.size()), g.header);
+            row.toggle = true;
+            row.checked = !g.hidden;
+            items.push_back(std::move(row));
+            ids.push_back(g.id);
+        }
+        const int command = TrackAt(point, std::move(items));
+        if (done_ || command <= 0) return;
+        auto& hidden = layout_settings_.hidden_places;
+        const auto set_hidden = [&](int id, bool on) {
+            const auto token = HiddenGroupToken(id);
+            std::erase(hidden, token);
+            if (on) hidden.push_back(token);
+        };
+        if (command == 1) { bool& c = group.id == kGroupPickerTray ? tray_collapsed_ : collapsed_[CollapseSlot(group.id)]; c = !c; }
+        else if (command == 2) set_hidden(group.id, true);
+        else if (command >= 10 && command < 10 + static_cast<int>(ids.size())) {
+            const int id = ids[static_cast<size_t>(command - 10)];
+            set_hidden(id, !GroupHidden(id));
+        }
+        Relayout(); Invalidate();
     }
 
     int CollapseSlot(int group_id) const {
@@ -2102,21 +3178,125 @@ private:
     // The main window's view model, reduced to what the embedded renderer
     // draws: the address row, the sidebar and one pane.
     void SyncVm() {
+        chrome_.pulse_selection_enabled = IncomingFilesReady();
+        chrome_.show_tray_remove = TrayConsumeAvailable() && (HasSelectedTrayItem() || (!BasketEnabled() && HasCompatibleTrayItem()));
+        chrome_.tray_remove_checked = (picker_flags_ & picker_layout::kFlagRemoveTrayAfterOpen) != 0;
+        chrome_.tray_remove_text = l10n::Get(l10n::StringId::PickerTrayRemoveAfterOpen);
         vm_.dark = dark_;
         vm_.focused = GetForegroundWindow() == hwnd_;
         vm_.can_go_back = history_.CanGoBack();
         vm_.can_go_forward = history_.CanGoForward();
         vm_.tray_deck.hidden = true;
-        vm_.details_visible = (spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0;
+        vm_.details_visible = PreviewPaneShown();
         vm_.details = {};
         vm_.details.preview_only = true;
-        vm_.details.preview_enabled = true;
-        if (vm_.details_visible) {
+        vm_.details.preview_enabled = !InArchive() && mode_ != PickerMode::Save;
+        if (vm_.details_visible && mode_ == PickerMode::Save) {
+            auto& details = vm_.details;
+            details.has_selection = true;
+            details.picker_save_mode = true;
+            details.picker_save_to_tray = saving_to_tray_;
+            details.save_tray_count = static_cast<int>(spec_.pulse_tray_total_count ? spec_.pulse_tray_total_count : spec_.pulse_tray_items.size());
+            const auto save_target = ResolveSaveTarget(SaveDraftRequest());
+            const auto save_parent = save_target.state == SaveTargetState::Resolved ? PickerParent(save_target.path) : current_;
+            details.save_folder_text = saving_to_tray_ ? L"Pulse\\shelf"
+                : (save_parent.empty() ? l10n::Get(l10n::StringId::ThisPc) : PickerLeafName(save_parent));
+            const PickerEntry* existing_target = nullptr;
+            // Expanded siblings can have the same names. Summarize only the
+            // actual save parent, which need not be the navigation root.
+            int series_count = 0;
+            std::wstring series_latest;
+            uint64_t latest_mtime = 0;
+            FILETIME latest_ft{};
+            if (!filename_text_.empty()) {
+                const auto target = ResolveSaveTarget(SaveDraftRequest());
+                if (target.state == SaveTargetState::Resolved) {
+                    const auto key = PickerSaveSeriesKey(target.path);
+                    for (const auto& entry : entries_) {
+                        if (!SamePickerPath(PickerParent(entry.path), save_parent)) continue;
+                        if (SamePickerPath(entry.path, target.path) && entry.kind != PickerEntryKind::Folder && entry.kind != PickerEntryKind::Drive)
+                            existing_target = &entry;
+                        if (!PickerSaveSeriesMatches(key, entry.name,
+                            entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive)) continue;
+                        ++series_count;
+                        const uint64_t mt = (static_cast<uint64_t>(entry.modified.dwHighDateTime) << 32) | entry.modified.dwLowDateTime;
+                        if (series_latest.empty() || mt >= latest_mtime) {
+                            latest_mtime = mt;
+                            latest_ft = entry.modified;
+                            series_latest = entry.name;
+                        }
+                    }
+                }
+            }
+            if (series_count > 0) {
+                std::wstring items_str = l10n::Get(l10n::StringId::ItemsCountFormat);
+                if (const auto p = items_str.find(L"%d"); p != std::wstring::npos) items_str.replace(p, 2, std::to_wstring(series_count));
+                std::wstring st = l10n::Get(l10n::StringId::PickerSaveSeriesLatest);
+                if (const auto p = st.find(L"{items}"); p != std::wstring::npos) st.replace(p, 7, items_str);
+                if (const auto p = st.find(L"{latest}"); p != std::wstring::npos) st.replace(p, 8, series_latest);
+                if (const auto p = st.find(L"{time}"); p != std::wstring::npos) {
+                    const std::wstring tm = latest_mtime ? format::LocalFileTime(latest_ft) : std::wstring();
+                    if (!tm.empty()) st.replace(p, 6, tm);
+                    else st.replace(p > 0 ? p - 1 : p, p > 0 ? 7 : 6, L"");
+                }
+                details.save_series_text = std::move(st);
+            } else {
+                details.save_series_text = l10n::Get(l10n::StringId::PickerSaveSeriesNone);
+            }
+            // Disk free space from draft probe or cached sidebar drive list (zero UI-thread I/O).
+            std::wstring drive_letter = save_parent.size() >= 2 && save_parent[1] == L':' ? save_parent.substr(0, 2) : std::wstring();
+            if (!drive_letter.empty()) drive_letter[0] = static_cast<wchar_t>(std::towupper(drive_letter[0]));
+            const auto format_disk_free = [&](uint64_t free_bytes) {
+                std::wstring dt = l10n::Get(l10n::StringId::PickerSaveDiskFree);
+                if (const auto p = dt.find(L"{drive}"); p != std::wstring::npos) dt.replace(p, 7, drive_letter);
+                if (const auto p = dt.find(L"{free}"); p != std::wstring::npos) dt.replace(p, 6, format::ByteSize(free_bytes));
+                while (!dt.empty() && dt.front() == L' ') dt.erase(dt.begin());
+                return dt;
+            };
+            if (save_draft_result_ && save_draft_result_->space_known) {
+                details.save_disk_text = format_disk_free(save_draft_result_->free_bytes);
+            } else if (!drive_letter.empty()) {
+                for (const auto& d : drives_) {
+                    if (d.path.size() >= 2 && std::towupper(d.path[0]) == drive_letter[0] && d.free_bytes != ~uint64_t{0}) {
+                        details.save_disk_text = format_disk_free(d.free_bytes);
+                        break;
+                    }
+                }
+            }
+            if (details.save_disk_text.empty()) details.save_disk_text = L"—";
+            const bool ro = save_draft_result_ && save_draft_result_->attributes != INVALID_FILE_ATTRIBUTES &&
+                (save_draft_result_->attributes & FILE_ATTRIBUTE_READONLY) != 0;
+            details.save_perm_ok = !ro;
+            details.save_perm_text = l10n::Get(ro ? l10n::StringId::PickerSaveDestReadOnly : l10n::StringId::PickerSaveDestWritable);
+            const bool cloud = save_draft_result_ && save_draft_result_->attributes != INVALID_FILE_ATTRIBUTES &&
+                (save_draft_result_->attributes & (FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_RECALL_ON_OPEN)) != 0;
+            details.save_sync_text = l10n::Get(cloud ? l10n::StringId::PickerSaveDestCloud : l10n::StringId::PickerSaveDestLocal);
+            if (chrome_.overwrite_pending && !chrome_.notice.empty()) {
+                details.save_clash = true;
+                details.save_banner_text = chrome_.notice;
+            } else if (chrome_.live_conflict && !chrome_.live_conflict_text.empty()) {
+                details.save_clash = true;
+                details.save_banner_text = chrome_.live_conflict_text;
+            } else if (existing_target) {
+                details.save_clash = true;
+                auto text = l10n::Get(l10n::StringId::PickerSaveDestClash);
+                if (const auto p = text.find(L"{name}"); p != std::wstring::npos) text.replace(p, 6, existing_target->name);
+                if (const auto p = text.find(L"{detail}"); p != std::wstring::npos) text.replace(p, 8, format::ByteSize(existing_target->size));
+                details.save_banner_text = std::move(text);
+            } else {
+                details.save_clash = false;
+                details.save_banner_text = l10n::Get(l10n::StringId::PickerSaveDestNoClash);
+            }
+            details.save_after_available = spec_.enable_save_followup && pulse_places_.save_followup_available;
+            details.save_after_show = (picker_flags_ & picker_layout::kFlagShowAfterSave) != 0;
+            details.save_after_copy = (picker_flags_ & picker_layout::kFlagCopyAfterSave) != 0;
+        } else if (vm_.details_visible) {
             if (const auto* entry = SelectedEntry(); entry && selected_set_.size() == 1) {
                 auto& details = vm_.details;
                 details.has_selection = true;
                 details.name = entry->name; details.path = entry->path;
                 details.is_dir = entry->kind == PickerEntryKind::Folder || entry->kind == PickerEntryKind::Drive;
+                details.picker_archive = entry->archive;
                 details.attrs = details.is_dir ? FILE_ATTRIBUTE_DIRECTORY : 0;
                 details.modified_value = (static_cast<uint64_t>(entry->modified.dwHighDateTime) << 32) | entry->modified.dwLowDateTime;
                 details.size_value = entry->size;
@@ -2145,9 +3325,59 @@ private:
             if (SamePickerPath(PickerParent(cut_path), current_))
                 pane.cut_names.insert(PickerLeafName(cut_path));
         }
+        pane.show_file_extensions = spec_.show_file_extensions ? 1 : 0;
         pane.path = current_;
         pane.header_text.clear();
         pane.snapshot = snapshot_;
+        pane.tree = new_folder_draft_ ? nullptr : tree_rows_;
+        if (!InArchive()) image_dimensions_.Bind(snapshot_, entries_);
+        else image_dimensions_.Bind({}, {});
+        pane.extension_columns.clear();
+        pane.extension_cell = {};
+        if (image_dimensions_.Active()) {
+            pane.extension_columns.push_back({L"pulse.picker/dimensions", l10n::Get(l10n::StringId::ColumnMediaDims), 112.0f});
+            pane.extension_cell = [this](int source, size_t column, std::wstring& text, uint32_t& tone) {
+                if (column != 0) return false;
+                text = image_dimensions_.Cell(source);
+                tone = 0;
+                return !text.empty();
+            };
+        }
+        pane.change_badges.clear();
+        pane.muted_indices.clear();
+        if (mode_ == PickerMode::Save) {
+            for (size_t i = 0; i < entries_.size(); ++i) {
+                const auto& entry = entries_[i];
+                if (entry.kind != PickerEntryKind::Folder && entry.kind != PickerEntryKind::Drive &&
+                    !PickerMatchesFilter(entry.name, mode_, options_)) pane.muted_indices.insert(static_cast<int>(i));
+            }
+        }
+        for (size_t i = 0; i < entries_.size(); ++i) if (entries_[i].is_new) {
+            ChangeBadge badge; badge.label = l10n::Get(l10n::StringId::PickerNewBadge);
+            badge.tooltip = l10n::Get(l10n::StringId::PickerNewFiles); badge.count = 1;
+            badge.last_change = (static_cast<uint64_t>(entries_[i].modified.dwHighDateTime) << 32) | entries_[i].modified.dwLowDateTime;
+            pane.change_badges.emplace(static_cast<int>(i), std::move(badge));
+        }
+        if (mode_ == PickerMode::Save && !filename_text_.empty()) {
+            const auto target = ResolveSaveTarget(SaveDraftRequest());
+            if (target.state == SaveTargetState::Resolved) {
+                const auto key = PickerSaveSeriesKey(target.path);
+                const auto parent = PickerParent(target.path);
+                for (size_t i = 0; i < entries_.size(); ++i) {
+                    const auto& entry = entries_[i];
+                    if (TreePlaceholder(static_cast<int>(i)) || !SamePickerPath(PickerParent(entry.path), parent)) continue;
+                    if (!PickerSaveSeriesMatches(key, entry.name,
+                        entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive)) continue;
+                    const bool exact_clash = SamePickerPath(entry.path, target.path) &&
+                        entry.kind != PickerEntryKind::Folder && entry.kind != PickerEntryKind::Drive;
+                    ChangeBadge badge;
+                    badge.label = l10n::Get(exact_clash ? l10n::StringId::PickerWillReplaceBadge : l10n::StringId::PickerSameNameSeries);
+                    badge.tooltip = badge.label; badge.count = 1;
+                    if (exact_clash) badge.status = 2;
+                    pane.change_badges[static_cast<int>(i)] = std::move(badge);
+                }
+            }
+        }
         pane.entries.clear();
         pane.is_file_system = !current_.empty();
         pane.can_go_back = vm_.can_go_back;
@@ -2160,7 +3390,7 @@ private:
         pane.selected_index = caret_selected ? selected_ : -1;
         pane.focus_ring_source = caret_selected ? -1 : selected_;
         pane.marquee_active = marquee_.active;
-        pane.marquee_rect = marquee_.active ? marquee_.Rect(scroll_, renderer_.PaneListRect(pane, PaneBounds())) : D2D1_RECT_F{};
+        pane.marquee_rect = marquee_.active ? marquee_.Rect(scroll_, renderer_.PaneListRect(pane, PaneBounds()), ScrollX()) : D2D1_RECT_F{};
         pane.selected_indices = &selected_set_;
         pane.selected_count = static_cast<int>(selected_set_.size());
         pane.rename_index = rename_path_.empty() ? -1 : rename_index_;
@@ -2168,11 +3398,13 @@ private:
         pane.view_mode = view_mode_;
         pane.icon_dip = icon_dip_;
         pane.details_column_dividers = layout_settings_.column_widths;
-        pane.sort_column = ColumnFromSort(options_.sort);
-        pane.sort_direction = options_.descending ? SortDirection::Desc : SortDirection::Asc;
+        pane.sort_column = static_cast<SortColumn>(order_.column);
+        pane.sort_direction = order_.descending ? SortDirection::Desc : SortDirection::Asc;
+        pane.group_select = allow_multiselect_;
+        SyncListGroups(pane);
         pane.focused = focus_ == kPickList;
         pane.scroll_y = scroll_;
-        pane.scroll_x = 0.0f;
+        pane.scroll_x = ScrollX();
         pane.loading = waiting_ && loading_;
         pane.is_search = false;
         pane.banner_kind = error_.empty() ? 0 : 3;
@@ -2183,21 +3415,38 @@ private:
         vm_.breadcrumb_hover = vm_.hover_region == static_cast<int>(HitTestResult::BreadcrumbSegment)
                                    ? vm_.hover_control_index : -1;
 
-        chrome_.selected_names.clear();
+        chrome_.selected_names.clear(); chrome_.selected_sources.clear(); chrome_.selected_from_tray.clear();
+        selection_tag_paths_.clear();
+        std::unordered_set<std::wstring> tray_paths;
+        if (allow_multiselect_ && filename_from_selection_ && !editing_selection_names_)
+            for (const auto& item : spec_.pulse_tray_items) tray_paths.insert(ListOrderKey(item.path));
+        const auto append_selection = [&](const std::wstring& name, const std::wstring& path) {
+            chrome_.selected_names.push_back(name); selection_tag_paths_.push_back(path);
+            const bool tray = tray_paths.contains(ListOrderKey(path));
+            chrome_.selected_from_tray.push_back(tray);
+            const auto parent = PickerParent(path);
+            auto label = PickerLeafName(parent);
+            if (label.empty()) label = path::FriendlyPathText(parent);
+            chrome_.selected_sources.push_back(tray ? l10n::Get(l10n::StringId::PickerTrayTitle) : label);
+        };
         chrome_.filename_label = spec_.has_file_name_label ? spec_.file_name_label :
             l10n::Get(mode_ == PickerMode::Folder ? l10n::StringId::FolderName : l10n::StringId::FileName);
         selection_tag_indices_.clear();
         if (allow_multiselect_ && filename_from_selection_ && !editing_selection_names_) {
+            for (size_t k = 0; k < basket_.size(); ++k) {
+                append_selection(basket_[k].name, basket_[k].path);
+                selection_tag_indices_.push_back(-1 - static_cast<int>(k));  // negative: a basket file
+            }
             std::vector<int> sorted(selected_set_.begin(), selected_set_.end()); std::sort(sorted.begin(), sorted.end());
             for (int index : sorted) if (index >= 0 && index < static_cast<int>(entries_.size())) {
                 const auto& entry = entries_[static_cast<size_t>(index)];
                 if (entry.kind != PickerEntryKind::Folder && entry.kind != PickerEntryKind::Drive) {
-                    chrome_.selected_names.push_back(entry.name); selection_tag_indices_.push_back(index);
+                    append_selection(entry.name, entry.path); selection_tag_indices_.push_back(index);
                 }
             }
         }
-        chrome_.primary_enabled = legacy_browse_ok_ && !new_folder_draft_ && !chrome_.overwrite_pending && !waiting_ && !validating_ && !chosen_.empty();
-        if (chrome_.selected_names.size() > 1 && !spec_.has_file_name_label) {
+        chrome_.primary_enabled = legacy_browse_ok_ && !new_folder_draft_ && !chrome_.overwrite_pending && !waiting_ && !validating_ && !chosen_.empty() && !save_name_invalid_ && !chrome_.live_conflict;
+        if (!chrome_.selected_names.empty() && !spec_.has_file_name_label) {
             wchar_t count[128]{};
             swprintf_s(count, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), static_cast<int>(chrome_.selected_names.size()));
             chrome_.filename_label = count;
@@ -2210,6 +3459,8 @@ private:
         chrome_.rename_text = pending_overwrite_ ? FillPickerText(l10n::Get(l10n::StringId::PickerSaveAsName),
             OverwriteAlternative(pending_overwrite_->Path())) : l10n::Get(l10n::StringId::PickerRenameSave);
         SyncJumpStrip();
+        chrome_.save_format_notice = mode_ == PickerMode::Save && options_.filter_index == save_format_notice_filter_ &&
+            filename_text_ == save_format_notice_filename_ ? save_format_notice_ : std::wstring();
         chrome_.filename_focused = focus_ == kPickFilename;
         chrome_.focus = focus_;
     }
@@ -2222,9 +3473,138 @@ private:
             ? name.substr(slash + 1) : name;
     }
 
+    SaveTargetRequest SaveDraftRequest() const {
+        SaveTargetRequest request;
+        request.directory = current_; request.filename = filename_text_;
+        request.filters = options_.filters; request.filter_index = options_.filter_index;
+        request.default_extension = spec_.default_extension;
+        request.native_save_defaults = spec_.native_save_defaults; request.filter_changed = save_filter_changed_;
+        request.caller_validates_access = spec_.skip_access_validation;
+        request.reject_readonly_save = spec_.reject_readonly_save;
+        request.no_test_file_create = spec_.no_test_file_create;
+        request.require_existing_save_parent = spec_.require_existing_save_parent;
+        return request;
+    }
+
+    void UpdateSaveWarning(const SaveTargetResult& target) {
+        chrome_.summary_warning.clear(); chrome_.summary_warning_error = false;
+        chrome_.save_space_text.clear();
+        chrome_.live_conflict = false; save_name_invalid_ = false;
+        if (filename_text_.empty() || chrome_.overwrite_pending || validating_ || waiting_) return;
+        if (target.state != SaveTargetState::Resolved) {
+            const auto cut = filename_text_.find_last_of(L"\\/");
+            const auto leaf = filename_text_.substr(cut == std::wstring::npos ? 0 : cut + 1);
+            const bool long_name = leaf.size() > 255 || filename_text_.size() + current_.size() + 1 >= 32760;
+            chrome_.summary_warning = l10n::Get(long_name ? l10n::StringId::PickerSaveNameLong :
+                target.state == SaveTargetState::InvalidDirectory ? l10n::StringId::PickerSavePathInvalid : l10n::StringId::PickerSaveNameInvalid);
+            chrome_.summary_warning_error = save_name_invalid_ = true;
+            return;
+        }
+        const auto leaf = PickerLeafName(target.path);
+        PickerSaveAdvisory advisory;
+        if (save_draft_result_ && save_draft_result_->path == target.path) {
+            advisory = DescribePickerSaveTarget(*save_draft_result_);
+            chrome_.save_space_text = advisory.space;
+        }
+        if (save_draft_result_ && save_draft_result_->path == target.path && save_draft_result_->attributes != INVALID_FILE_ATTRIBUTES) {
+            if (save_draft_result_->attributes & FILE_ATTRIBUTE_DIRECTORY) {
+                chrome_.summary_warning = l10n::Get(l10n::StringId::PickerLiveDirectoryConflict);
+                chrome_.summary_warning_error = save_name_invalid_ = true;
+            } else {
+                chrome_.live_conflict = true;
+                chrome_.live_conflict_text = FillPickerText(l10n::Get(l10n::StringId::PickerLiveConflict), leaf);
+                if (!advisory.warning.empty()) {
+                    chrome_.live_conflict_text = advisory.warning + L" " + leaf;
+                    chrome_.summary_warning = advisory.warning;
+                }
+                chrome_.live_rename_text = l10n::Get(l10n::StringId::PickerRenameSave);
+                chrome_.live_save_text = l10n::Get(l10n::StringId::PickerSaveCheckContinue);
+            }
+            return;
+        }
+        if (save_draft_result_ && save_draft_result_->error != ERROR_SUCCESS &&
+            save_draft_result_->error != ERROR_FILE_NOT_FOUND && save_draft_result_->error != ERROR_PATH_NOT_FOUND) {
+            chrome_.summary_warning = ErrorText(save_draft_result_->error, target.path);
+            return; // advisory only; final access checking decides actual writability
+        }
+        const bool any = options_.filter_index < options_.filters.size() && PickerFilterIsAny(options_.filters[options_.filter_index]);
+        if (!advisory.warning.empty()) { chrome_.summary_warning = advisory.warning; return; }
+        const auto dot = leaf.find_last_of(L'.');
+        if (any && (dot == std::wstring::npos || dot == 0 || dot + 1 == leaf.size()))
+            chrome_.summary_warning = FillPickerText(l10n::Get(l10n::StringId::PickerNoExtension), leaf);
+    }
+
+    void RefreshSaveDraft() {
+        if (mode_ != PickerMode::Save) return;
+        const bool old_conflict = chrome_.live_conflict;
+        const bool old_suggestions = !chrome_.save_suggestions.empty();
+        const auto target = ResolveSaveTarget(SaveDraftRequest());
+        const auto key = current_ + L"|" + filename_text_ + L"|" + target.path + L"|" +
+            std::to_wstring(options_.filter_index) + L"|" + std::to_wstring(generation_);
+        if (key != save_draft_key_) {
+            save_draft_key_ = key; ++save_draft_generation_; save_draft_probe_.Cancel(); save_draft_result_.reset();
+            save_draft_path_ = target.state == SaveTargetState::Resolved ? target.path : std::wstring();
+            save_draft_due_ = save_draft_path_.empty() ? 0 : GetTickCount64() + 180;
+            SYSTEMTIME local{}; GetLocalTime(&local); wchar_t date[16]{};
+            swprintf_s(date, L"%04u-%02u-%02u", local.wYear, local.wMonth, local.wDay);
+            save_name_suggestions_ = BuildSaveNameSuggestions(filename_text_, spec_.filename, date);
+            chrome_.save_suggestions.clear();
+            for (const auto& suggestion : save_name_suggestions_) {
+                const auto id = suggestion.kind == SaveNameSuggestionKind::Version ? l10n::StringId::PickerSuggestVersion :
+                    suggestion.kind == SaveNameSuggestionKind::Date ? l10n::StringId::PickerSuggestDate :
+                    suggestion.kind == SaveNameSuggestionKind::Original ? l10n::StringId::PickerSuggestOriginal : l10n::StringId::PickerSuggestRemoveCopy;
+                PickerOptionChip chip; chip.text = PickerLeafName(suggestion.filename) + L" · " + l10n::Get(id);
+                chip.label = suggestion.filename; chrome_.save_suggestions.push_back(std::move(chip));
+            }
+        }
+        UpdateSaveWarning(target);
+        chrome_.save_actions_enabled = !waiting_ && !validating_ && !operating_ && !done_ && !chrome_.overwrite_pending;
+        if (old_conflict != chrome_.live_conflict || old_suggestions != !chrome_.save_suggestions.empty()) {
+            chrome_.pressed = kPickNone;
+            if (hwnd_) Relayout();
+        }
+    }
+
+    void PollSaveDraft() {
+        if (mode_ != PickerMode::Save || waiting_ || validating_ || done_ || save_draft_path_.empty()) return;
+        if (save_draft_due_ && GetTickCount64() >= save_draft_due_)
+            save_draft_due_ = save_draft_probe_.Start(save_draft_generation_, save_draft_path_) ? 0 : GetTickCount64() + 1000;
+        if (auto result = save_draft_probe_.Take(save_draft_generation_, save_draft_path_)) {
+            save_draft_result_ = std::move(result);
+            RefreshSaveDraft(); SyncVm(); Relayout(); Invalidate();
+        }
+    }
+
+    void ApplySaveSuggestion(size_t index) {
+        if (!chrome_.save_actions_enabled || index >= save_name_suggestions_.size()) return;
+        const auto filename = save_name_suggestions_[index].filename;
+        SetFilename(filename); InputChanged(filename_edit_); FocusFilename(); Relayout(); Invalidate();
+    }
+
+    void ShowSaveSuggestions() {
+        if (!chrome_.save_actions_enabled) return;
+        const auto key = save_draft_key_;
+        std::vector<FluentMenuItem> items;
+        for (size_t i = 0; i < chrome_.save_suggestions.size(); ++i) {
+            FluentMenuItem item; item.command = static_cast<int>(i) + 1;
+            item.text = chrome_.save_suggestions[i].text; item.detail = chrome_.save_suggestions[i].label;
+            items.push_back(std::move(item));
+        }
+        const int chosen = TrackPickerDropdown(ScreenRect(chrome_layout_.suggestions_more), std::move(items));
+        if (key == save_draft_key_ && chosen > 0) ApplySaveSuggestion(static_cast<size_t>(chosen - 1));
+    }
+
     void UpdateSummary() {
         chrome_.summary.clear();
+        if (mode_ != PickerMode::Save || chosen_.empty() || chrome_.selected_names.size() > 1) {
+            chrome_.summary_warning.clear(); chrome_.summary_warning_error = false;
+            chrome_.save_space_text.clear();
+        }
         chrome_.summary_lead.clear(); chrome_.summary_folder.clear(); chrome_.summary_leaf.clear();
+        if (InArchive()) {
+            chrome_.summary = l10n::Get(l10n::StringId::PickerArchiveExtractSelection);
+            return;
+        }
         if (chrome_.overwrite_pending && pending_overwrite_) {
             // The banner asks; the row under it still names the file that would be replaced.
             const auto target = pending_overwrite_->Path();
@@ -2259,7 +3639,12 @@ private:
                 request.no_test_file_create = spec_.no_test_file_create;
                 request.require_existing_save_parent = spec_.require_existing_save_parent;
                 const auto target = ResolveSaveTarget(request);
-                if (!target.error) shown = target.path;
+                if (target.state == SaveTargetState::Resolved) shown = target.path;
+                UpdateSaveWarning(target);
+                if (saving_to_tray_ && !chrome_.overwrite_pending && !chrome_.live_conflict && chrome_.summary_warning.empty()) {
+                    chrome_.summary = FillPickerText(l10n::Get(l10n::StringId::PickerSaveToTrayStatus), PickerLeafName(shown));
+                    return;
+                }
             }
             chrome_.summary = prefix + FitPathMiddle(shown, width - measure(prefix), measure);
             // The same target in parts for the drawn line: lead, folder, leaf.
@@ -2281,9 +3666,18 @@ private:
         return renderer_.MaxScrollForPane(vm_.pane, PaneBounds());
     }
 
+    // Only the List view runs sideways (its columns); other views keep x at 0.
+    float ScrollX() const { return view_mode_ == ViewMode::List ? scroll_x_ : 0.0f; }
+    float MaxScrollX() {
+        if (view_mode_ != ViewMode::List) return 0.0f;
+        SyncVm();
+        return renderer_.MaxScrollXForPane(vm_.pane, PaneBounds());
+    }
+
     void ClampScroll() {
         if (!compositor_.Dc()) return;
         scroll_ = std::clamp(scroll_, 0.0f, std::max(0.0f, MaxScroll()));
+        scroll_x_ = std::clamp(scroll_x_, 0.0f, std::max(0.0f, MaxScrollX()));
     }
 
     void EnsureVisible(int index) {
@@ -2294,6 +3688,10 @@ private:
         const D2D1_RECT_F item = renderer_.ItemRectInPane(vm_.pane, bounds, index);
         if (item.top < list.top) scroll_ += item.top - list.top;
         else if (item.bottom > list.bottom) scroll_ += item.bottom - list.bottom;
+        if (view_mode_ == ViewMode::List) {
+            if (item.left < list.left) scroll_x_ += item.left - list.left;
+            else if (item.right > list.right) scroll_x_ += std::min(item.right - list.right, item.left - list.left);
+        }
         ClampScroll();
     }
 
@@ -2302,14 +3700,13 @@ private:
     D2D1_COLOR_F EditForeground() const { return ColorFromRef(EditTextColor(dark_)); }
     D2D1_COLOR_F EditBackground() const { return ColorFromRef(EditBackColor(dark_)); }
     HBRUSH EditBrush() const { return EditBackBrush(edit_brush_); }
-    IDWriteTextFormat* EditFormat(HWND edit) {
-        return edit == rename_edit_ && GetPropW(edit, L"Pulse.EditWrap") && compositor_.FileNameFormat()
-            ? compositor_.FileNameFormat() : compositor_.TextFormat();
+    IDWriteTextFormat* EditFormat(HWND) {
+        return compositor_.FileNameFormat() ? compositor_.FileNameFormat() : compositor_.TextFormat();
     }
 
     void CreateFonts() {
         if (font_) { DeleteObject(font_); font_ = nullptr; }
-        font_ = typography::CreateEditFont(scale_);
+        font_ = typography::CreateEditFont(scale_, 13.0f);
         if (rename_font_) DeleteObject(rename_font_);
         rename_font_ = typography::CreateEditFont(scale_, 13.0f);
         for (HWND edit : AllEdits())
@@ -2409,7 +3806,7 @@ private:
         for (HWND edit : AllEdits()) {
             if (edit && IsWindowVisible(edit) &&
                 !PresentChildEdit(compositor_, EditFormat(edit), EditForeground(), EditBackground(), edit) &&
-                spec_.pulse_painted_plain_child) { FailPaintedEdit(PulsePaintedChildEditError(edit)); return; }
+                spec_.pulse_painted_plain_child) { FailPaintedEdit(PulsePaintedChildEditError(edit), "present-edit"); return; }
         }
     }
 
@@ -2478,7 +3875,7 @@ private:
             const auto bounds = D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.top),
                 static_cast<float>(rect.right), static_cast<float>(rect.bottom));
             if (!DrawPulsePaintedChildEdit(compositor_, EditFormat(edit), EditForeground(), EditBackground(), edit, bounds)) {
-                FailPaintedEdit(PulsePaintedChildEditError(edit)); return;
+                FailPaintedEdit(PulsePaintedChildEditError(edit), "present-edit"); return;
             }
         }
     }
@@ -2513,7 +3910,7 @@ private:
         PlaceOneEdit(path_edit_, renderer_.AddressBarRect(w), address_editing_ && !searching_);
         PlaceOneEdit(search_edit_, LayoutAddressSearch(renderer_.SearchBarRect(w), scale_).input,
                      searching_, 0.0f);
-        PlaceOneEdit(filename_edit_, chrome_layout_.filename, chrome_.selected_names.size() <= 1);
+        PlaceOneEdit(filename_edit_, chrome_layout_.filename, chrome_.selected_names.empty());
         PlaceCustomEdits();
         PlaceRenameEdit();
     }
@@ -2556,7 +3953,14 @@ private:
             return;
         }
         if (!loader_) return;
+        const auto archive_path = NormalizePickerInput(text);
+        if (options_.archive && options_.archive->Contains(archive_path)) {
+            Navigate(archive_path, true);
+            return;
+        }
         validation_navigation_only_ = true;
+        validation_incoming_files_ = false;
+        validation_add_selection_ = false;
         validating_ = true;
         chrome_.notice = l10n::Get(l10n::StringId::CheckingThePath).c_str();
         PickerOptions all;
@@ -2637,6 +4041,7 @@ private:
         if (edit == filename_edit_) {
             user_interacted_ = true;
             filename_text_ = ReadEdit(edit);
+            save_format_notice_.clear(); save_format_notice_filename_.clear();
             filename_from_selection_ = false;
             selected_set_.clear();
             selected_ = -1;
@@ -2647,6 +4052,18 @@ private:
                     struct Reset { bool& value; ~Reset() { value = false; } } reset{syncing_filename_filter_};
                     // Reload invalidates the old validation/listing generation and
                     // publishes TypeChanged through the same path as the dropdown.
+                    const auto leaf = PickerLeafName(filename_text_);
+                    const auto dot = leaf.find_last_of(L'.');
+                    const auto labels = PickerFormatLabels(options_.filters);
+                    if (dot != leaf.npos && *inferred < labels.size()) {
+                        save_format_notice_ = l10n::Get(l10n::StringId::PickerFormatInferred);
+                        const auto replace = [&](const wchar_t* key, const std::wstring& value) {
+                            const auto at = save_format_notice_.find(key);
+                            if (at != save_format_notice_.npos) save_format_notice_.replace(at, wcslen(key), value);
+                        };
+                        replace(L"{ext}", leaf.substr(dot)); replace(L"{format}", labels[*inferred]);
+                        save_format_notice_filename_ = filename_text_; save_format_notice_filter_ = *inferred;
+                    }
                     ApplyFilter(*inferred);
                     return;
                 }
@@ -2713,6 +4130,7 @@ private:
             if (wparam == VK_LEFT) { self->GoBack(); return 0; }
             if (wparam == VK_RIGHT) { self->GoForward(); return 0; }
             if (wparam == VK_UP) { self->GoUp(); return 0; }
+            if (wparam == '0') { self->UsePulseSelection(); return 0; }
             if (wparam == 'D') { self->BeginAddressEdit(); return 0; }
             if (wparam == 'N' && self->filename_edit_) { self->FocusFilename(); return 0; }
             break;
@@ -2758,9 +4176,12 @@ private:
         vm_.layout_controls.visible = false;
         renderer_.SetResourceModule(spec_.module_instance);
         renderer_.SetEmbeddedPickerLayout(true, kPickerStripDip);
-        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_, chrome_.overwrite_pending, !chrome_.options.empty()) + CustomHeightDip());
+        renderer_.SetEmbeddedPickerPreviewForced((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
+        renderer_.SetEmbeddedPickerPreviewMinDip(mode_ == PickerMode::Save ? 600.0f : 760.0f);
+        if (mode_ == PickerMode::Save) renderer_.SetDetailsPanelWidth(256.0f);
+        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_, chrome_.overwrite_pending || chrome_.live_conflict, !chrome_.options.empty(), !chrome_.formats.empty(), (!chrome_.save_suggestions.empty() || !chrome_.format_note.empty())) + CustomHeightDip());
         renderer_.SetItemClick(false, 0, allow_multiselect_);
-        renderer_.SetDetailsPanelVisible((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
+        renderer_.SetDetailsPanelVisible(PreviewPaneShown());
         renderer_.SetSidebarWidthDip(layout_settings_.sidebar_width);
         if (spec_.row_height_dip > 0.0f) renderer_.SetRowHeightDip(spec_.row_height_dip);
         renderer_.SetListStyle(spec_.list_smart_date, spec_.list_zebra_rows, spec_.list_size_bar,
@@ -3329,42 +4750,6 @@ private:
         }
         return folders;
     }
-    bool ShowsRecentFiles() const {
-        return (mode_ == PickerMode::File || mode_ == PickerMode::Image) && !spec_.recent_files.empty();
-    }
-    // A recent card: its full path goes into the file name; a double click opens it.
-    void PickRecentFile(size_t index, bool open) {
-        if (index >= spec_.recent_files.size() || spec_.recent_files[index].path.empty()) return;
-        chrome_.recent_selected = static_cast<int>(index);
-        setting_edits_ = true;
-        if (filename_edit_) SetWindowTextW(filename_edit_, spec_.recent_files[index].path.c_str());
-        setting_edits_ = false;
-        SetFilename(spec_.recent_files[index].path);
-        UpdateChosen();
-        if (open) SubmitSelection();
-        Invalidate();
-    }
-    ID2D1Bitmap* RecentThumbnail(size_t index) {
-        if (index >= spec_.recent_files.size() || !spec_.recent_files[index].thumbnail || !compositor_.Dc()) return nullptr;
-        if (recent_thumb_device_ != compositor_.Dc()) { recent_thumbs_.clear(); recent_thumb_device_ = compositor_.Dc(); }
-        if (recent_thumbs_.size() < spec_.recent_files.size()) recent_thumbs_.resize(spec_.recent_files.size());
-        auto& slot = recent_thumbs_[index];
-        if (slot.get()) return slot.get();
-        BITMAP info{};
-        if (!GetObjectW(spec_.recent_files[index].thumbnail, sizeof(info), &info) || info.bmWidth <= 0 || info.bmHeight == 0) return nullptr;
-        const int w = info.bmWidth, h = std::abs(info.bmHeight);
-        std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 4);
-        BITMAPINFO bi{};
-        bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;
-        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-        HDC screen = GetDC(nullptr);
-        const int got = GetDIBits(screen, spec_.recent_files[index].thumbnail, 0, static_cast<UINT>(h), pixels.data(), &bi, DIB_RGB_COLORS);
-        ReleaseDC(nullptr, screen);
-        if (got != h) return nullptr;
-        const auto props = D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        compositor_.Dc()->CreateBitmap(D2D1::SizeU(w, h), pixels.data(), w * 4, props, &slot);
-        return slot.get();
-    }
     void JumpToOpenFolder(size_t index) {
         const auto folders = OpenFolders();
         if (index >= folders.size() || folders[index].path.empty()) return;
@@ -3539,10 +4924,11 @@ private:
     }
     void SyncJumpStrip() {
         chrome_.strip_left = 0.0f;
-        chrome_.recent_left = scale_ > 0.0f ? renderer_.EffectiveSidebarWidth(static_cast<float>(Width())) / scale_ : 0.0f;
+        chrome_.band_left = scale_ > 0.0f ? renderer_.EffectiveSidebarWidth(static_cast<float>(Width())) / scale_ : 0.0f;
         chrome_.app_name = spec_.host_app_name;
         chrome_.app_icon = AppIconBitmap();
-        chrome_.strip_caption = l10n::Get(l10n::StringId::PickerOpenFolders);
+        chrome_.pulse_logo = renderer_.PulseLogoBitmap();
+        chrome_.strip_caption = l10n::Get(l10n::StringId::PickerGoTo);
         chrome_.open_folders.clear();
         for (const auto& folder : OpenFolders()) {
             PickerOpenChip chip;
@@ -3553,24 +4939,36 @@ private:
             chip.active = SamePickerPath(folder.path, current_);
             chrome_.open_folders.push_back(std::move(chip));
         }
+        // The last place is the 「上次」 row of 常用 now; the strip holds what is open.
         chrome_.last_location = {};
-        if (!spec_.last_location.path.empty() && !SamePickerPath(spec_.last_location.path, current_)) {
-            chrome_.last_location.label = FolderLabel(spec_.last_location);
-            chrome_.last_location.path = spec_.last_location.path;
-            chrome_.last_location.source = spec_.last_location_source;
+        chrome_.save_original_location = {};
+        chrome_.save_repo_root = {};
+        if (mode_ == PickerMode::Save) {
+            if (!original_file_path_.empty()) {
+                const auto orig_dir = PickerParent(original_file_path_);
+                if (!orig_dir.empty()) {
+                    chrome_.save_original_location.label = PickerLeafName(orig_dir);
+                    chrome_.save_original_location.source = FillPickerText(l10n::Get(l10n::StringId::PickerOriginalLocationSrc), PickerLeafName(original_file_path_));
+                    chrome_.save_original_location.path = orig_dir;
+                    chrome_.save_original_location.active = SamePickerPath(orig_dir, current_);
+                }
+            }
+            if (!git_repo_root_.empty()) {
+                chrome_.save_repo_root.label = PickerLeafName(git_repo_root_);
+                chrome_.save_repo_root.source = l10n::Get(l10n::StringId::PickerRepoRoot);
+                chrome_.save_repo_root.path = git_repo_root_;
+                chrome_.save_repo_root.active = SamePickerPath(git_repo_root_, current_);
+            }
         }
+        chrome_.show_tray_remove = TrayConsumeAvailable() && (HasSelectedTrayItem() || (!BasketEnabled() && HasCompatibleTrayItem()));
+        chrome_.tray_remove_checked = (picker_flags_ & picker_layout::kFlagRemoveTrayAfterOpen) != 0;
+        chrome_.tray_remove_text = l10n::Get(l10n::StringId::PickerTrayRemoveAfterOpen);
         chrome_.auto_jump_notice.clear();
         if (!spec_.auto_jump_from.empty() && !current_.empty() && !SamePickerPath(spec_.auto_jump_from, current_))
             chrome_.auto_jump_notice = FillPickerText(l10n::Get(l10n::StringId::PickerAutoJumpNotice), PickerLeafName(current_));
         chrome_.undo_jump_text.clear();
         if (!spec_.auto_jump_from.empty() && !SamePickerPath(spec_.auto_jump_from, current_))
             chrome_.undo_jump_text = FillPickerText(l10n::Get(l10n::StringId::PickerUndoJump), PickerLeafName(spec_.auto_jump_from));
-        chrome_.recent_files.clear();
-        if (ShowsRecentFiles()) {
-            chrome_.recent_caption = spec_.recent_files_caption.empty() ? l10n::Get(l10n::StringId::PickerRecentFiles) : spec_.recent_files_caption;
-            for (size_t i = 0; i < spec_.recent_files.size(); ++i)
-                chrome_.recent_files.push_back({PickerLeafName(spec_.recent_files[i].path), spec_.recent_files[i].detail, RecentThumbnail(i)});
-        }
         chrome_.selection_summary.clear(); chrome_.selection_hint.clear();
         if (allow_multiselect_) {
             uint64_t bytes = 0; size_t count = 0;
@@ -3578,7 +4976,26 @@ private:
                 const auto& entry = entries_[static_cast<size_t>(index)];
                 if (entry.kind == PickerEntryKind::File) { bytes += entry.size; ++count; }
             }
-            if (count) {
+            std::vector<std::wstring> folders;
+            for (const auto& item : basket_) {
+                bytes += item.size; ++count;
+                const auto parent = PickerParent(item.path);
+                if (std::none_of(folders.begin(), folders.end(), [&](const auto& f) { return SamePickerPath(f, parent); })) folders.push_back(parent);
+            }
+            if (!basket_.empty()) {
+                if (std::none_of(folders.begin(), folders.end(), [&](const auto& f) { return SamePickerPath(f, current_); }) &&
+                    count > basket_.size()) folders.push_back(current_);
+                auto text = l10n::Get(l10n::StringId::PickerBasketSummary);
+                const auto fill = [&](const wchar_t* key, const std::wstring& value) {
+                    const auto at = text.find(key);
+                    if (at != text.npos) text.replace(at, wcslen(key), value);
+                };
+                fill(L"{count}", std::to_wstring(count));
+                fill(L"{size}", format::ByteSize(bytes));
+                fill(L"{folders}", std::to_wstring(folders.size()));
+                chrome_.selection_summary = std::move(text);
+                chrome_.selection_hint = l10n::Get(l10n::StringId::PickerBasketHint);
+            } else if (count) {
                 auto text = l10n::Get(l10n::StringId::PickerSelectedSizeFormat);
                 auto at = text.find(L"{count}");
                 if (at != text.npos) text.replace(at, 7, std::to_wstring(count));
@@ -3588,64 +5005,289 @@ private:
                 chrome_.selection_hint = l10n::Get(l10n::StringId::PickerSelectionContinue);
             }
         }
-        chrome_.new_folder_text = spec_.hide_new_folder_button ? std::wstring{} : l10n::Get(l10n::StringId::NewFolder);
+        chrome_.new_folder_text = (spec_.hide_new_folder_button || InArchive()) ? std::wstring{} : l10n::Get(l10n::StringId::NewFolder);
         chrome_.new_folder_key = L"Ctrl+Shift+N";
         chrome_.context_filters.clear();
-        if (mode_ == PickerMode::Folder) {
+        if (mode_ == PickerMode::Save) {
+            BuildSaveFilterBar();
+        } else if (mode_ == PickerMode::Folder) {
             PickerOptionChip chip;
             chip.id = kPickContextFilterBase; chip.checked = true; chip.enabled = false;
             chip.text = l10n::Get(l10n::StringId::PickerFoldersOnly);
             chrome_.context_filters.push_back(std::move(chip));
-        } else {
-            // HTML fchips: the program's type and 全部文件 side by side, a one-click switch;
-            // every other type stays in the type list. Labels drop the "(*.ext)" tail.
-            const auto all_files = [](const std::wstring& pattern) {
-                size_t start = 0;
-                while (start <= pattern.size()) {
-                    size_t end = pattern.find(L';', start);
-                    if (end == std::wstring::npos) end = pattern.size();
-                    auto part = pattern.substr(start, end - start);
-                    while (!part.empty() && part.front() == L' ') part.erase(part.begin());
-                    while (!part.empty() && part.back() == L' ') part.pop_back();
-                    if (part == L"*" || part == L"*.*") return true;
-                    start = end + 1;
-                }
-                return false;
+        } else if (mode_ == PickerMode::File || mode_ == PickerMode::Image) {
+            BuildFilterBar();
+        }
+        chrome_.filter_tools_visible = true;
+        chrome_.sort_synced = !order_overrides_.contains(ListOrderKey(current_)) && static_cast<bool>(spec_.folder_order);
+        chrome_.preview_toggle_visible = mode_ != PickerMode::Folder && !(spec_.native_options & FOS_FORCEPREVIEWPANEON);
+        chrome_.preview_toggle_on = PreviewPaneShown();
+    }
+
+    void BuildSaveFilterBar() {
+        int total_files = 0, same_files = 0;
+        for (const auto& entry : entries_) {
+            if (entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive) continue;
+            ++total_files;
+            if (PickerMatchesFilter(entry.name, mode_, options_)) ++same_files;
+        }
+        if (!options_.save_same_format_only) save_total_files_cached_ = total_files;
+        const int shown_total = save_total_files_cached_ >= 0 ? save_total_files_cached_ : total_files;
+        PickerOptionChip all;
+        all.id = kPickSaveFilterAll;
+        all.text = l10n::Get(l10n::StringId::PickerSaveFilterAll);
+        all.checked = !options_.save_same_format_only;
+        all.count = shown_total;
+        chrome_.context_filters.push_back(std::move(all));
+        if (options_.filter_index < options_.filters.size() && !PickerFilterIsAny(options_.filters[options_.filter_index])) {
+            const auto labels = PickerFormatLabels(options_.filters);
+            const std::wstring fmt_name = options_.filter_index < labels.size() ? labels[options_.filter_index] : PickerFilterName(options_.filters[options_.filter_index]);
+            PickerOptionChip same;
+            same.id = kPickSaveFilterSame;
+            same.text = l10n::Get(l10n::StringId::PickerSaveFilterSame);
+            if (const auto pos = same.text.find(L"{format}"); pos != std::wstring::npos)
+                same.text.replace(pos, 8, fmt_name);
+            else
+                same.text += L" " + fmt_name;
+            same.checked = options_.save_same_format_only;
+            same.count = same_files;
+            chrome_.context_filters.push_back(std::move(same));
+        }
+        PickerOptionChip time;
+        time.id = kPickTimeMenu;
+        time.text = TimeFilterText(time_filter_);
+        time.checked = time_filter_ != 0;
+        time.drop_down = true;
+        time.gap_before = true;
+        time.fold_late = true;
+        chrome_.context_filters.push_back(std::move(time));
+    }
+
+    // ---- open filter bar (HTML 筛选条) ----
+
+    // The program's types with files here (counts), 更多 for the rest, *.* last;
+    // with only *.*, Pulse's own categories of what is here. Then 时间 ▾ (merging 只看新文件).
+    void BuildFilterBar() {
+        if (Width() / scale_ < 760.0f) {
+            PickerOptionChip chip; chip.id = kPickCompactFilters;
+            chip.text = l10n::Get(l10n::StringId::ToolbarFilter);
+            chip.checked = time_filter_ != 0 || options_.only_new || options_.category != 0;
+            chip.drop_down = true;
+            chrome_.context_filters.push_back(std::move(chip));
+            return;
+        }
+        const size_t count = std::min<size_t>(options_.filters.size(), 64);
+        bool any_only = true;
+        for (size_t i = 0; i < count; ++i) if (!PickerFilterIsAny(options_.filters[i])) any_only = false;
+        const auto labels = PickerFormatLabels(options_.filters);
+        const auto counted = [&](size_t i) { return counts_valid_ && i < filter_counts_.size() ? static_cast<int>(filter_counts_[i]) : -1; };
+        if (!any_only) {
+            const auto chip_text = [&](size_t i) {
+                const auto name = PickerFilterName(options_.filters[i]);
+                const auto extensions = PickerFilterExtensions(options_.filters[i]);
+                return !name.empty() && (extensions.size() > 3 || name.size() <= 10) ? name : labels[i];
             };
-            const auto short_label = [](std::wstring label) {
-                const auto open = label.rfind(L'(');
-                if (open != std::wstring::npos && open > 0 && !label.empty() && label.back() == L')') {
-                    label.erase(open);
-                    while (!label.empty() && label.back() == L' ') label.pop_back();
-                }
-                return label;
-            };
-            const auto has_visible_label = [](const std::wstring& label) {
-                return label.find_first_not_of(L" \t\r\n") != std::wstring::npos;
-            };
-            const size_t count = std::min<size_t>(options_.filters.size(), 64);
-            size_t specific = count, everything = count;
-            if (options_.filter_index < count && has_visible_label(options_.filters[options_.filter_index].label) &&
-                !all_files(options_.filters[options_.filter_index].pattern))
-                specific = options_.filter_index;
             for (size_t i = 0; i < count; ++i) {
-                if (!has_visible_label(options_.filters[i].label)) continue;
-                const bool all = all_files(options_.filters[i].pattern);
-                if (all && everything == count) everything = i;
-                if (!all && specific == count) specific = i;
-            }
-            for (const size_t i : {specific, everything}) {
-                if (i >= count) continue;
+                if (PickerFilterIsAny(options_.filters[i])) continue;
+                const bool current = i == options_.filter_index;
+                const int files = counted(i);
+                if (!current && i != 0 && files == 0) continue;  // no files of this type here: the type list keeps it
                 PickerOptionChip chip;
                 chip.id = kPickContextFilterBase + static_cast<int>(i);
-                chip.text = short_label(options_.filters[i].label);
-                if (chip.text.empty()) chip.text = options_.filters[i].label;
+                chip.text = chip_text(i);
                 chip.label = options_.filters[i].pattern;  // the view picks the chip's icon from it
+                chip.checked = current;
+                chip.count = files;
+                chip.hideable = !current;
+                chrome_.context_filters.push_back(std::move(chip));
+            }
+            PickerOptionChip more;
+            more.id = kPickFilterMore; more.text = l10n::Get(l10n::StringId::More); more.more = true;
+            chrome_.context_filters.push_back(std::move(more));
+            for (size_t i = 0; i < count; ++i) {
+                if (!PickerFilterIsAny(options_.filters[i])) continue;
+                PickerOptionChip chip;
+                chip.id = kPickContextFilterBase + static_cast<int>(i);
+                chip.text = PickerFilterName(options_.filters[i]);
+                if (chip.text.empty()) chip.text = options_.filters[i].label;
                 chip.checked = i == options_.filter_index;
+                chip.count = counted(i);
+                chip.hideable = !chip.checked;
+                chrome_.context_filters.push_back(std::move(chip));
+            }
+        } else if (counts_valid_) {
+            static constexpr l10n::StringId kNames[kPickerCategoryCount] = {l10n::StringId::FilterAll, l10n::StringId::KindImage,
+                l10n::StringId::KindDocument, l10n::StringId::KindVideo, l10n::StringId::KindAudio, l10n::StringId::KindArchive,
+                l10n::StringId::DetailsOther};
+            for (size_t c = 0; c < kPickerCategoryCount; ++c) {
+                if (c && !category_counts_[c] && options_.category != static_cast<int>(c)) continue;
+                PickerOptionChip chip;
+                chip.id = kPickCategoryBase + static_cast<int>(c);
+                chip.text = l10n::Get(kNames[c]);
+                chip.count = static_cast<int>(category_counts_[c]);
+                chip.checked = options_.category == static_cast<int>(c);
+                chip.hideable = c != 0 && !chip.checked;  // a short row keeps 全部 and the chosen one
                 chrome_.context_filters.push_back(std::move(chip));
             }
         }
+        // One dropdown chip for time (HTML 时间 ▾), merging 只看新文件 when available.
+        PickerOptionChip time;
+        time.id = kPickTimeMenu;
+        time.text = options_.only_new ? l10n::Get(l10n::StringId::PickerNewFiles) : TimeFilterText(time_filter_);
+        time.checked = time_filter_ != 0 || options_.only_new;
+        time.drop_down = true;
+        if (options_.only_new && counts_valid_) time.count = static_cast<int>(new_count_);
+        time.gap_before = true;
+        time.fold_late = true;
+        chrome_.context_filters.push_back(std::move(time));
     }
+
+    std::wstring TimeFilterText(int filter) const {
+        switch (filter) {
+        case 1: return l10n::Get(l10n::StringId::DateToday);
+        case 2: return l10n::Get(l10n::StringId::DateThisWeek);
+        default: return l10n::Get(l10n::StringId::PickerFilterTime);
+        }
+    }
+
+    void ShowTimeMenu(const D2D1_RECT_F& anchor) {
+        std::vector<FluentMenuItem> items;
+        items.push_back(Radio(1, l10n::Get(l10n::StringId::DateAny), !options_.only_new && time_filter_ == 0));
+        items.push_back(Radio(2, l10n::Get(l10n::StringId::DateToday), !options_.only_new && time_filter_ == 1));
+        items.push_back(Radio(3, l10n::Get(l10n::StringId::DateThisWeek), !options_.only_new && time_filter_ == 2));
+        if (mode_ != PickerMode::Save && options_.new_since) {
+            items.back().separator_after = true;
+            auto fresh = Radio(4, l10n::Get(l10n::StringId::PickerFilterOnlyNew), options_.only_new);
+            fresh.detail = l10n::Get(l10n::StringId::PickerFilterOnlyNewSub);
+            if (counts_valid_) fresh.badge_text = std::to_wstring(new_count_);
+            items.push_back(std::move(fresh));
+        }
+        menu_.SetTheme(dark_, accent_);
+        const int command = TrackPickerDropdown(ScreenRect(anchor), std::move(items));
+        if (done_ || command <= 0) return;
+        if (command == 4) {
+            options_.only_new = !options_.only_new;
+            if (options_.only_new) { time_filter_ = 0; options_.modified_after = 0; }
+            Reload();
+            return;
+        }
+        const int filter = command - 1;
+        if (options_.only_new || filter != time_filter_) {
+            options_.only_new = false;
+            SetTimeFilter(filter);
+        }
+    }
+
+    void ShowCompactFilters(const D2D1_RECT_F& anchor) {
+        std::vector<FluentMenuItem> items;
+        bool any_only = true;
+        for (const auto& filter : options_.filters) if (!PickerFilterIsAny(filter)) any_only = false;
+        if (!any_only) {
+            for (size_t i = 0; i < options_.filters.size() && i < 64; ++i) {
+                auto item = Radio(10 + static_cast<int>(i), PickerFilterName(options_.filters[i]), i == options_.filter_index);
+                if (counts_valid_ && i < filter_counts_.size()) item.badge_text = std::to_wstring(filter_counts_[i]);
+                items.push_back(std::move(item));
+            }
+        } else {
+            static constexpr l10n::StringId names[kPickerCategoryCount] = {l10n::StringId::FilterAll, l10n::StringId::KindImage,
+                l10n::StringId::KindDocument, l10n::StringId::KindVideo, l10n::StringId::KindAudio, l10n::StringId::KindArchive,
+                l10n::StringId::DetailsOther};
+            for (size_t i = 0; i < kPickerCategoryCount; ++i) {
+                if (i && counts_valid_ && !category_counts_[i] && options_.category != static_cast<int>(i)) continue;
+                auto item = Radio(100 + static_cast<int>(i), l10n::Get(names[i]), options_.category == static_cast<int>(i));
+                if (counts_valid_) item.badge_text = std::to_wstring(category_counts_[i]);
+                items.push_back(std::move(item));
+            }
+        }
+        if (!items.empty()) items.back().separator_after = true;
+        items.push_back(Radio(200, l10n::Get(l10n::StringId::DateAny), time_filter_ == 0));
+        items.push_back(Radio(201, l10n::Get(l10n::StringId::DateToday), time_filter_ == 1));
+        items.push_back(Radio(202, l10n::Get(l10n::StringId::DateThisWeek), time_filter_ == 2));
+        if (options_.new_since) {
+            items.back().separator_after = true;
+            auto item = Radio(300, l10n::Get(l10n::StringId::PickerNewFiles), options_.only_new);
+            if (counts_valid_) item.badge_text = std::to_wstring(new_count_);
+            items.push_back(std::move(item));
+        }
+        menu_.SetTheme(dark_, accent_);
+        const int command = TrackPickerDropdown(ScreenRect(anchor), std::move(items));
+        if (done_) return;
+        if (command >= 10 && command < 74) ApplyFilter(static_cast<size_t>(command - 10));
+        else if (command >= 100 && command < 100 + static_cast<int>(kPickerCategoryCount)) SetCategory(command - 100);
+        else if (command >= 200 && command <= 202) SetTimeFilter(command - 200);
+        else if (command == 300) { options_.only_new = !options_.only_new; Reload(); }
+    }
+
+    static uint64_t LocalDayStartTicks(int days_back) {
+        SYSTEMTIME now{}; GetLocalTime(&now);
+        now.wHour = now.wMinute = now.wSecond = now.wMilliseconds = 0;
+        FILETIME local{}, utc{};
+        if (!SystemTimeToFileTime(&now, &local) || !LocalFileTimeToFileTime(&local, &utc)) return 0;
+        const uint64_t ticks = (static_cast<uint64_t>(utc.dwHighDateTime) << 32) | utc.dwLowDateTime;
+        return ticks - static_cast<uint64_t>(days_back) * 864000000000ull;
+    }
+    static uint64_t WeekStartTicks() {
+        SYSTEMTIME now{}; GetLocalTime(&now);
+        wchar_t first[8]{};
+        // LOCALE_IFIRSTDAYOFWEEK: 0 Monday .. 6 Sunday; wDayOfWeek: 0 Sunday.
+        const int first_day = GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_IFIRSTDAYOFWEEK, first, 8) ? (_wtoi(first) + 1) % 7 : 1;
+        return LocalDayStartTicks((now.wDayOfWeek + 7 - first_day) % 7);
+    }
+
+    // The preview pane: forced by the program, default ON in Save mode (destination panel),
+    // else this program's last choice (Alt+P).
+    bool PreviewPaneShown() const {
+        if (mode_ == PickerMode::Folder) return false;
+        if (spec_.native_options & FOS_FORCEPREVIEWPANEON) return true;
+        if (mode_ == PickerMode::Save) return (picker_flags_ & picker_layout::kFlagPreviewPaneHidden) == 0;
+        return (picker_flags_ & picker_layout::kFlagPreviewPane) != 0;
+    }
+    void TogglePreviewPane() {
+        if (mode_ == PickerMode::Folder || (spec_.native_options & FOS_FORCEPREVIEWPANEON)) return;
+        picker_flags_ ^= (mode_ == PickerMode::Save ? picker_layout::kFlagPreviewPaneHidden : picker_layout::kFlagPreviewPane);
+        DismissHover();
+        Relayout();
+        if (selected_ >= 0) EnsureVisible(selected_);
+        Invalidate();
+    }
+
+    void SetTimeFilter(int filter) {
+        time_filter_ = filter;
+        options_.modified_after = time_filter_ == 1 ? LocalDayStartTicks(0) : time_filter_ == 2 ? WeekStartTicks()
+            : 0;
+        Reload();
+    }
+
+    void SetCategory(int category) {
+        options_.category = options_.category == category ? 0 : category;
+        Reload();
+    }
+
+    // Pulse's own kinds (the search's type: words) for names when the program said *.*.
+    static std::function<int(std::wstring_view)> MakeCategoryOf() {
+        auto map = std::make_shared<std::unordered_map<std::wstring, int>>();
+        const index::SearchKind kinds[] = {index::SearchKind::Image, index::SearchKind::Document, index::SearchKind::Video,
+                                           index::SearchKind::Audio, index::SearchKind::Archive};
+        for (int k = 0; k < 5; ++k) {
+            const auto list = index::KindExtensions(kinds[k]);
+            size_t start = 0;
+            while (start < list.size()) {
+                size_t end = list.find(L';', start);
+                if (end == std::wstring::npos) end = list.size();
+                if (end > start) map->emplace(list.substr(start, end - start), k + 1);
+                start = end + 1;
+            }
+        }
+        return [map](std::wstring_view name) {
+            const size_t dot = name.rfind(L'.');
+            if (dot == std::wstring_view::npos || dot == 0 || dot + 1 == name.size()) return 6;
+            std::wstring ext(name.substr(dot + 1));
+            for (auto& c : ext) c = static_cast<wchar_t>(std::towlower(c));
+            const auto it = map->find(ext);
+            return it == map->end() ? 6 : it->second;
+        };
+    }
+
     static std::wstring FillPickerText(std::wstring text, const std::wstring& name) {
         const auto at = text.find(L"{name}");
         if (at != std::wstring::npos) text.replace(at, 6, name);
@@ -3678,20 +5320,23 @@ private:
         DismissHover("hover-layout");
         SyncCustomOptions();
         RebuildCustomFlow();
-        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_, chrome_.overwrite_pending, !chrome_.options.empty()) + CustomHeightDip());
-        renderer_.SetEmbeddedBand(kPickerStripDip);
-        renderer_.SetEmbeddedPickerRecent((ShowsRecentFiles() ? kPickerRecentDip : 0.0f) +
+        renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_, chrome_.overwrite_pending || chrome_.live_conflict, !chrome_.options.empty(), !chrome_.formats.empty(), (!chrome_.save_suggestions.empty() || !chrome_.format_note.empty())) + CustomHeightDip());
+        SyncPulseSelection();
+        const float strip = kPickerStripDip + (chrome_.pulse_selection.empty() ? 0.0f : kPickerPulseSelectionDip);
+        if (renderer_.EmbeddedBandDip() != strip) renderer_.SetEmbeddedPickerLayout(true, strip);
+        renderer_.SetEmbeddedBand(strip);
+        renderer_.SetEmbeddedPickerRecent(
             (!spec_.auto_jump_from.empty() && !current_.empty() && !SamePickerPath(spec_.auto_jump_from, current_) ? kPickerAutoJumpNoticeDip : 0.0f));
         chrome_.strip_top = kPickerTitleDip + renderer_.ToolbarHeightDip() - renderer_.EmbeddedBandDip();
         chrome_.strip_right = RendererWidth() / scale_;
-        renderer_.SetDetailsPanelVisible((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
+        renderer_.SetDetailsPanelVisible(PreviewPaneShown());
         SyncVm();
         SyncOpenDropDown();
         const auto pane_bounds = PaneBounds();
         chrome_.context_top = pane_bounds.top / scale_;
         chrome_.context_left = pane_bounds.left / scale_;
         chrome_.context_right = renderer_.PaneHeaderTitleRight(vm_.pane, pane_bounds) / scale_;
-        chrome_.recent_top = renderer_.EmbeddedPickerRecentRect(pane_bounds).top / scale_;
+        chrome_.band_top = renderer_.EmbeddedPickerRecentRect(pane_bounds).top / scale_;
         RefreshChromeLayout();
         ClampScroll();
         PlaceEdits();
@@ -3714,6 +5359,72 @@ private:
         RefreshChromeLayout();
         UpdateHover(HitAt(static_cast<float>(hover_point_.x), static_cast<float>(hover_point_.y)));
         Invalidate();
+    }
+
+    void DrawIncomingDropzone(const Theme& theme, bool hc) {
+        if (incoming_dropzone_sources_.empty()) return;
+        auto* dc = compositor_.Dc();
+        if (!dc) return;
+        const auto list = renderer_.PaneListRect(vm_.pane, PaneBounds());
+        const float inset = 6.0f * scale_;
+        const auto zone = D2D1::RectF(list.left + inset, list.top + inset, list.right - inset, list.bottom - inset);
+        if (zone.right - zone.left < 120.0f * scale_ || zone.bottom - zone.top < 80.0f * scale_) return;
+        const float r = 8.0f * scale_;
+        painter_.FillRoundedRect(zone, r, hc ? theme.bg : WithAlpha(theme.accent, dark_ ? 0.14f : 0.08f));
+        ComPtr<ID2D1StrokeStyle> dash;
+        ComPtr<ID2D1Factory> factory;
+        dc->GetFactory(&factory);
+        if (factory.get()) {
+            D2D1_STROKE_STYLE_PROPERTIES props = D2D1::StrokeStyleProperties();
+            props.dashStyle = D2D1_DASH_STYLE_DASH;
+            factory->CreateStrokeStyle(props, nullptr, 0, &dash);
+        }
+        ComPtr<ID2D1SolidColorBrush> accent_brush;
+        if (SUCCEEDED(dc->CreateSolidColorBrush(hc ? theme.text : theme.accent, &accent_brush))) {
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(zone, r, r), accent_brush.get(), std::max(2.0f, 2.0f * scale_), dash.get());
+        }
+        std::wstring title;
+        if (incoming_dropzone_sources_.size() == 1) {
+            title = FillPickerText(l10n::Get(l10n::StringId::PickerDropZoneSingle), PickerLeafName(incoming_dropzone_sources_.front()));
+        } else {
+            title = l10n::Get(l10n::StringId::PickerDropZoneMulti);
+            if (const auto pos = title.find(L"{count}"); pos != std::wstring::npos)
+                title.replace(pos, 7, std::to_wstring(incoming_dropzone_sources_.size()));
+        }
+        std::wstring sub;
+        if (!spec_.host_app_name.empty()) {
+            sub = l10n::Get(l10n::StringId::PickerDropZoneSub);
+            if (const auto pos = sub.find(L"{app}"); pos != std::wstring::npos) sub.replace(pos, 5, spec_.host_app_name);
+        } else {
+            sub = l10n::Get(l10n::StringId::PickerDropZoneSubGeneric);
+        }
+        const float card_w = std::min(zone.right - zone.left - 24.0f * scale_, std::max(240.0f * scale_,
+            std::max(typography::MeasureLine(&compositor_, compositor_.HeaderFormat(), title),
+                     typography::MeasureLine(&compositor_, compositor_.SmallFormat(), sub)) + 44.0f * scale_));
+        const float card_h = 84.0f * scale_;
+        const float cx = (zone.left + zone.right) * 0.5f;
+        const float cy = (zone.top + zone.bottom) * 0.5f;
+        const auto card = D2D1::RectF(cx - card_w * 0.5f, cy - card_h * 0.5f, cx + card_w * 0.5f, cy + card_h * 0.5f);
+        painter_.FillRoundedRect(card, 10.0f * scale_, theme.surface_card);
+        painter_.StrokeRoundedRect(card, 10.0f * scale_, hc ? theme.text : theme.stroke_card, std::max(1.0f, scale_));
+        painter_.DrawGlyph(L"\xE73E", {cx - 12.0f * scale_, card.top + 8.0f * scale_, cx + 12.0f * scale_, card.top + 32.0f * scale_}, hc ? theme.text : theme.accent);
+        painter_.DrawText(title, {card.left + 12.0f * scale_, card.top + 34.0f * scale_, card.right - 12.0f * scale_, card.top + 56.0f * scale_},
+                          compositor_.HeaderFormat(), hc ? theme.text : theme.accent, fluent::HorizontalAlignment::Center);
+        painter_.DrawText(sub, {card.left + 12.0f * scale_, card.top + 58.0f * scale_, card.right - 12.0f * scale_, card.bottom - 6.0f * scale_},
+                          compositor_.SmallFormat(), theme.text_secondary, fluent::HorizontalAlignment::Center);
+    }
+
+    void ShowSortSyncMenu(const D2D1_RECT_F& anchor) {
+        std::vector<FluentMenuItem> items;
+        auto sort_item = SortMenu();
+        auto group_item = GroupMenu();
+        for (auto& c : sort_item.children) items.push_back(std::move(c));
+        if (!items.empty()) items.back().separator_after = true;
+        items.push_back(std::move(group_item));
+        menu_.SetTheme(dark_, accent_);
+        const int command = TrackPickerDropdown(ScreenRect(anchor), std::move(items));
+        if (done_ || command <= 0) return;
+        HandleSortCommand(command);
     }
 
     void Render() {
@@ -3771,29 +5482,9 @@ private:
             ((filter_open_ ? 1.0f : 0.0f) - filter_motion_from_) * motion::EaseOutCubic(filter_t);
         PULSE_PICKER_TRACE_POINT("chrome-before");
         RefreshChromeLayout();
-        if (filename_edit_ && (IsWindowVisible(filename_edit_) != FALSE) != (chrome_.selected_names.size() <= 1)) PlaceEdits();
-        recent_thumbnail_cache_.Begin(hwnd_, compositor_.Dc());
-        chrome_.draw_recent_thumbnail = [this](size_t index, const D2D1_RECT_F& bounds) {
-            const bool bitmap = index < spec_.recent_files.size() && recent_thumbnail_cache_.Draw(spec_.recent_files[index], bounds);
-#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
-            if (bitmap) ++test_recent_bitmap_draws_;
-#endif
-            return bitmap;
-        };
-        chrome_.draw_recent_icon = [this, theme](size_t index, const D2D1_RECT_F& bounds) {
-            if (index >= spec_.recent_files.size()) return false;
-            const auto& file = spec_.recent_files[index];
-            renderer_.DrawPathIcon(file.path, file.attributes, bounds.left, bounds.top, bounds.right - bounds.left, theme);
-            return true;
-        };
+        if (filename_edit_ && (IsWindowVisible(filename_edit_) != FALSE) != (chrome_.selected_names.empty())) PlaceEdits();
+        DrawIncomingDropzone(theme, hc);
         DrawPickerChrome(compositor_, painter_, theme, chrome_, chrome_layout_, hc);
-        const bool recent_upload = recent_thumbnail_cache_.End();
-        const auto recent_retry = recent_thumbnail_cache_.RetryDeadline();
-        if (recent_upload || recent_retry) {
-            const auto now = GetTickCount64();
-            const auto delay = recent_upload || recent_retry <= now ? 16ull : std::min<uint64_t>(recent_retry - now, 60000);
-            SetTimer(hwnd_, kRecentThumbnailTimer, static_cast<UINT>(delay), nullptr);
-        } else KillTimer(hwnd_, kRecentThumbnailTimer);
         DrawCustom(theme);
         PULSE_PICKER_TRACE_POINT("chrome-after");
         PULSE_PICKER_TRACE_POINT("painted-edits-before");
@@ -3989,7 +5680,7 @@ private:
         vm_.hover_control_index = hit.main.index;
         vm_.hover_sub_index = hit.main.sub_index;
         if (hit.main.region == HitTestResult::Row && hit.main.index >= 0 &&
-            static_cast<size_t>(hit.main.index) < entries_.size() && !GetCapture() && !waiting_) {
+            static_cast<size_t>(hit.main.index) < entries_.size() && !GetCapture() && !waiting_ && !InArchive()) {
             const auto& entry = entries_[static_cast<size_t>(hit.main.index)];
             if (hover_preview_.view.path != entry.path) {
                 DismissHover();
@@ -4008,15 +5699,84 @@ private:
             const auto index = static_cast<size_t>(hit.chrome - kPickOpenFolderBase);
             if (index < folders.size()) vm_.tooltip_text = path::FriendlyPathText(folders[index].path);
         } else if (hit.chrome == kPickLastLocation) {
-            vm_.tooltip_text = path::FriendlyPathText(spec_.last_location.path);
+            vm_.tooltip_text = spec_.last_location_source;
+            if (!vm_.tooltip_text.empty()) vm_.tooltip_text += L"\n";
+            vm_.tooltip_text += path::FriendlyPathText(spec_.last_location.path);
+        } else if (hit.main.region == HitTestResult::SidebarItem && picker_places::detail::DiskPath(hit.main.path)) {
+            vm_.tooltip_text = path::FriendlyPathText(hit.main.path);
         } else if (changed && hit.main.region != HitTestResult::Row) {
             vm_.tooltip_text.clear();
+        }
+        for (size_t i = 0; i < chrome_layout_.selection_tags.size() && i < selection_tag_paths_.size(); ++i)
+            if (ContainsRect(chrome_layout_.selection_tags[i], static_cast<float>(hover_point_.x), static_cast<float>(hover_point_.y)))
+                vm_.tooltip_text = path::FriendlyPathText(selection_tag_paths_[i]);
+        if (hit.chrome >= kPickFormatBase && hit.chrome < kPickPulseFileBase) {
+            const size_t segment = static_cast<size_t>(hit.chrome - kPickFormatBase);
+            if (segment < chrome_.formats.size() && chrome_.formats[segment].filter >= 0) {
+                const size_t index = static_cast<size_t>(chrome_.formats[segment].filter);
+                if (index < options_.filters.size()) {
+                    vm_.tooltip_text = options_.filters[index].label + L"\n" + PickerFormatNote(options_.filters[index]);
+                }
+            }
+        } else if (hit.chrome == kPickFormatNote || (chrome_.mode == PickerMode::Save && hit.chrome == kPickFilter)) {
+            vm_.tooltip_text = chrome_.filter_static ? chrome_.format_static_text : chrome_.filter_text;
+            if (!chrome_.format_note.empty()) vm_.tooltip_text += L"\n" + chrome_.format_note;
+        }
+        if (mode_ == PickerMode::Save && ContainsRect(chrome_layout_.summary,
+            static_cast<float>(hover_point_.x), static_cast<float>(hover_point_.y))) {
+            vm_.tooltip_text = path::FriendlyPathText(save_draft_path_);
+            if (!chrome_.save_space_text.empty()) vm_.tooltip_text += L"\n" + chrome_.save_space_text;
+            if (!chrome_.summary_warning.empty()) vm_.tooltip_text += L"\n" + chrome_.summary_warning;
+        } else if (mode_ == PickerMode::Save && chrome_.live_conflict && ContainsRect(chrome_layout_.conflict_text,
+            static_cast<float>(hover_point_.x), static_cast<float>(hover_point_.y))) {
+            vm_.tooltip_text = chrome_.live_conflict_text;
+            if (!chrome_.save_space_text.empty()) vm_.tooltip_text += L"\n" + chrome_.save_space_text;
         }
         if (!vm_.tooltip_text.empty()) {
             vm_.tooltip_x = static_cast<float>(hover_point_.x);
             vm_.tooltip_y = static_cast<float>(hover_point_.y);
         }
+        if (hit.chrome == kPickTrayRemoveAfterOpen) {
+            vm_.tooltip_text = l10n::Get(l10n::StringId::PickerTrayRemoveAfterOpenHint);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.chrome == kPickSortSync) {
+            vm_.tooltip_text = l10n::Get(l10n::StringId::PickerSortSyncTip);
+            if (chrome_.sort_synced) vm_.tooltip_text += L"\n" + l10n::Get(l10n::StringId::PickerSortSyncSame);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.chrome == kPickPreviewToggle) {
+            vm_.tooltip_text = l10n::Get(l10n::StringId::PickerPreviewPaneTip);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.chrome == kPickSaveOrigin && !chrome_.save_original_location.path.empty()) {
+            vm_.tooltip_text = path::FriendlyPathText(chrome_.save_original_location.path);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.chrome == kPickSaveRepoRoot && !chrome_.save_repo_root.path.empty()) {
+            vm_.tooltip_text = path::FriendlyPathText(chrome_.save_repo_root.path);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.main.region == HitTestResult::DetailsSaveAfterShow || hit.main.region == HitTestResult::DetailsSaveAfterCopy) {
+            vm_.tooltip_text = l10n::Get(pulse_places_.save_followup_available ?
+                l10n::StringId::PickerSaveAfterHint : l10n::StringId::PickerSaveAfterUnavailable);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.main.region == HitTestResult::SidebarHeaderAction && hit.main.sidebar_action == SidebarAddAction::PinToApp && !spec_.host_app_name.empty()) {
+            vm_.tooltip_text = FillPickerText(l10n::Get(IsPathPinnedToApp(current_) ? l10n::StringId::PickerUnpinFromApp : l10n::StringId::PickerPinToApp), spec_.host_app_name);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.main.region == HitTestResult::PaneDetails) {
+            vm_.tooltip_text = l10n::Get(l10n::StringId::ViewDetails);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.main.region == HitTestResult::PaneMediumIcons) {
+            vm_.tooltip_text = l10n::Get(l10n::StringId::ViewLarge);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.main.path == TrayToken(0) + L":save_to_tray") {
+            vm_.tooltip_text = l10n::Get(l10n::StringId::PickerSaveToTrayTip);
+            vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+        } else if (hit.main.path.starts_with(kPickerTrayPrefix)) {
+            const auto item = std::find_if(tray_display_items_.begin(), tray_display_items_.end(), [&](const auto& row) { return row.first == hit.main.path; });
+            if (item != tray_display_items_.end()) {
+                vm_.tooltip_text = item->second.path;
+                vm_.tooltip_x = static_cast<float>(hover_point_.x); vm_.tooltip_y = static_cast<float>(hover_point_.y);
+            }
+        }
         if (changed) Invalidate();
+
     }
 
     // ---- scrolling ---------------------------------------------------------
@@ -4034,7 +5794,7 @@ private:
     }
 
     void BeginMarquee(float x, float y) {
-        marquee_.Begin(selected_set_, selected_, anchor_, x, y, scroll_, KeyDown(VK_CONTROL), KeyDown(VK_SHIFT));
+        marquee_.Begin(selected_set_, selected_, anchor_, x, y, scroll_, KeyDown(VK_CONTROL), KeyDown(VK_SHIFT), ScrollX());
         focus_ = kPickList;
         if (address_editing_) EndAddressEdit(false);
         SetFocus(hwnd_);
@@ -4053,10 +5813,15 @@ private:
             const float overflow = y < list.top + edge ? y - list.top - edge :
                 y > list.bottom - edge ? y - list.bottom + edge : 0;
             if (overflow != 0) ScrollPaneTo(scroll_ + std::clamp(overflow * 0.3f, -48 * scale_, 48 * scale_));
+            if (view_mode_ == ViewMode::List) {
+                const float side = x < list.left + edge ? x - list.left - edge :
+                    x > list.right - edge ? x - list.right + edge : 0;
+                if (side != 0) ScrollPaneXTo(scroll_x_ + std::clamp(side * 0.3f, -48 * scale_, 48 * scale_));
+            }
             SyncVm();
         }
         marquee_.hits.clear();
-        renderer_.ItemsInRectInPane(vm_.pane, PaneBounds(), marquee_.Rect(scroll_, list), marquee_.hits);
+        renderer_.ItemsInRectInPane(vm_.pane, PaneBounds(), marquee_.Rect(scroll_, list, ScrollX()), marquee_.hits);
         if (marquee_.Apply(selected_set_, static_cast<int>(entries_.size())) || first) {
             user_interacted_ = true;
             selected_ = selected_set_.empty() ? -1 : *std::min_element(selected_set_.begin(), selected_set_.end());
@@ -4074,6 +5839,28 @@ private:
         Invalidate();
     }
 
+    void ScrollPaneXTo(float value) {
+        if (view_mode_ != ViewMode::List) return;
+        scroll_x_ = value;
+        ClampScroll();
+        Invalidate();
+    }
+
+    // The List view's horizontal bar (as the main window's): the list's bottom
+    // strip, its thumb the drawn one at full strip height.
+    bool HScrollbarGeometry(D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) {
+        if (view_mode_ != ViewMode::List) return false;
+        SyncVm();
+        track = renderer_.PaneListRect(vm_.pane, PaneBounds());
+        max_scroll = renderer_.MaxScrollXForPane(vm_.pane, PaneBounds());
+        if (max_scroll <= 0.0f || track.right <= track.left) return false;
+        const D2D1_RECT_F drawn = fluent::ScrollbarThumbRect(PaneHScrollbarSpec(vm_.pane, track, max_scroll, scale_), scale_);
+        if (drawn.right <= drawn.left) return false;
+        track.top = track.bottom - 12.0f * scale_;
+        thumb = D2D1::RectF(drawn.left, track.top, drawn.right, track.bottom);
+        return true;
+    }
+
     void ScrollSidebarTo(float value) {
         SyncVm();
         const float max_scroll = renderer_.SidebarMaxScroll(vm_, RendererWidth(), Height());
@@ -4087,8 +5874,26 @@ private:
                        : renderer_.PaneScrollbarGeometry(vm_.pane, PaneBounds(), track, thumb, max_scroll);
     }
 
+    void BeginHScrollbarDrag(float x) {
+        D2D1_RECT_F track{}, thumb{};
+        float max_scroll = 0.0f;
+        if (!HScrollbarGeometry(track, thumb, max_scroll)) return;
+        if (x < thumb.left || x >= thumb.right) {
+            const float travel = std::max(1.0f, (track.right - track.left) - (thumb.right - thumb.left));
+            ScrollPaneXTo(std::clamp((x - track.left - (thumb.right - thumb.left) * 0.5f) *
+                                     max_scroll / travel, 0.0f, max_scroll));
+        }
+        scrollbar_horizontal_ = true;
+        scrollbar_sidebar_ = false;
+        scrollbar_drag_y_ = x;
+        scrollbar_drag_scroll_ = scroll_x_;
+        dragging_scrollbar_ = true;
+        SetCapture(hwnd_);
+    }
+
     void BeginScrollbarDrag(const HitTestResult& hit, float y) {
         scrollbar_sidebar_ = hit.sub_index == 2;
+        scrollbar_horizontal_ = false;
         D2D1_RECT_F track{}, thumb{};
         float max_scroll = 0.0f;
         if (!ScrollbarGeometry(scrollbar_sidebar_, track, thumb, max_scroll)) return;
@@ -4106,9 +5911,16 @@ private:
         SetCapture(hwnd_);
     }
 
-    void DragScrollbar(float y) {
+    // Pointer position along the dragged bar: x for the horizontal one.
+    void DragScrollbar(float x, float y) {
         D2D1_RECT_F track{}, thumb{};
         float max_scroll = 0.0f;
+        if (scrollbar_horizontal_) {
+            if (!HScrollbarGeometry(track, thumb, max_scroll)) return;
+            const float travel = std::max(1.0f, (track.right - track.left) - (thumb.right - thumb.left));
+            ScrollPaneXTo(scrollbar_drag_scroll_ + (x - scrollbar_drag_y_) * max_scroll / travel);
+            return;
+        }
         if (!ScrollbarGeometry(scrollbar_sidebar_, track, thumb, max_scroll)) return;
         const float travel = std::max(1.0f, (track.bottom - track.top) - (thumb.bottom - thumb.top));
         const float value = scrollbar_drag_scroll_ + (y - scrollbar_drag_y_) * max_scroll / travel;
@@ -4131,8 +5943,19 @@ private:
         const D2D1_RECT_F sidebar = renderer_.SidebarRect(RendererWidth(), Height());
         if (ContainsRect(sidebar, static_cast<float>(point.x), static_cast<float>(point.y)))
             ScrollSidebarTo(vm_.sidebar_scroll + delta);
+        else if (view_mode_ == ViewMode::List)
+            ScrollPaneXTo(scroll_x_ - steps * kListWheelDip * scale_);  // the List view's columns run sideways
         else
             ScrollPaneTo(scroll_ + delta);
+    }
+
+    // WM_MOUSEHWHEEL over the list: sideways in the List view.
+    bool HWheel(WPARAM wparam, POINT point) {
+        if (view_mode_ != ViewMode::List ||
+            !ContainsRect(PaneBounds(), static_cast<float>(point.x), static_cast<float>(point.y))) return false;
+        DismissHover();
+        ScrollPaneXTo(scroll_x_ + static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * kListWheelDip * scale_);
+        return true;
     }
 
     // ---- menus -------------------------------------------------------------
@@ -4196,15 +6019,36 @@ private:
 
     FluentMenuItem SortMenu() const {
         FluentMenuItem sort = Item(0, l10n::Get(l10n::StringId::SortBy).c_str(), L"\xE8CB");
-        const wchar_t* zh[] = {L"名称", L"修改日期", L"大小", L"类型"};
-        const wchar_t* en[] = {L"Name", L"Date modified", L"Size", L"Type"};
+        static constexpr l10n::StringId labels[] = {l10n::StringId::ColumnName, l10n::StringId::ColumnModified,
+            l10n::StringId::ColumnSize, l10n::StringId::ColumnType};
         for (int i = 0; i < 4; ++i)
-            sort.children.push_back(Radio(10 + i, l10n::Pick(zh[i], en[i]),
-                                          static_cast<int>(options_.sort) == i));
+            sort.children.push_back(Radio(10 + i, l10n::Get(labels[i]).c_str(),
+                                          order_.column == static_cast<int>(ColumnFromSort(static_cast<PickerSort>(i)))));
+        sort.children.push_back(Radio(40, l10n::Get(l10n::StringId::ColumnCreated).c_str(), order_.column == static_cast<int>(SortColumn::Created)));
+        sort.children.push_back(Radio(41, l10n::Get(l10n::StringId::ColumnAccessed).c_str(), order_.column == static_cast<int>(SortColumn::Accessed)));
+        sort.children.push_back(Radio(42, l10n::Get(l10n::StringId::ColumnPath).c_str(), order_.column == static_cast<int>(SortColumn::Path)));
         sort.children.back().separator_after = true;
-        sort.children.push_back(Radio(14, l10n::Get(l10n::StringId::Ascending).c_str(), !options_.descending));
-        sort.children.push_back(Radio(15, l10n::Get(l10n::StringId::Descending).c_str(), options_.descending));
+        sort.children.push_back(Radio(14, l10n::Get(l10n::StringId::Ascending).c_str(), !order_.descending));
+        sort.children.push_back(Radio(15, l10n::Get(l10n::StringId::Descending).c_str(), order_.descending));
+        sort.children.back().separator_after = true;
+        static constexpr l10n::StringId folder_labels[] = {l10n::StringId::FolderSortTop, l10n::StringId::FolderSortFollow, l10n::StringId::FolderSortMixed};
+        for (int i = 0; i < 3; ++i)
+            sort.children.push_back(Radio(44 + i, l10n::Get(folder_labels[i]).c_str(), order_.folder_mode == i));
         return sort;
+    }
+
+    // Shared group-by choices; tags require a complete catalog from Pulse.
+    FluentMenuItem GroupMenu() const {
+        FluentMenuItem group = Item(0, l10n::Get(l10n::StringId::GroupBy).c_str(), L"\xF168", !current_.empty());
+        static constexpr l10n::StringId kLabels[] = {l10n::StringId::GroupNone, l10n::StringId::GroupByName,
+            l10n::StringId::GroupByDate, l10n::StringId::GroupByType, l10n::StringId::GroupBySize,
+            l10n::StringId::GroupByTag, l10n::StringId::Location};
+        for (int i = 0; i < 7; ++i) {
+            group.children.push_back(Radio(30 + i, l10n::Get(kLabels[i]).c_str(), order_.group_by == i));
+            if (i == 5) group.children.back().enabled = order_.tags != nullptr;
+            if (i == 0) group.children.back().separator_after = true;
+        }
+        return group;
     }
 
     FluentMenuItem HiddenItem(int command) const {
@@ -4214,12 +6058,116 @@ private:
         return hidden;
     }
 
-    bool HandleSortCommand(int command) {
-        if (command >= 10 && command <= 13) options_.sort = static_cast<PickerSort>(command - 10);
-        else if (command == 14 || command == 15) options_.descending = command == 15;
-        else return false;
-        Reload();
+    void AppendDisplayItems(std::vector<FluentMenuItem>& items) const {
+        auto extensions = Item(50, l10n::Get(l10n::StringId::ToolbarToolExtensions));
+        extensions.toggle = true; extensions.checked = spec_.show_file_extensions;
+        items.push_back(std::move(extensions));
+        auto system = Item(51, l10n::Get(l10n::StringId::SettingsShowProtected));
+        system.toggle = true; system.checked = options_.show_protected_os_files;
+        items.push_back(std::move(system));
+    }
+
+    bool HandleDisplayCommand(int command) {
+        if (command == 50) {
+            spec_.show_file_extensions = !spec_.show_file_extensions;
+            SyncVm(); Relayout(); Invalidate();
+        } else if (command == 51) {
+            options_.show_protected_os_files = !options_.show_protected_os_files;
+            Reload();
+        } else return false;
         return true;
+    }
+
+    bool HandleSortCommand(int command) {
+        PickerListOrder next = order_;
+        if (command >= 10 && command <= 13) next.column = static_cast<int>(ColumnFromSort(static_cast<PickerSort>(command - 10)));
+        else if (command == 14 || command == 15) next.descending = command == 15;
+        else if (command >= 30 && command <= 36) next.group_by = command - 30;
+        else if (command == 40) next.column = static_cast<int>(SortColumn::Created);
+        else if (command == 41) next.column = static_cast<int>(SortColumn::Accessed);
+        else if (command == 42) next.column = static_cast<int>(SortColumn::Path);
+        else if (command >= 44 && command <= 46) next.folder_mode = command - 44;
+        else return false;
+        SetListOrder(next);
+        return true;
+    }
+
+    // ---- list order: the main window's sort and group-by for each folder ----
+
+    static std::wstring ListOrderKey(const std::wstring& path) {
+        std::wstring key = path;
+        while (key.size() > 3 && (key.back() == L'\\' || key.back() == L'/')) key.pop_back();
+        for (auto& c : key) c = static_cast<wchar_t>(std::towlower(c));
+        return key;
+    }
+
+    // Resolves the order for `path` and hands the loader its comparator.
+    // A choice made in this dialog wins for that folder until it closes.
+    void BindListOrder(const std::wstring& path, bool moved) {
+        if (moved) collapsed_list_groups_.clear();
+        const auto chosen = order_overrides_.find(ListOrderKey(path));
+        if (chosen != order_overrides_.end()) order_ = chosen->second;
+        else if (spec_.folder_order && !path.empty() && !picker_shell::IsParsingName(path)) order_ = spec_.folder_order(path);
+        else {
+            order_ = {};
+            order_.column = static_cast<int>(ColumnFromSort(options_.sort));
+            order_.descending = options_.descending;
+            order_.group_by = default_group_by_;
+        }
+        order_.group_by = app::PickerSupportedGroup(order_.group_by);
+        options_.order_entries = [order = order_, folder = path](std::vector<PickerEntry>& entries, const std::vector<fs::DirEntry>& rows) {
+            app::OrderPickerEntries(entries, rows, folder, order);
+        };
+        ++list_groups_rev_;
+    }
+
+    void SetListOrder(PickerListOrder next) {
+        next.group_by = app::PickerSupportedGroup(next.group_by);
+        if (next.group_by == static_cast<int>(app::GroupBy::Tag) && !next.tags) return;
+        order_overrides_[ListOrderKey(current_)] = next;
+        // Without the main window's order, the dialog's own memory (per mode).
+        if (!spec_.folder_order) {
+            options_.sort = SortFromColumn(static_cast<SortColumn>(next.column));
+            options_.descending = next.descending;
+            default_group_by_ = next.group_by;
+        }
+        Reload();
+    }
+
+    void SyncListGroups(PaneViewModel& pane) {
+        pane.group_by = 0;
+        pane.groups.reset();
+        if (!snapshot_ || current_.empty() || !snapshot_order_.group_by) return;
+        if (list_groups_snapshot_ != snapshot_.get() || list_groups_built_rev_ != list_groups_rev_) {
+            list_groups_ = app::BuildPickerListGroups(*snapshot_, snapshot_order_, collapsed_list_groups_, current_);
+            list_groups_snapshot_ = snapshot_.get();
+            list_groups_built_rev_ = list_groups_rev_;
+        }
+        if (!list_groups_) return;
+        pane.group_by = snapshot_order_.group_by;
+        pane.groups = list_groups_;
+    }
+
+    void ToggleListGroup(int index) {
+        if (!list_groups_ || index < 0 || index >= static_cast<int>(list_groups_->size())) return;
+        const std::wstring key = (*list_groups_)[static_cast<size_t>(index)].key;
+        if (!collapsed_list_groups_.erase(key)) collapsed_list_groups_.insert(key);
+        ++list_groups_rev_;
+        SyncVm();
+        ClampScroll();
+        Invalidate();
+    }
+
+    void SelectListGroup(int index) {
+        if (!allow_multiselect_) { ToggleListGroup(index); return; }
+        if (!list_groups_ || index < 0 || index >= static_cast<int>(list_groups_->size())) return;
+        const ListGroup group = (*list_groups_)[static_cast<size_t>(index)];
+        if (group.count <= 0) return;
+        focus_ = kPickList;
+        SetFocus(hwnd_);
+        Select(group.first, false, false);
+        if (group.count > 1) Select(group.first + group.count - 1, true, false);
+        Invalidate();
     }
 
     void ToggleHidden() {
@@ -4240,6 +6188,8 @@ private:
         }
         if (anchor >= 0) offset = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), anchor).top;
         EndMarquee(true);
+        if (view_mode_ != mode) scroll_x_ = 0.0f;
+        const bool tree_view_changed = (view_mode_ == ViewMode::Details) != (mode == ViewMode::Details);
         view_mode_ = mode;
         icon_dip_ = dip;
         if (IsZoomIconMode(mode)) { last_icon_mode_ = mode; last_icon_dip_ = dip; }
@@ -4248,6 +6198,7 @@ private:
         if (anchor >= 0) scroll_ += renderer_.ItemRectInPane(vm_.pane, PaneBounds(), anchor).top - offset;
         ClampScroll();
         if (!pointer && selected_ >= 0) EnsureVisible(selected_);
+        if (tree_view_changed) Reload();
         Invalidate();
     }
 
@@ -4268,14 +6219,16 @@ private:
     void ShowViewMenu(const D2D1_RECT_F& anchor) {
         std::vector<FluentMenuItem> items;
         FluentMenuItem create = Item(1, l10n::Get(l10n::StringId::NewFolder).c_str(), L"\xE8F4",
-                                     !current_.empty() && !waiting_);
+                                     !InArchive() && !current_.empty() && !waiting_);
         create.shortcut = L"Ctrl+Shift+N";
         create.separator_after = true;
         items.push_back(std::move(create));
         items.push_back(SortMenu());
+        items.push_back(GroupMenu());
         FluentMenuItem hidden = HiddenItem(2);
-        hidden.separator_after = true;
         items.push_back(std::move(hidden));
+        AppendDisplayItems(items);
+        items.back().separator_after = true;
         const wchar_t* zh[] = {L"超大图标", L"大图标", L"中图标", L"小图标", L"列表", L"详细信息", L"平铺", L"内容"};
         const wchar_t* en[] = {L"Extra large icons", L"Large icons", L"Medium icons", L"Small icons",
                                L"List", L"Details", L"Tiles", L"Content"};
@@ -4287,10 +6240,16 @@ private:
         if (command == 1) NewFolder();
         else if (command == 2) ToggleHidden();
         else if (command >= 20 && command < 28) SetViewMode(static_cast<ViewMode>(command - 20));
-        else HandleSortCommand(command);
+        else if (!HandleDisplayCommand(command)) HandleSortCommand(command);
     }
 
     void ShowFilterMenu() {
+        if (chrome_.filter_static) return;
+        if (mode_ == PickerMode::Save && chrome_layout_.format_more.right > chrome_layout_.format_more.left)
+            ShowFormatList(chrome_layout_.format_more);
+        else ShowFilterMenu(chrome_layout_.filter);
+    }
+    void ShowFilterMenu(const D2D1_RECT_F& anchor) {
         if (options_.filters.empty()) return;
         std::vector<FluentMenuItem> items;
         for (size_t i = 0; i < options_.filters.size(); ++i)
@@ -4298,13 +6257,17 @@ private:
                                   i == options_.filter_index));
         menu_.SetTheme(dark_, accent_);
         SetFilterOpen(true);
-        const int command = TrackPickerDropdown(ScreenRect(chrome_layout_.filter), std::move(items));
+        const int command = TrackPickerDropdown(ScreenRect(anchor), std::move(items));
         SetFilterOpen(false);
         if (done_ || command <= 0) return;
         ApplyFilter(static_cast<size_t>(command - 1));
     }
 
     void ApplyFilter(size_t index) {
+        if (!syncing_filename_filter_ && !save_format_notice_.empty()) {
+            save_format_notice_.clear(); save_format_notice_filename_.clear();
+            chrome_.save_format_notice.clear(); Invalidate();
+        }
         if (index >= options_.filters.size() || options_.filter_index == index) return;
         if (mode_ == PickerMode::Save && !syncing_filename_filter_ && !filename_ime_composing_) {
             const auto next = spec_.native_save_defaults && UsesSaveNameMask(options_.filters)
@@ -4385,15 +6348,20 @@ private:
     }
 
     void ShowSidebarMenu(const std::wstring& path, POINT point) {
+        if (path.starts_with(kPickerTrayPrefix)) return;
         using Action = picker_places::ManagePlacesAction;
         const auto snapshot = pulse_places_;
-        const auto hidden = layout_settings_.hidden_places;
-        const int command = TrackAt(point, BuildPickerPlacesMenu(snapshot, path, hidden, snapshot.shared_available));
+        const auto hidden = HiddenPlacesOnly();
+        const bool removable = IsRemovableCommon(path);
+        const int command = TrackAt(point, BuildPickerPlacesMenu(snapshot, path, hidden, snapshot.shared_available, true, spec_.host_app_name,
+            IsPathPinnedToApp(path), removable));
         if (done_ || command <= 0) return;
+        if (command == 16 || command == 17) { TogglePinPathToApp(path); return; }
+        if (command == 18) { ForgetCommon(path); return; }
         const auto group = path.starts_with(kPickerGroupPrefix) ? path.substr(std::size(kPickerGroupPrefix) - 1) : std::wstring();
         if (command == 1 && !path.empty() && std::none_of(hidden.begin(), hidden.end(),
             [&](const auto& item) { return SamePickerPath(item, path); })) layout_settings_.hidden_places.push_back(path);
-        else if (command == 2) layout_settings_.hidden_places.clear();
+        else if (command == 2) std::erase_if(layout_settings_.hidden_places, [](const auto& item) { return !item.starts_with(kHiddenGroupPrefix); });
         else if (command >= 200 && command < 200 + static_cast<int>(hidden.size())) {
             const auto& restore = hidden[command - 200];
             std::erase_if(layout_settings_.hidden_places, [&](const auto& item) { return SamePickerPath(item, restore); });
@@ -4433,6 +6401,7 @@ private:
     }
 
     void ShowBreadcrumbChildren(const std::wstring& path, POINT anchor) {
+        if (options_.archive && options_.archive->Contains(path)) return;
         std::function<bool(const std::wstring&)> allow;
         if (spec_.legacy_browse && navigation_root_.Active())
             allow = [this](const std::wstring& candidate) { return WithinLegacyRoot(candidate); };
@@ -4476,10 +6445,17 @@ private:
     }
 
     void ShowRowMenu(int index, POINT client) {
+        if (TreePlaceholder(index)) return;
         if (index < 0 || index >= static_cast<int>(entries_.size())) return;
         if (selected_set_.find(index) == selected_set_.end()) Select(index);
         const PickerEntry entry = entries_[static_cast<size_t>(index)];
-        const bool container = entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive;
+        const bool container = entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive || entry.archive;
+        if (InArchive()) {
+            std::vector<FluentMenuItem> items;
+            items.push_back(Item(1, l10n::Get(container ? l10n::StringId::Open : l10n::StringId::PickerSelect).c_str(), L"\xE838"));
+            if (TrackAt(client, std::move(items)) == 1 && !done_) OpenEntry(index);
+            return;
+        }
         const auto chosen_places = SelectedPlaces();
         const bool all_starred = !chosen_places.empty() && std::all_of(chosen_places.begin(), chosen_places.end(), [&](const auto& item) {
             return std::any_of(pulse_places_.starred_items.begin(), pulse_places_.starred_items.end(), [&](const auto& star) { return SamePickerPath(star.path, item.path); });
@@ -4545,14 +6521,16 @@ private:
         items.back().shortcut = L"Ctrl+V";
         items.back().separator_after = true;
         items.push_back(Item(1, l10n::Get(l10n::StringId::NewFolder).c_str(), L"\xE8F4",
-                             !current_.empty() && !waiting_));
-        items.push_back(Item(24, l10n::Get(l10n::StringId::NewTextDocument).c_str(), L"\xE8A5", !current_.empty() && !waiting_));
+                             !InArchive() && !current_.empty() && !waiting_));
+        items.push_back(Item(24, l10n::Get(l10n::StringId::NewTextDocument).c_str(), L"\xE8A5", !InArchive() && !current_.empty() && !waiting_));
         items.push_back(Item(2, l10n::Get(l10n::StringId::Refresh).c_str(), L"\xE72C"));
         items.back().separator_after = true;
         items.push_back(SortMenu());
+        items.push_back(GroupMenu());
         items.push_back(HiddenItem(3));
-        items.push_back(Item(20, l10n::Get(l10n::StringId::FavoritesStarHere).c_str(), L"\xE734", pulse_places_.shared_available && !current_.empty()));
-        items.push_back(Item(21, l10n::Get(l10n::StringId::PinWorkspace).c_str(), L"\xE8F1", pulse_places_.shared_available && !current_.empty()));
+        AppendDisplayItems(items);
+        items.push_back(Item(20, l10n::Get(l10n::StringId::FavoritesStarHere).c_str(), L"\xE734", pulse_places_.shared_available && !InArchive() && !current_.empty()));
+        items.push_back(Item(21, l10n::Get(l10n::StringId::PinWorkspace).c_str(), L"\xE8F1", pulse_places_.shared_available && !InArchive() && !current_.empty()));
         items.push_back(Item(22, l10n::Get(l10n::StringId::CopyPath).c_str(), L"\xE8C8", !current_.empty()));
         items.push_back(Item(23, l10n::Get(l10n::StringId::Undo).c_str(), L"\xE7A7", operation_session_.CanUndo() && !operating_));
         items.back().shortcut = L"Ctrl+Z";
@@ -4562,6 +6540,7 @@ private:
         else if (command == 24) NewItem(false);
         else if (command == 2) Reload();
         else if (command == 3) ToggleHidden();
+        else if (HandleDisplayCommand(command)) {}
         else if (command == 4) Paste();
         else if (command == 20) AddFavorites({{current_, 2, {}}});
         else if (command == 21) ManagePlaces({picker_places::ManagePlacesAction::PinWorkspace, {current_}, {}, {}});
@@ -4612,6 +6591,7 @@ private:
     }
 
     void CopySelection(bool cut) {
+        if (InArchive()) return;
         if (picker_shell::IsParsingName(current_)) return;
         if (waiting_ || validating_ || operating_) return;
         const auto paths = OperationPaths();
@@ -4631,8 +6611,8 @@ private:
     }
 
     bool CanPaste() const {
-        return !current_.empty() && !picker_shell::IsParsingName(current_) && current_verified_ && !waiting_ && !validating_ && !operating_ &&
-               IsClipboardFormatAvailable(CF_HDROP);
+        return !InArchive() && !current_.empty() && !picker_shell::IsParsingName(current_) && current_verified_ && !waiting_ && !validating_ && !operating_ &&
+               ops::ClipboardHasPasteableFiles();
     }
 
     void ExecuteOperation(ops::OpRequest request, const ops::ClipboardData* clipboard = nullptr,
@@ -4681,6 +6661,30 @@ private:
 
     void Paste() {
         if (!CanPaste()) return;
+        if (!IsClipboardFormatAvailable(CF_HDROP) && ops::ClipboardHasShellFiles()) {
+            const auto operation_parent = current_;
+            const auto operation_generation = generation_;
+            const auto sequence = GetClipboardSequenceNumber();
+            operating_ = true;
+            const auto result = operation_session_.RunBackground(hwnd_,
+                [operation_parent, sequence](const std::atomic_bool& cancelled) -> std::wstring {
+                    const HRESULT hr = ops::PasteShellClipboardAtSequence(operation_parent, sequence, &cancelled);
+                    if (SUCCEEDED(hr)) return {};
+                    if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) return l10n::Get(l10n::StringId::Canceled);
+                    return HRESULT_FACILITY(hr) == FACILITY_WIN32
+                        ? ErrorText(HRESULT_CODE(hr), operation_parent)
+                        : l10n::Get(l10n::StringId::OpFailed);
+                }, dark_, accent_);
+            operating_ = false;
+            if (done_ || generation_ != operation_generation || !SamePickerPath(current_, operation_parent)) return;
+            // A failed/cancelled Shell transfer can still have produced files.
+            // Refresh once, but never replay the transfer or clear its clipboard.
+            Reload();
+            reload_notice_ = result.error;
+            chrome_.notice = result.error;
+            FocusList();
+            return;
+        }
         ops::ClipboardData clipboard;
         if (!ops::ReadClipboard(clipboard) || clipboard.paths.empty()) {
             chrome_.notice = l10n::Get(l10n::StringId::CouldNotReadClipboardFilesTryAgain).c_str();
@@ -4720,7 +6724,9 @@ private:
         if (rename_path_.empty()) return;
         const auto path = rename_path_;
         const auto name = rename_edit_ ? ReadEdit(rename_edit_) : std::wstring();
-        const bool current = rename_generation_ == generation_ && SamePickerPath(PickerParent(path), current_);
+        const bool current = rename_generation_ == generation_ &&
+            (SamePickerPath(PickerParent(path), current_) || (tree_rows_ &&
+                std::any_of(entries_.begin(), entries_.end(), [&](const auto& entry) { return SamePickerPath(entry.path, path); })));
         if (commit && current && (name.empty() || !IsPickerFolderName(name))) {
             chrome_.notice = ErrorText(ERROR_INVALID_NAME, name);
             Invalidate();
@@ -4752,6 +6758,7 @@ private:
     }
 
     void RenameSelection() {
+        if (InArchive()) return;
         if (picker_shell::IsParsingName(current_)) return;
         if (waiting_ || validating_ || operating_ || selected_set_.size() != 1) return;
         const auto paths = OperationPaths();
@@ -4786,6 +6793,7 @@ private:
     }
 
     void DeleteSelection(bool permanent = false) {
+        if (InArchive()) return;
         if (picker_shell::IsParsingName(current_)) return;
         if (waiting_ || validating_ || operating_) return;
         const auto paths = OperationPaths();
@@ -4810,11 +6818,16 @@ private:
     }
 
     void NewFolder() {
+        if (InArchive()) return;
         if (picker_shell::IsParsingName(current_) || current_.empty() || !current_verified_ ||
             waiting_ || validating_ || operating_ || !loader_) return;
         EndRename(false);
         if (!rename_edit_) rename_edit_ = MakeEdit(104, L"");
         if (!rename_edit_) return;
+        if (tree_rows_) {
+            tree_loader_.reset(); tree_active_ = 0; tree_pending_.clear();
+            tree_.CollapseAll(); RebuildTree();
+        }
         const auto name = l10n::Get(l10n::StringId::NewFolder);
         PickerEntry draft;
         draft.name = name;
@@ -4840,6 +6853,7 @@ private:
     }
 
     void NewNamedFolder(const std::wstring& name) {
+        if (InArchive()) return;
         if (picker_shell::IsParsingName(current_) || current_.empty() || !current_verified_ ||
             waiting_ || validating_ || operating_ || !loader_) return;
         if (!IsPickerFolderName(name)) {
@@ -4855,6 +6869,7 @@ private:
     }
 
     void NewItem(bool folder) {
+        if (InArchive()) return;
         if (picker_shell::IsParsingName(current_)) return;
         if (current_.empty() || waiting_ || validating_ || operating_ || !loader_) return;
         EndRename(false);
@@ -4871,11 +6886,37 @@ private:
     std::vector<int> FocusOrder() const {
         if (chrome_.overwrite_pending) return {kPickRename, kPickOverwriteReplace, kPickCancel};
         std::vector<int> order = {kPickAddress, kPickSearch, kPickList};
-        for (size_t i = 0; i < chrome_layout_.context_filters.size(); ++i)
-            order.push_back(chrome_.context_filters[i].id);
+        if (chrome_.pulse_selection_enabled && !chrome_.pulse_selection.empty()) {
+            for (size_t i = 0; i < chrome_layout_.pulse_items.size(); ++i)
+                if (chrome_.pulse_selection[i].enabled && chrome_layout_.pulse_items[i].right > chrome_layout_.pulse_items[i].left)
+                    order.push_back(kPickPulseFileBase + static_cast<int>(i));
+            if (chrome_layout_.pulse_more.right > chrome_layout_.pulse_more.left) order.push_back(kPickPulseMore);
+            order.push_back(kPickPulseUse);
+        }
+        for (size_t i = 0; i < chrome_layout_.context_filters.size() && i < chrome_.context_filters.size(); ++i)
+            if (chrome_layout_.context_filters[i].right > chrome_layout_.context_filters[i].left)
+                order.push_back(chrome_.context_filters[i].id);
+        if (!chrome_.selected_names.empty()) {
+            for (size_t i = 0; i < chrome_layout_.selection_tags.size(); ++i) order.push_back(kPickRemoveSelectionBase + static_cast<int>(i));
+            if (!chrome_layout_.selection_more_text.empty()) order.push_back(kPickSelectionMore);
+            order.push_back(kPickClearSelection);
+        }
         if (filename_edit_) {
-            if (IsWindowEnabled(filename_edit_)) order.push_back(kPickFilename);
-            order.push_back(kPickFilter);
+            if (IsWindowVisible(filename_edit_) && IsWindowEnabled(filename_edit_)) order.push_back(kPickFilename);
+            if (FormatSegmentsShown()) {
+                if (!chrome_.filter_static) {
+                    for (size_t i = 0; i < chrome_layout_.format_segments.size(); ++i)
+                        if (chrome_layout_.format_segments[i].right > chrome_layout_.format_segments[i].left)
+                            order.push_back(kPickFormatBase + static_cast<int>(i));
+                    if (chrome_layout_.format_more.right > chrome_layout_.format_more.left) order.push_back(kPickFilter);
+                }
+            } else if (!chrome_.filter_static) order.push_back(kPickFilter);
+        }
+        if (chrome_.save_actions_enabled) {
+            for (size_t i = 0; i < chrome_layout_.suggestion_items.size(); ++i)
+                if (chrome_layout_.suggestion_items[i].right > chrome_layout_.suggestion_items[i].left) order.push_back(kPickSaveSuggestionBase + static_cast<int>(i));
+            if (chrome_layout_.suggestions_more.right > chrome_layout_.suggestions_more.left) order.push_back(kPickSaveSuggestionsMore);
+            if (chrome_.live_conflict) { order.push_back(kPickLiveRename); order.push_back(kPickLiveSave); }
         }
         if (CompactCustom()) {
             for (size_t i = 0; i < chrome_layout_.option_chips.size() && i < chrome_.options.size(); ++i)
@@ -4886,7 +6927,7 @@ private:
         if (chrome_.footer_tool.enabled && chrome_layout_.footer_tool.right > chrome_layout_.footer_tool.left)
             order.push_back(chrome_.footer_tool.id);
         order.push_back(kPickCancel);
-        if (!chosen_.empty() && !waiting_ && !validating_) { order.push_back(kPickPrimary); if(chrome_.primary_drop_down) order.push_back(kPickPrimaryDropDown); }
+        if (chrome_.primary_enabled) { order.push_back(kPickPrimary); if(chrome_.primary_drop_down) order.push_back(kPickPrimaryDropDown); }
         if (legacy_child_.Height(hwnd_)) order.push_back(kLegacyChildFocus);
         return order;
     }
@@ -4923,6 +6964,27 @@ private:
     }
 
     void Activate(int id) {
+        if (id == kPickSaveSuggestionsMore) { ShowSaveSuggestions(); return; }
+        if (id >= kPickSaveSuggestionBase && id < kPickSaveSuggestionBase + 4) { ApplySaveSuggestion(static_cast<size_t>(id - kPickSaveSuggestionBase)); return; }
+        if (id == kPickLiveSave) {
+            if (chrome_.live_conflict && chrome_.save_actions_enabled) SubmitSelection(true);
+            return; // final validation/overwrite snapshot and FileOk remain mandatory
+        }
+        if (id == kPickLiveRename) {
+            if (!chrome_.live_conflict || !chrome_.save_actions_enabled) return;
+            for (size_t i = 0; i < save_name_suggestions_.size(); ++i)
+                if (save_name_suggestions_[i].kind == SaveNameSuggestionKind::Version) { ApplySaveSuggestion(i); return; }
+            const auto target = ResolveSaveTarget(SaveDraftRequest());
+            if (target.state == SaveTargetState::Resolved) {
+                const auto parent = PickerParent(target.path), leaf = OverwriteAlternative(target.path);
+                SetFilename(SamePickerPath(parent, current_) ? leaf : parent + L"\\" + leaf);
+                InputChanged(filename_edit_); FocusFilename(); Relayout(); Invalidate();
+            }
+            return;
+        }
+        if (id == kPickPulseUse) { UsePulseSelection(); return; }
+        if (id == kPickPulseMore) { ShowPulseSelectionMenu(); return; }
+        if (id >= kPickPulseFileBase && id < kPickPulseFileBase + 64) { UsePulseSelection(id - kPickPulseFileBase); return; }
         if (id == kPickJumpIndexInfo) {
             ConfirmDialogSpec info;
             info.title = l10n::Get(l10n::StringId::PickerIndexLearn);
@@ -4941,6 +7003,49 @@ private:
             if (!chrome_.overwrite_pending) ApplyFilter(static_cast<size_t>(id - kPickContextFilterBase));
             return;
         }
+        if (id == kPickFilterMore) {
+            for (size_t i = 0; i < chrome_.context_filters.size() && i < chrome_layout_.context_filters.size(); ++i)
+                if (chrome_.context_filters[i].id == id) { ShowFilterMenu(chrome_layout_.context_filters[i]); break; }
+            return;
+        }
+        if (id == kPickCompactFilters) {
+            for (size_t i = 0; i < chrome_.context_filters.size() && i < chrome_layout_.context_filters.size(); ++i)
+                if (chrome_.context_filters[i].id == id) { ShowCompactFilters(chrome_layout_.context_filters[i]); break; }
+            return;
+        }
+        if (id == kPickSortSync) { ShowSortSyncMenu(chrome_layout_.sort_sync); return; }
+        if (id == kPickSaveFilterAll) {
+            if (options_.save_same_format_only) { options_.save_same_format_only = false; Reload(); }
+            return;
+        }
+        if (id == kPickSaveFilterSame) {
+            if (!options_.save_same_format_only) { options_.save_same_format_only = true; Reload(); }
+            return;
+        }
+        if (id == kPickTrayRemoveAfterOpen && TrayConsumeAvailable()) {
+            picker_flags_ ^= picker_layout::kFlagRemoveTrayAfterOpen;
+            Relayout(); Invalidate();
+            return;
+        }
+        if (id == kPickSaveOrigin && !chrome_.save_original_location.path.empty()) {
+            Navigate(chrome_.save_original_location.path, true);
+            return;
+        }
+        if (id == kPickSaveRepoRoot && !chrome_.save_repo_root.path.empty()) {
+            Navigate(chrome_.save_repo_root.path, true);
+            return;
+        }
+        if (id == kPickTimeMenu) {
+            for (size_t i = 0; i < chrome_.context_filters.size() && i < chrome_layout_.context_filters.size(); ++i)
+                if (chrome_.context_filters[i].id == id) { ShowTimeMenu(chrome_layout_.context_filters[i]); break; }
+            return;
+        }
+        if (id == kPickPreviewToggle) { TogglePreviewPane(); return; }
+        if (id >= kPickCategoryBase && id < kPickCategoryBase + static_cast<int>(kPickerCategoryCount)) { SetCategory(id - kPickCategoryBase); return; }
+        if (id >= kPickFormatBase && id < kPickFormatBase + 64) {  // inside the selection-tag range, so first
+            if (!chrome_.overwrite_pending) ActivateFormat(id - kPickFormatBase);
+            return;
+        }
         // The jump strip (its chip ids sit inside the selection-tag range, so first).
         if (id == kPickOpenScrollLeft || id == kPickOpenScrollRight) {
             const float vp_dip = (chrome_layout_.open_viewport.right - chrome_layout_.open_viewport.left) / std::max(0.5f, scale_);
@@ -4948,15 +7053,47 @@ private:
             ScrollOpenStrip(id == kPickOpenScrollLeft ? -step : step);
             return;
         }
-        if (id >= kPickRecentBase && id < kPickRecentBase + 64) { PickRecentFile(static_cast<size_t>(id - kPickRecentBase), false); return; }
         if (id >= kPickOpenFolderBase && id < kPickJumpPanel) { JumpToOpenFolder(static_cast<size_t>(id - kPickOpenFolderBase)); return; }
         if (id == kPickLastLocation) { if (!spec_.last_location.path.empty()) Navigate(spec_.last_location.path, true); return; }
         if (id == kPickUndoJump) { UndoAutoJump(); return; }
         if (id == kPickNewFolder) { NewFolder(); return; }
+        if (id == kPickClearSelection) {
+            if (validating_) return;
+            basket_.clear(); selected_set_.clear(); last_file_picks_.clear();
+            selected_ = anchor_ = -1; editing_selection_names_ = false;
+            SyncSelectedNames(); focus_ = kPickList; SetFocus(hwnd_);
+            Relayout(); Invalidate(); return;
+        }
+        if (id == kPickSelectionMore) {
+            std::vector<FluentMenuItem> items;
+            const auto paths = selection_tag_paths_;
+            for (size_t i = 0; i < paths.size(); ++i) {
+                auto item = Item(static_cast<int>(i + 1), chrome_.selected_names[i] + L"  ·  " + chrome_.selected_sources[i], L"\xE711");
+                const auto parent = PickerParent(paths[i]);
+                const auto parent_label = PickerLeafName(parent);
+                item.detail = (parent_label.empty() ? L"" : parent_label + L" · ") + path::FriendlyPathText(parent);
+                item.tooltip = path::FriendlyPathText(paths[i]);
+                items.push_back(std::move(item));
+            }
+            const int command = TrackPickerDropdown(ScreenRect(chrome_layout_.selection_more), std::move(items));
+            if (done_ || command <= 0 || static_cast<size_t>(command) > paths.size()) return;
+            const auto& path = paths[static_cast<size_t>(command - 1)];
+            std::erase_if(basket_, [&](const auto& item) { return SamePickerPath(item.path, path); });
+            for (auto it = selected_set_.begin(); it != selected_set_.end();) {
+                if (*it >= 0 && static_cast<size_t>(*it) < entries_.size() && SamePickerPath(entries_[*it].path, path)) it = selected_set_.erase(it);
+                else ++it;
+            }
+            editing_selection_names_ = false; SyncSelectedNames(); Relayout(); Invalidate(); return;
+        }
         if (id >= kPickRemoveSelectionBase && id < kCustomFocusBase) {
             const auto index = static_cast<size_t>(id - kPickRemoveSelectionBase);
             if (index < selection_tag_indices_.size()) {
-                selected_set_.erase(selection_tag_indices_[index]); editing_selection_names_ = false;
+                const int tagged = selection_tag_indices_[index];
+                if (tagged < 0) {
+                    const auto k = static_cast<size_t>(-1 - tagged);
+                    if (k < basket_.size()) basket_.erase(basket_.begin() + static_cast<std::ptrdiff_t>(k));
+                } else selected_set_.erase(tagged);
+                editing_selection_names_ = false;
                 SyncSelectedNames(); Relayout(); Invalidate();
             }
             return;
@@ -4968,6 +7105,7 @@ private:
         }
         PickerProofFocus("activate", focus_, id);
         if (id == kPickPrimaryDropDown) {
+            if (!chrome_.primary_enabled) return;
             for(size_t i=0;i<spec_.custom_controls.size();++i) if(spec_.custom_controls[i].kind==5) {
                 Activate(kCustomFocusBase+static_cast<int>(i)); return;
             }
@@ -5059,7 +7197,7 @@ private:
                     (spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0)) Cancel();
             }
         } else if (id == kPickClose || id == kPickCancel) Cancel();
-        else if (id == kPickPrimary) SubmitSelection();
+        else if (id == kPickPrimary && chrome_.primary_enabled) SubmitSelection();
         else if (id == kPickFilename) FocusFilename();
         else if (id == kPickFilter) ShowFilterMenu();
         if (!done_) Invalidate();
@@ -5078,7 +7216,7 @@ private:
         selected_set_.clear();
         for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
             const auto kind = entries_[static_cast<size_t>(i)].kind;
-            if (kind == PickerEntryKind::Image || kind == PickerEntryKind::File) selected_set_.insert(i);
+            if (!TreePlaceholder(i) && (kind == PickerEntryKind::Image || kind == PickerEntryKind::File)) selected_set_.insert(i);
         }
         SyncSelectedNames();
         Invalidate();
@@ -5113,13 +7251,14 @@ private:
                 return true;
             }
         }
+        if (TreeKey(key)) return true;
         const bool ctrl = KeyDown(VK_CONTROL);
         const bool shift = KeyDown(VK_SHIFT);
         const int count = static_cast<int>(entries_.size());
         auto list_move = [&](int index) {
             focus_ = kPickList;
             chrome_.show_focus = true;
-            if (count > 0) Select(index, shift, ctrl && shift, ctrl && !shift);
+            if (count > 0) Select(SkipTreePlaceholder(index, index < selected_ ? -1 : 1), shift, ctrl && shift, ctrl && !shift);
         };
         auto step = [&](int dx, int dy) {
             if (count <= 0) return;
@@ -5143,6 +7282,7 @@ private:
             return true;
         case VK_SPACE:
             if (focus_ != kPickList) Activate(focus_);
+            else if (PickerSpaceTogglesPreview(true, ctrl, shift, KeyDown(VK_MENU))) TogglePreviewPane();
             else if (selected_ >= 0) Select(selected_, shift, ctrl);
             return true;
         case VK_LEFT: step(-1, 0); return true;
@@ -5229,9 +7369,44 @@ private:
         }
     }
 
+    void OpenPathInPulse(const std::wstring& requested, bool file) {
+        std::wstring path = requested;
+        if (options_.archive && options_.archive->Contains(path)) {
+            path = options_.archive->ArchiveFor(path);
+            file = true;
+        }
+        if (path.empty()) return;
+        DismissHover();
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+        if (test_middle_capture_) {
+            test_middle_path_ = path; test_middle_file_ = file; ++test_middle_launch_count_;
+            return;
+        }
+#endif
+        if (!picker_pulse_open::Launch(path, file)) MessageBeep(MB_ICONWARNING);
+    }
+
     void PressMain(const HitTestResult& hit, float x, float y, bool double_click) {
         using R = HitTestResult;
         switch (hit.region) {
+        case R::DetailsOpen:
+            if (selected_ >= 0 && static_cast<size_t>(selected_) < entries_.size() && entries_[selected_].archive)
+                OpenEntry(selected_);
+            return;
+        case R::DetailsCopyPath:
+            if (const auto* entry = SelectedEntry()) CopyTextToClipboard(hwnd_, path::FriendlyPathText(entry->path));
+            return;
+        case R::DetailsNewTab:
+            if (const auto* entry = SelectedEntry())
+                OpenPathInPulse(entry->path, entry->kind == PickerEntryKind::File || entry->kind == PickerEntryKind::Image);
+            return;
+        case R::DetailsSaveAfterShow:
+        case R::DetailsSaveAfterCopy:
+            if (mode_ == PickerMode::Save && spec_.enable_save_followup && pulse_places_.save_followup_available) {
+                picker_flags_ ^= hit.region == R::DetailsSaveAfterCopy ? picker_layout::kFlagCopyAfterSave : picker_layout::kFlagShowAfterSave;
+                Relayout(); Invalidate();
+            }
+            return;
         case R::NavBack: GoBack(); return;
         case R::NavForward: GoForward(); return;
         case R::NavUp: GoUp(); return;
@@ -5282,12 +7457,18 @@ private:
             return;
         case R::ColumnHeader: {
             if (hit.sub_index == static_cast<int>(MainRenderer::ColumnKind::Status)) return;   // display-only
-            const PickerSort sort = SortFromColumn(hit.column);
-            if (options_.sort == sort) options_.descending = !options_.descending;
-            else { options_.sort = sort; options_.descending = false; }
-            Reload();
+            PickerListOrder next = order_;
+            if (next.column == static_cast<int>(hit.column)) next.descending = !next.descending;
+            else { next.column = static_cast<int>(hit.column); next.descending = false; }
+            SetListOrder(next);
             return;
         }
+        case R::GroupHeader:
+            ToggleListGroup(hit.index);
+            return;
+        case R::GroupSelect:
+            SelectListGroup(hit.index);
+            return;
         case R::ColumnDivider:
             if (double_click) {
                 std::array<float,4> search{};
@@ -5299,12 +7480,12 @@ private:
             }
             return;
         case R::Scrollbar:
-            if (hit.sub_index == 1) return;  // the picker never scrolls sideways
-            BeginScrollbarDrag(hit, y);
+            if (hit.sub_index == 1) BeginHScrollbarDrag(x);
+            else BeginScrollbarDrag(hit, y);
             return;
         case R::PaneDetails: SetViewMode(ViewMode::Details); return;
         case R::PaneMediumIcons:
-            SetViewMode(ViewMode::MediumIcons);
+            SetViewMode(ViewMode::LargeIcons);
             return;
         case R::PaneViewButton: ShowViewMenu(hit.control_bounds.right > hit.control_bounds.left
                                                  ? hit.control_bounds
@@ -5316,11 +7497,24 @@ private:
             if (navigation_root_.Active() && hit.region == R::SidebarItemExpand) {
                 navigation_root_.Toggle(hit.path); Relayout(); Invalidate(); return;
             }
+            if (hit.path.starts_with(kPickerTrayPrefix)) { UsePickerTray(hit.path); return; }
+            if (hit.path == kCommonUndoToken) { UndoCommonForget(); return; }
+            if (hit.path == kShowHiddenGroupsToken) {
+                std::erase_if(layout_settings_.hidden_places, [](const auto& item) { return item.starts_with(kHiddenGroupPrefix); });
+                Relayout(); Invalidate(); return;
+            }
             OpenSharedPlace(hit.path);
+            return;
+        case R::SidebarItemAction:
+            if (IsRemovableCommon(hit.path)) ForgetCommon(hit.path);
+            return;
+        case R::SidebarHeaderAction:
+            if (hit.sidebar_action == SidebarAddAction::PinToApp) TogglePinPathToApp(current_);
             return;
         case R::SidebarHeader:
             if (hit.index >= 0 && hit.index < static_cast<int>(vm_.sidebar.size())) {
                 const SidebarGroup& group = vm_.sidebar[static_cast<size_t>(hit.index)];
+                if (group.id == kGroupPickerTray) { tray_collapsed_ = !tray_collapsed_; Relayout(); Invalidate(); return; }
                 // The This PC title opens This PC; the chevron folds.
                 if (hit.sub_index == 1 && group.navigable) Navigate(group.navigation_path, true);
                 else {
@@ -5372,6 +7566,92 @@ private:
             if (sender_pid != GetCurrentProcessId() || !lparam) return FALSE;
             auto* request = reinterpret_cast<PickerJumpUiTest*>(lparam);
             if (request->size != sizeof(*request) || request->version != 1) return FALSE;
+            if (request->save_followup_endpoint && spec_.enable_save_followup) {
+                picker_places::Snapshot fixture;
+                fixture.shared_available = true; fixture.save_followup_available = true;
+                fixture.endpoint = request->save_followup_endpoint;
+                GetWindowThreadProcessId(fixture.endpoint, &fixture.endpoint_pid);
+                spec_.read_shared_places = [fixture] { return fixture; };
+                pulse_places_ = fixture;
+                Relayout(); Invalidate();
+            }
+            if (request->archive_worker && options_.archive) {
+                const std::wstring worker = request->archive_worker;
+                options_.archive = std::make_shared<PickerArchiveSession>([worker] { return worker; }, request->archive_staging ? request->archive_staging : L"");
+                Reload();
+            }
+            if (request->client_width_dip >= kMinWidth && request->client_width_dip <= 1600) {
+                RECT window{}, client{}; GetWindowRect(hwnd_, &window); GetClientRect(hwnd_, &client);
+                SetWindowPos(hwnd_, nullptr, 0, 0, static_cast<int>(request->client_width_dip * scale_) +
+                    (window.right - window.left) - (client.right - client.left), window.bottom - window.top,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            if (request->display_prefs_json) {
+                app::PickerAppearanceSnapshot appearance;
+                if (!app::ParsePickerAppearanceJson(request->display_prefs_json, appearance)) return FALSE;
+                app::ApplyPickerAppearanceToSpec(appearance, spec_);
+                options_.show_hidden = spec_.show_hidden || spec_.show_hidden_files;
+                options_.show_protected_os_files = spec_.show_hidden || spec_.show_protected_os_files;
+                order_overrides_.clear(); Reload();
+            }
+            if (request->tag_mapping) {
+                auto next = order_;
+                next.tags = app::ReadPickerTagCatalog(request->tag_mapping);
+                order_overrides_[ListOrderKey(current_)] = std::move(next);
+                Reload();
+            }
+            if (request->display_command == 2) ToggleHidden();
+            else if (request->display_command && !HandleDisplayCommand(request->display_command))
+                HandleSortCommand(request->display_command);
+            if (request->set_new_since) { options_.new_since = request->set_new_since; Reload(); }
+            if (request->set_save_probe_fixture && mode_ == PickerMode::Save && !save_draft_path_.empty()) {
+                save_draft_probe_.Cancel(); save_draft_due_ = 0;
+                PickerSaveDraftProbe::Result sample;
+                sample.generation = save_draft_generation_; sample.path = save_draft_path_;
+                sample.attributes = request->save_probe_attributes;
+                sample.error = sample.attributes == INVALID_FILE_ATTRIBUTES ? ERROR_FILE_NOT_FOUND : ERROR_SUCCESS;
+                sample.space_known = request->save_probe_space_known; sample.free_bytes = request->save_probe_free_bytes;
+                save_draft_result_ = std::move(sample); RefreshSaveDraft(); Relayout(); Invalidate();
+            }
+            if (request->tray_snapshot) {
+                const auto& tray = *request->tray_snapshot;
+                spec_.poll_jump_context = {};
+                spec_.pulse_tray_available = tray.tray_available; spec_.pulse_tray_items = tray.tray_items;
+                spec_.pulse_tray_shelf_id = tray.tray_shelf_id; spec_.pulse_tray_shelf_name = tray.tray_shelf_name;
+                spec_.pulse_tray_revision = tray.tray_revision; spec_.pulse_tray_total_count = tray.tray_total_count;
+                spec_.pulse_tray_publisher_pid = tray.tray_publisher_pid; spec_.pulse_tray_source = tray.tray_source;
+                spec_.pulse_tray_endpoint = tray.endpoint; spec_.pulse_tray_endpoint_pid = tray.endpoint_pid;
+                SyncVm(); Relayout(); Invalidate();
+            }
+            if (request->set_tray_fixture) {
+                spec_.poll_jump_context = {}; spec_.pulse_tray_items.clear();
+                spec_.pulse_tray_shelf_id = 1; spec_.pulse_tray_shelf_name = L"Fixture shelf";
+                spec_.pulse_tray_revision = request->tray_revision; spec_.pulse_tray_publisher_pid = GetCurrentProcessId();
+                spec_.pulse_tray_total_count = request->tray_total ? request->tray_total : request->tray_count;
+                spec_.pulse_tray_available = spec_.pulse_tray_total_count == request->tray_count;
+                if (spec_.pulse_tray_available) for (unsigned i = 0; i < std::min(128u, request->tray_count); ++i) {
+                    if (!request->tray_paths[i]) continue;
+                    picker_places::TrayItem item; item.id = i + 1; item.shelf_id = 1; item.batch_id = 1;
+                    item.path = request->tray_paths[i]; item.size = request->tray_sizes[i] ? request->tray_sizes[i] : 1; item.exists = !(request->tray_flags[i] & 1);
+                    item.inflight = (request->tray_flags[i] & 2) != 0; item.is_directory = (request->tray_flags[i] & 4) != 0;
+                    spec_.pulse_tray_items.push_back(std::move(item));
+                }
+                SyncVm(); Relayout(); Invalidate();
+            }
+            if (request->set_pulse_fixture) {
+                spec_.poll_jump_context = {};
+                spec_.pulse_selection_available = true;
+                spec_.pulse_selected_items.clear();
+                for (unsigned i = 0; i < std::min(8u, request->pulse_count); ++i)
+                    if (request->pulse_paths[i]) spec_.pulse_selected_items.push_back({request->pulse_paths[i], request->pulse_directories[i], request->pulse_sizes_present ? request->pulse_sizes[i] : 1});
+                Relayout(); Invalidate();
+            }
+            if (request->middle_fixture_folder) {
+                test_middle_capture_ = true;
+                spec_.open_folders = {{request->middle_fixture_folder, L"Middle-click fixture", false}};
+                spec_.places = {{L"Middle-click fixture", request->middle_fixture_folder, L"\xE8B7"}};
+                BuildSidebar(); Relayout();
+            }
             if (request->jump_path) {
                 const std::wstring path(request->jump_path);
                 const bool file = request->jump_file;
@@ -5380,25 +7660,150 @@ private:
                     return std::vector<PickerJumpResult>{{path, L"fixture-result", {}, 3, file}};
                 };
             }
-            if (request->recent_path) {
-                spec_.poll_jump_context = {};
-                KillTimer(hwnd_, kJumpContextTimer);
-                PickerRecentFile file;
-                file.path = request->recent_path;
-                file.attributes = request->recent_attributes;
-                file.modified = request->recent_modified; file.size = request->recent_size;
-                spec_.recent_files = {std::move(file)};
-                test_recent_bitmap_draws_ = 0;
-                Relayout(); Invalidate();
+            if (request->inspect_hover) {
+                // Observe the production hit/hover path atomically: a synthetic
+                // WM_MOUSEMOVE must not depend on the user's physical cursor position.
+                hover_point_ = request->inspect_hover_point;
+                UpdateHover(HitAt(static_cast<float>(hover_point_.x), static_cast<float>(hover_point_.y)));
             }
-            PickerJumpUiTest result;
-            result.recent_bitmap_draws = test_recent_bitmap_draws_;
+            if (request->tree_toggle_path || request->tree_select_path) {
+                const auto requested = request->tree_toggle_path ? request->tree_toggle_path : request->tree_select_path;
+                for (size_t i = 0; i < entries_.size(); ++i) if (!TreePlaceholder(static_cast<int>(i)) && SamePickerPath(entries_[i].path, requested)) {
+                    if (request->tree_toggle_path) ToggleTree(static_cast<int>(i));
+                    else { FocusList(); Select(static_cast<int>(i), false, request->tree_select_add); }
+                    break;
+                }
+            }
+            SyncVm();
+            auto result_storage = std::make_unique<PickerJumpUiTest>();
+            auto& result = *result_storage;
+            result.tree_ready = tree_rows_ && !waiting_ && !tree_active_ && tree_pending_.empty();
+            wcsncpy_s(result.tree_save_folder, vm_.details.save_folder_text.c_str(), _TRUNCATE);
+            wcsncpy_s(result.tree_save_series, vm_.details.save_series_text.c_str(), _TRUNCATE);
+            result.tree_save_clash = vm_.details.save_clash;
+            if (tree_rows_) {
+                result.tree_row_count = static_cast<unsigned>(std::min<size_t>(64, entries_.size()));
+                for (unsigned i = 0; i < result.tree_row_count; ++i) {
+                    const auto* row = tree_rows_->At(static_cast<int>(i));
+                    if (!row) continue;
+                    wcsncpy_s(result.tree_paths[i], entries_[i].path.c_str(), _TRUNCATE);
+                    result.tree_depths[i] = row->depth; result.tree_kinds[i] = static_cast<uint8_t>(row->kind);
+                    result.tree_expanded[i] = row->expanded;
+                    const auto rect = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), static_cast<int>(i));
+                    const float y = (rect.top + rect.bottom) / 2;
+                    result.tree_row_points[i] = {static_cast<LONG>(rect.left + 150 * scale_), static_cast<LONG>(y)};
+                    if (row->expandable) for (float x = rect.left; x < std::min(rect.right, rect.left + 400 * scale_); x += 2 * scale_)
+                        if (renderer_.TreeChevronAt(vm_.pane, PaneBounds(), x, y) == static_cast<int>(i)) {
+                            result.tree_chevrons[i] = {static_cast<LONG>(x + 3 * scale_), static_cast<LONG>(y)}; break;
+                        }
+                }
+            }
+            result.save_followup_available = pulse_places_.save_followup_available;
+            result.save_notify = (picker_flags_ & picker_layout::kFlagShowAfterSave) != 0;
+            result.save_copy = (picker_flags_ & picker_layout::kFlagCopyAfterSave) != 0;
+            result.archive_enabled = options_.archive != nullptr;
+            for (size_t i = 0; i < std::min<size_t>(entries_.size(), 32); ++i) result.archive_rows[i] = entries_[i].archive;
             result.last_down_hit = test_last_down_;
             result.last_up_hit = test_last_up_;
             result.last_activate = test_last_activate_;
             result.current_pressed = chrome_.pressed;
-            result.ready = !waiting_ && !validating_;
+            result.ready = IncomingFilesReady();
             const auto rect = [](D2D1_RECT_F value) { return RECT{static_cast<LONG>(value.left), static_cast<LONG>(value.top), static_cast<LONG>(value.right), static_cast<LONG>(value.bottom)}; };
+            for (size_t i = 0; i < chrome_.context_filters.size() && i < chrome_layout_.context_filters.size(); ++i) {
+                const int filter = chrome_.context_filters[i].id - kPickContextFilterBase;
+                if (filter >= 0 && filter < 8) result.tree_filter_buttons[filter] = rect(chrome_layout_.context_filters[i]);
+            }
+            result.show_hidden = options_.show_hidden;
+            result.show_protected = options_.show_protected_os_files;
+            result.show_extensions = spec_.show_file_extensions;
+            result.sort_column = snapshot_order_.column;
+            result.sort_descending = snapshot_order_.descending;
+            result.folder_mode = snapshot_order_.folder_mode;
+            result.group_by = vm_.pane.group_by;
+            if (vm_.pane.groups) {
+                result.group_count = static_cast<unsigned>(std::min<size_t>(8, vm_.pane.groups->size()));
+                for (unsigned i = 0; i < result.group_count; ++i) {
+                    const auto& group = (*vm_.pane.groups)[i];
+                    wcsncpy_s(result.group_labels[i], group.label.c_str(), _TRUNCATE);
+                    result.group_colors[i] = group.color_rgb;
+                    result.group_counts[i] = group.count;
+                    result.group_collapsed[i] = group.collapsed;
+                }
+                if (request->inspect_group_headers) {
+                    const auto pane = PaneBounds();
+                    const float x = pane.left + 100 * scale_;
+                    for (float y = pane.top; y < std::min(pane.bottom, chrome_layout_.footer.top); y += 4 * scale_) {
+                        const auto hit = renderer_.HitTest(vm_, RendererRect(), x, y);
+                        if (hit.region == HitTestResult::Region::GroupHeader && hit.index >= 0 &&
+                            static_cast<unsigned>(hit.index) < result.group_count && !result.group_header_points[hit.index].y)
+                            result.group_header_points[hit.index] = {static_cast<LONG>(x), static_cast<LONG>(y)};
+                    }
+                }
+            }
+            wcsncpy_s(result.validation_notice, chrome_.notice.c_str(), _TRUNCATE);
+            result.strict_type_rejected = chrome_.notice == l10n::Get(l10n::StringId::TheSelectedFileDoesNotMatchTheFileType);
+            result.muted_count = static_cast<unsigned>(vm_.pane.muted_indices.size());
+            result.dimensions_column = image_dimensions_.Active() && !vm_.pane.extension_columns.empty();
+            wcsncpy_s(result.format_tooltip, vm_.tooltip_text.c_str(), _TRUNCATE);
+            wcsncpy_s(result.format_note, chrome_.format_note.c_str(), _TRUNCATE);
+            wcsncpy_s(result.format_static_text, chrome_.format_static_text.c_str(), _TRUNCATE);
+            result.format_note_rect = rect(chrome_layout_.format_note);
+            result.display_count = static_cast<unsigned>(std::min<size_t>(entries_.size(), 32));
+            for (unsigned i = 0; i < result.display_count; ++i) {
+                wcsncpy_s(result.dimensions[i], image_dimensions_.Cell(static_cast<int>(i)).c_str(), _TRUNCATE);
+                result.muted_rows[i] = vm_.pane.muted_indices.contains(static_cast<int>(i));
+                wcsncpy_s(result.raw_names[i], entries_[i].name.c_str(), _TRUNCATE);
+                if (vm_.pane.row_cache) {
+                    const auto row = vm_.pane.row_cache->rows.find(i);
+                    if (row != vm_.pane.row_cache->rows.end())
+                        wcsncpy_s(result.drawn_names[i], ShownName(row->second).c_str(), _TRUNCATE);
+                }
+            }
+            result.view_menu = rect(renderer_.PaneViewButtonRect(PaneBounds(), vm_.pane.filter_expand));
+            result.preview_requested = PreviewPaneShown();
+            result.preview_width_dip = renderer_.DetailsPanelWidth(RendererWidth()) / scale_;
+            result.preview_bounds = rect(renderer_.DetailsPreviewBounds());
+            result.selected_count = static_cast<unsigned>(selected_set_.size());
+            result.only_new = options_.only_new; result.active_time_filter = time_filter_;
+            result.new_badge_count = 0;
+            result.series_badge_count = 0;
+            for (const auto& item : vm_.pane.change_badges) {
+                if (item.second.label == l10n::Get(l10n::StringId::PickerSameNameSeries)) ++result.series_badge_count;
+                else if (item.second.label == l10n::Get(l10n::StringId::PickerNewBadge)) ++result.new_badge_count;
+            }
+            wcsncpy_s(result.save_format_notice, chrome_.save_format_notice.c_str(), _TRUNCATE);
+            const auto panel = renderer_.DetailsPanelRect(RendererWidth(), Height());
+            if (panel.right > panel.left && vm_.details.has_selection) {
+                if (vm_.details.picker_save_mode && !vm_.details.picker_save_to_tray) {
+                    const auto save_layout = LayoutPickerSavePreview(panel, scale_, false);
+                    if (save_layout.after_show.right > save_layout.after_show.left &&
+                        renderer_.HitTest(vm_, RendererRect(), (save_layout.after_show.left + save_layout.after_show.right) / 2,
+                        (save_layout.after_show.top + save_layout.after_show.bottom) / 2).region == HitTestResult::DetailsSaveAfterShow)
+                        result.save_notify_option = rect(save_layout.after_show);
+                    if (save_layout.after_copy.right > save_layout.after_copy.left &&
+                        renderer_.HitTest(vm_, RendererRect(), (save_layout.after_copy.left + save_layout.after_copy.right) / 2,
+                        (save_layout.after_copy.top + save_layout.after_copy.bottom) / 2).region == HitTestResult::DetailsSaveAfterCopy)
+                        result.save_copy_option = rect(save_layout.after_copy);
+                } else if (!vm_.details.picker_save_mode) {
+                    const auto preview_layout = LayoutPickerPreview(panel, scale_, 0, vm_.details.picker_archive);
+                    if (renderer_.HitTest(vm_, RendererRect(), (preview_layout.copy_path.left + preview_layout.copy_path.right) / 2,
+                        (preview_layout.copy_path.top + preview_layout.copy_path.bottom) / 2).region == HitTestResult::DetailsCopyPath)
+                        result.preview_copy = rect(preview_layout.copy_path);
+                    if (renderer_.HitTest(vm_, RendererRect(), (preview_layout.reveal.left + preview_layout.reveal.right) / 2,
+                        (preview_layout.reveal.top + preview_layout.reveal.bottom) / 2).region == HitTestResult::DetailsNewTab)
+                        result.preview_reveal = rect(preview_layout.reveal);
+                }
+            }
+            for (size_t i = 0; i < chrome_.context_filters.size() && i < chrome_layout_.context_filters.size(); ++i) {
+                if (chrome_.context_filters[i].id == kPickCompactFilters) result.compact_filters = rect(chrome_layout_.context_filters[i]);
+                if (chrome_.context_filters[i].id == kPickTimeMenu) result.time_filter = rect(chrome_layout_.context_filters[i]);
+                if (chrome_.context_filters[i].id == kPickSaveFilterAll) result.save_filter_all = rect(chrome_layout_.context_filters[i]);
+                if (chrome_.context_filters[i].id == kPickSaveFilterSame) result.save_filter_same = rect(chrome_layout_.context_filters[i]);
+            }
+            if (chrome_.show_tray_remove && chrome_layout_.tray_remove.right > chrome_layout_.tray_remove.left)
+                result.tray_remove_option = rect(chrome_layout_.tray_remove);
+            result.saving_to_tray = saving_to_tray_;
+            if (mode_ == PickerMode::Save) wcsncpy_s(result.save_to_tray_token, (TrayToken(0) + L":save_to_tray").c_str(), _TRUNCATE);
             result.option_count = static_cast<unsigned>(std::min<size_t>(4, chrome_layout_.option_chips.size()));
             for (unsigned i = 0; i < result.option_count; ++i) result.options[i] = rect(chrome_layout_.option_chips[i]);
             result.more = rect(chrome_layout_.more_options);
@@ -5407,6 +7812,63 @@ private:
             result.overwrite_rename = rect(chrome_layout_.rename);
             result.primary_enabled = chrome_.primary_enabled;
             result.footer_tool = rect(chrome_layout_.footer_tool);
+            result.middle_launch_count = test_middle_launch_count_;
+            result.middle_file = test_middle_file_;
+            wcsncpy_s(result.middle_path, test_middle_path_.c_str(), _TRUNCATE);
+            if (!chrome_layout_.open_chips.empty()) result.middle_open_folder = rect(chrome_layout_.open_chips.front());
+            result.pulse_use = rect(chrome_layout_.pulse_use);
+            result.pulse_more = rect(chrome_layout_.pulse_more);
+            result.pulse_count = static_cast<unsigned>(chrome_.pulse_selection.size());
+            result.basket_count = static_cast<unsigned>(basket_.size());
+            result.selection_clear = rect(chrome_layout_.selection_clear);
+            result.selection_clear_focused = focus_ == kPickClearSelection;
+            result.selection_more = rect(chrome_layout_.selection_more);
+            result.footer_selection_count = static_cast<unsigned>(chrome_.selected_names.size());
+            wcsncpy_s(result.selection_summary, chrome_.selection_summary.c_str(), _TRUNCATE);
+            for (size_t i = 0; i < std::min<size_t>(8, chrome_.selected_sources.size()); ++i) {
+                wcsncpy_s(result.selection_sources[i], chrome_.selected_sources[i].c_str(), _TRUNCATE);
+                result.selection_tray[i] = chrome_.selected_from_tray[i];
+            }
+            result.validation_generation = generation_;
+            result.tray_remove_after_open = (picker_flags_ & picker_layout::kFlagRemoveTrayAfterOpen) != 0;
+            if (TrayConsumeAvailable()) wcsncpy_s(result.tray_consume_token, (TrayToken(0)+L":consume").c_str(), _TRUNCATE);
+            result.tray_page = static_cast<unsigned>(tray_page_);
+            result.tray_total = spec_.pulse_tray_total_count;
+            result.tray_count = static_cast<unsigned>(std::min<size_t>(8, tray_display_items_.size()));
+            for (unsigned i = 0; i < result.tray_count; ++i) wcsncpy_s(result.tray_tokens[i], tray_display_items_[i].first.c_str(), _TRUNCATE);
+            for (const auto& group : vm_.sidebar) if (group.id == kGroupPickerTray) {
+                result.tray_present = true;
+                for (const auto& item : group.items) {
+                    if (item.path.ends_with(L":more")) wcsncpy_s(result.tray_more_token, item.path.c_str(), _TRUNCATE);
+                    if (item.path.find(L":prev:") != std::wstring::npos) wcsncpy_s(result.tray_previous_token, item.path.c_str(), _TRUNCATE);
+                    if (item.path.find(L":next:") != std::wstring::npos) wcsncpy_s(result.tray_next_token, item.path.c_str(), _TRUNCATE);
+                    if (item.path.ends_with(L":all")) wcsncpy_s(result.tray_all_token, item.path.c_str(), _TRUNCATE);
+                }
+            }
+            result.live_conflict = chrome_.live_conflict; result.save_invalid = save_name_invalid_;
+            result.save_draft_checked = save_draft_result_.has_value();
+            result.live_rename = rect(chrome_layout_.live_rename); result.live_save = rect(chrome_layout_.live_save);
+            result.suggestions_more = rect(chrome_layout_.suggestions_more);
+            result.suggestion_count = static_cast<unsigned>(std::min<size_t>(4, save_name_suggestions_.size()));
+            for (unsigned i = 0; i < result.suggestion_count; ++i) {
+                result.suggestion_kinds[i] = static_cast<int>(save_name_suggestions_[i].kind);
+                if (i < chrome_layout_.suggestion_items.size()) result.suggestions[i] = rect(chrome_layout_.suggestion_items[i]);
+            }
+            wcsncpy_s(result.save_warning, chrome_.summary_warning.c_str(), _TRUNCATE);
+            wcsncpy_s(result.save_space, chrome_.save_space_text.c_str(), _TRUNCATE);
+            wcsncpy_s(result.save_conflict_text, chrome_.live_conflict_text.c_str(), _TRUNCATE);
+            result.save_summary = rect(chrome_layout_.summary);
+            result.save_space_rect = rect(chrome_layout_.summary_space);
+            result.save_conflict_rect = rect(chrome_layout_.conflict_text);
+            for (unsigned i = 0; i < std::min<size_t>(8, chrome_layout_.pulse_items.size()); ++i)
+                result.pulse_items[i] = rect(chrome_layout_.pulse_items[i]);
+            result.filename = rect(chrome_layout_.filename);
+            result.format_more = rect(chrome_layout_.format_more);
+            result.format_count = static_cast<unsigned>(std::min<size_t>(64, chrome_.formats.size()));
+            for (unsigned i = 0; i < result.format_count; ++i) {
+                result.format_indices[i] = static_cast<int>(chrome_.formats[i].filter);
+                if (i < chrome_layout_.format_segments.size()) result.formats[i] = rect(chrome_layout_.format_segments[i]);
+            }
             result.context_filter_count = static_cast<unsigned>(std::min<size_t>(2, chrome_layout_.context_filters.size()));
             for (unsigned i = 0; i < result.context_filter_count; ++i)
                 result.context_filters[i] = rect(chrome_layout_.context_filters[i]);
@@ -5442,6 +7904,14 @@ private:
 #endif
         case kPickerDropMessage: {
             if (ole_drag_out_) return 0;
+            if (!queued_use_files_.empty()) {
+                auto files = std::move(queued_use_files_); queued_use_files_.clear();
+                if (CanUseIncoming(files)) {
+                    user_interacted_ = true;
+                    ValidateNames(std::move(files), false, false, true);
+                }
+                return 0;
+            }
             auto request = std::move(queued_drop_);
             if (request && !done_) ExecuteOperation(std::move(*request));
             return 0;
@@ -5451,17 +7921,21 @@ private:
             auto* query = reinterpret_cast<PickerOleTestDrop*>(lparam);
             auto* target = ole_drop_.TestTarget();
             if (!query || !query->source || !target) return FALSE;
-            auto* data = FileDataObject::Create({query->source});
+            std::vector<std::wstring> sources{query->source};
+            if (query->second_source) sources.push_back(query->second_source);
+            auto* data = FileDataObject::Create(sources);
             if (!data) return FALSE;
             POINT point = query->point;
             ClientToScreen(hwnd_, &point);
-            DWORD effect = DROPEFFECT_COPY;
+            DWORD effect = query->allowed;
             const POINTL screen{point.x, point.y};
-            const HRESULT entered = target->DragEnter(data, MK_CONTROL, screen, &effect);
+            const HRESULT entered = target->DragEnter(data, query->keys, screen, &effect);
             HRESULT dropped = E_FAIL;
-            if (SUCCEEDED(entered) && effect) dropped = target->Drop(data, MK_CONTROL, screen, &effect);
+            if (SUCCEEDED(entered) && effect) { effect = query->allowed; dropped = target->Drop(data, query->keys & ~MK_RBUTTON, screen, &effect); }
             else target->DragLeave();
             query->effect = effect;
+            query->logical_effect = data->LogicalEffect();
+            query->performed_effect = data->PerformedEffect();
             data->Release();
             return SUCCEEDED(dropped);
         }
@@ -5533,7 +8007,9 @@ private:
             menu_.SetTheme(dark_, accent_);
             Relayout();
             SetTimer(hwnd_, kSharedPlacesTimer, 1000, nullptr);
+            SetTimer(hwnd_, kImageDimensionsTimer, 250, nullptr);
             if (spec_.poll_jump_context) SetTimer(hwnd_, kJumpContextTimer, 100, nullptr);
+            if (mode_ == PickerMode::Save) SetTimer(hwnd_, kSaveDraftTimer, 100, nullptr);
             RegisterPickerDrop();
             return 0;
         }
@@ -5731,9 +8207,11 @@ private:
             hover_preview_.Receive(PickerLoader::Take(lparam));
             Invalidate(); return 0;
         case WM_TIMER:
-            if (wparam == kRecentThumbnailTimer) { KillTimer(hwnd_, kRecentThumbnailTimer); Invalidate(); return 0; }
+            if (wparam == kImageDimensionsTimer) { if (image_dimensions_.Changed()) Invalidate(); return 0; }
             if (wparam == kHoverTimer) { HoverTick(); return 0; }
+            if (wparam == kCommonForgetTimer) { CommitCommonForget(); Relayout(); Invalidate(); return 0; }
             if (wparam == kSharedPlacesTimer) { RefreshSharedPlaces(); return 0; }
+            if (wparam == kSaveDraftTimer) { PollSaveDraft(); return 0; }
             if (wparam == kJumpContextTimer) { RefreshJumpContext(); return 0; }
             if (wparam == kMarqueeTimer) { UpdateMarquee(marquee_.cursor.x, marquee_.cursor.y, true); return 0; }
             if (wparam == kSearchTimer) { ApplySearchNow(); return 0; }
@@ -5748,6 +8226,8 @@ private:
         case kFolderCommitMessage:
             OnFolderCommit(PickerLoader::TakeFolderCommit(lparam));
             return 0;
+        case kTreeListingMessage:
+            OnTreeListing(PickerLoader::Take(lparam)); return 0;
         case kListingMessage:
             OnListing(PickerLoader::Take(lparam));
             return 0;
@@ -5769,7 +8249,7 @@ private:
             if (sidebar_resizing_ || column_resizing_>=0) { ResizeLayout(static_cast<float>(GET_X_LPARAM(lparam))); return 0; }
             if (custom_bar_drag_) { DragCustomScrollbar(static_cast<float>(GET_Y_LPARAM(lparam))); return 0; }
             if (dragging_scrollbar_) {
-                DragScrollbar(static_cast<float>(GET_Y_LPARAM(lparam)));
+                DragScrollbar(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam)));
                 return 0;
             }
             hover_point_ = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
@@ -5882,6 +8362,7 @@ private:
                 ScrollOpenStrip(static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * 96.0f);
                 return 0;
             }
+            if (HWheel(wparam, point)) return 0;
             break;
         }
         case WM_LBUTTONDOWN:
@@ -5911,11 +8392,7 @@ private:
             const Hit& hit = blank_hit;
             chrome_.show_focus = false;
             if (hit.chrome == kPickJumpPanel) return 0;
-            if (message == WM_LBUTTONDBLCLK && hit.chrome >= kPickRecentBase && hit.chrome < kPickRecentBase + 64) {
-                PickRecentFile(static_cast<size_t>(hit.chrome - kPickRecentBase), true);
-                return 0;
-            }
-            if (jump_.open && hit.chrome >= kPickJumpRowBase && hit.chrome < kPickRecentBase) { ActivateJumpRow(hit.chrome - kPickJumpRowBase, false); return 0; }
+            if (jump_.open && hit.chrome >= kPickJumpRowBase && hit.chrome < kPickJumpRowEnd) { ActivateJumpRow(hit.chrome - kPickJumpRowBase, false); return 0; }
             CloseJump();
             if (hit.chrome == kPickFilename) { FocusFilename(); return 0; }
             if (hit.chrome != kPickNone) {
@@ -5933,6 +8410,7 @@ private:
                 } else { sidebar_resizing_=true; SetCapture(hwnd_); }
                 return 0;
             }
+            if (TreeMouse(hit.main, x, y)) return 0;
             if (message == WM_LBUTTONDOWN && allow_multiselect_ && !waiting_ && !validating_ && !operating_ &&
                 ContainsRect(renderer_.PaneListRect(vm_.pane, PaneBounds()), x, y) &&
                 (hit.main.region == HitTestResult::Pane || hit.main.region == HitTestResult::None ||
@@ -6021,6 +8499,31 @@ private:
             Invalidate();
             return 0;
         }
+        case WM_MBUTTONUP: {
+            if (waiting_ || validating_ || operating_ || GetCapture()) return 0;
+            const Hit hit = HitAt(lparam);
+            std::wstring path;
+            bool file = false;
+            if (hit.chrome >= kPickOpenFolderBase && hit.chrome < kPickJumpPanel) {
+                const auto folders = OpenFolders();
+                const size_t index = static_cast<size_t>(hit.chrome - kPickOpenFolderBase);
+                if (index < folders.size()) path = folders[index].path;
+            } else if (hit.chrome == kPickLastLocation) path = spec_.last_location.path;
+            else if (hit.chrome == kPickNone && hit.main.region == HitTestResult::SidebarItem && !hit.main.path.starts_with(L"pulse:")) path = hit.main.path;
+            else if (hit.chrome == kPickNone && hit.main.region == HitTestResult::Row && hit.main.index >= 0 &&
+                     static_cast<size_t>(hit.main.index) < entries_.size()) {
+                const auto& entry = entries_[static_cast<size_t>(hit.main.index)];
+                path = entry.path;
+                file = entry.kind == PickerEntryKind::File || entry.kind == PickerEntryKind::Image;
+            }
+            if (path.starts_with(kPickerTrayPrefix)) {
+                const auto item = std::find_if(tray_display_items_.begin(), tray_display_items_.end(), [&](const auto& row) { return row.first == path; });
+                if (item == tray_display_items_.end() || !TrayCompatible(item->second)) return 0;
+                path = item->second.path; file = true;
+            }
+            OpenPathInPulse(path, file);
+            return 0;
+        }
         case WM_RBUTTONUP: {
             const float x = static_cast<float>(GET_X_LPARAM(lparam));
             const float y = static_cast<float>(GET_Y_LPARAM(lparam));
@@ -6028,7 +8531,9 @@ private:
             const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             if (hit.main.region == HitTestResult::SidebarItem || hit.main.region == HitTestResult::SidebarItemExpand || hit.main.region == HitTestResult::SidebarHeader ||
                 hit.main.region == HitTestResult::SidebarBlank) {
-                ShowSidebarMenu(hit.main.region==HitTestResult::SidebarItem || hit.main.region==HitTestResult::SidebarItemExpand ? hit.main.path : std::wstring(),point);
+                if (hit.main.region == HitTestResult::SidebarHeader) ShowSidebarGroupMenu(hit.main.index, point);
+                else if (hit.main.path.starts_with(kCommonUndoToken) || hit.main.path.starts_with(kShowHiddenGroupsToken)) {}
+                else ShowSidebarMenu(hit.main.region==HitTestResult::SidebarItem || hit.main.region==HitTestResult::SidebarItemExpand ? hit.main.path : std::wstring(),point);
             } else if (hit.main.region == HitTestResult::ColumnHeader || hit.main.region == HitTestResult::ColumnDivider) {
                 ShowColumnMenu(point);
             } else if (hit.main.region == HitTestResult::BreadcrumbSegment || hit.main.region == HitTestResult::AddressBar) {
@@ -6082,14 +8587,24 @@ private:
             break;
         case WM_SYSKEYDOWN:
             if (wparam == VK_RETURN && HandleKey(wparam)) return 0;
+            if (wparam == '0') { UsePulseSelection(); return 0; }
             if (wparam == VK_UP) { GoUp(); return 0; }
             if (wparam == VK_LEFT) { GoBack(); return 0; }
             if (wparam == VK_RIGHT) { GoForward(); return 0; }
             if (wparam == 'D') { BeginAddressEdit(); return 0; }
             if (wparam == 'N' && filename_edit_) { FocusFilename(); return 0; }
-            if (wparam >= '1' && wparam <= '9' && static_cast<size_t>(wparam - '1') < OpenFolders().size()) {
-                JumpToOpenFolder(static_cast<size_t>(wparam - '1'));
-                return 0;
+            if (wparam == 'P') { TogglePreviewPane(); return 0; }
+            if (wparam >= '1' && wparam <= '9') {
+                const size_t idx = static_cast<size_t>(wparam - '1');
+                const auto folders = OpenFolders();
+                if (idx < folders.size()) {
+                    JumpToOpenFolder(idx);
+                    return 0;
+                }
+                if (idx == folders.size() && !chrome_.last_location.path.empty()) {
+                    Navigate(chrome_.last_location.path, true);
+                    return 0;
+                }
             }
             break;
         case WM_CHAR:
@@ -6104,6 +8619,16 @@ private:
                 focus_ = kPickList;
             Invalidate();
             return 0;
+        case kGitRootMessage: {
+            std::unique_ptr<std::wstring> found(reinterpret_cast<std::wstring*>(lparam));
+            if (static_cast<uint64_t>(wparam) == git_repo_generation_ && found) {
+                if (git_repo_root_ != *found) {
+                    git_repo_root_ = std::move(*found);
+                    Relayout(); Invalidate();
+                }
+            }
+            return 0;
+        }
         case WM_CLOSE:
             Cancel();
             return 0;
@@ -6119,12 +8644,11 @@ private:
             return 1;
         case WM_DESTROY:
             legacy_destroying_ = true; legacy_child_.Clear();
-            recent_thumbnail_cache_.Detach();
-            KillTimer(hwnd_, kRecentThumbnailTimer);
             DismissHover();
             frame_pump_.Stop();
             ole_drop_.Revoke();
             queued_drop_.reset();
+            queued_use_files_.clear();
             SaveLayout();
             menu_.Dismiss();
             KillTimer(hwnd_, kMotionTimer);
@@ -6187,26 +8711,77 @@ private:
     PickerMode mode_ = PickerMode::Folder;
     PickerHistory history_;
     PickerOptions options_;
+    std::shared_ptr<PickerArchiveDelivery> archive_delivery_;
+    std::wstring archive_source_;
+    std::optional<picker_save::Stamp> save_before_;
+    PickerListOrder order_;            // the order the next listing is read in
+    std::vector<size_t> recent_formats_;  // types selected in this dialog, most recent first
+    std::vector<size_t> saved_formats_;   // types this program saved with before
+    std::vector<PickerTrayPickup> tray_pickups_;
+    bool tray_expanded_ = false, tray_collapsed_ = false;
+    bool saving_to_tray_ = false;
+    std::wstring save_before_tray_dir_;
+    app::DragShakeDetector shake_detector_;
+    bool tray_drop_armed_ = false;
+    std::vector<std::wstring> incoming_dropzone_sources_;
+    std::vector<std::wstring> app_pinned_places_;
+    std::vector<PickerCommonRow> common_rows_;     // 常用 as last built (menus and × look rows up here)
+    struct { std::wstring path, label; } common_forget_;   // removed, still undoable
+    std::vector<std::wstring> common_forgotten_;   // removed and written this session
+    std::wstring original_file_path_;
+    std::wstring git_repo_root_, git_repo_dir_;
+    uint64_t git_repo_generation_ = 0;
+    int save_total_files_cached_ = -1;
+    size_t tray_page_ = 0;
+    std::wstring tray_page_identity_;
+    std::vector<std::pair<std::wstring, picker_places::TrayItem>> tray_display_items_;
+    PickerSaveDraftProbe save_draft_probe_;
+    std::optional<PickerSaveDraftProbe::Result> save_draft_result_;
+    std::wstring save_draft_key_, save_draft_path_;
+    uint64_t save_draft_generation_ = 0;
+    ULONGLONG save_draft_due_ = 0;
+    bool save_name_invalid_ = false;
+    std::vector<SaveNameSuggestion> save_name_suggestions_;
+    bool counts_valid_ = false;           // the open filter bar's counts, from the last listing
+    std::vector<uint32_t> filter_counts_;
+    std::array<uint32_t, kPickerCategoryCount> category_counts_{};
+    uint32_t new_count_ = 0;
+    int time_filter_ = 0;                 // 0 any, 1 today, 2 this week
+    uint64_t opened_at_ = 0;              // this dialog's start: next time's 新文件 boundary
+    uint32_t picker_flags_ = 0, saved_flags_ = 0;  // picker_layout::kFlag*, per program and mode
+    std::vector<std::wstring> saved_format_patterns_;
+    PickerImageDimensions image_dimensions_;
+    PickerListOrder snapshot_order_;   // the order snapshot_ was read in
+    std::map<std::wstring, PickerListOrder> order_overrides_;  // chosen here, per folder, until close
+    int default_group_by_ = 0;         // without the main window's order
+    std::set<std::wstring> collapsed_list_groups_;
+    std::shared_ptr<const ListGroups> list_groups_;
+    const void* list_groups_snapshot_ = nullptr;
+    uint64_t list_groups_rev_ = 1, list_groups_built_rev_ = 0;
     std::unique_ptr<PickerLoader> loader_;
+    PickerDetailsTree tree_;
+    std::shared_ptr<DetailsTreeRows> tree_rows_;
+    std::unique_ptr<PickerLoader> tree_loader_;
+    std::deque<std::wstring> tree_pending_;
+    std::wstring tree_active_path_;
+    uint64_t tree_serial_ = 0, tree_active_ = 0;
     std::vector<PickerPlace> places_;
+    std::vector<PickerPlace> standard_places_;     // 此电脑's everyday folders (RefreshKnownPlaces)
     std::vector<SidebarItem> drives_;
     bool collapsed_[9] = {};
     std::unordered_set<std::wstring> folded_favorite_groups_;
-    struct SavedPlacesSlot {
-        std::mutex mutex;
-        std::atomic<bool> ready{false};
-        std::atomic<bool> cancelled{false};
-        picker_places::Snapshot snapshot;
-    };
-    std::shared_ptr<SavedPlacesSlot> saved_places_;
+    std::future<picker_places::Snapshot> saved_places_;
     PickerPlacesDrag places_drag_;
     PickerOleDrop ole_drop_;
     std::unique_ptr<ops::OpRequest> queued_drop_;
+    std::vector<std::wstring> queued_use_files_;
+    bool right_file_drag_ = false;
+    std::vector<picker_places::SelectedItem> validation_selection_items_;
+    bool validation_incoming_files_ = false, validation_add_selection_ = false;
     bool ole_drag_out_ = false;
     picker_places::Snapshot pulse_places_;
     std::wstring current_;
     std::vector<PickerEntry> entries_;
-    PickerRecentThumbnailCache recent_thumbnail_cache_;
     fs::SnapshotPtr snapshot_;
     std::unordered_set<int> selected_set_;
     PickerMarquee marquee_;
@@ -6216,6 +8791,7 @@ private:
     int selected_ = -1;
     int anchor_ = -1;
     float scroll_ = 0.0f;
+    float scroll_x_ = 0.0f;   // List view only (ScrollX)
     ViewMode view_mode_ = ViewMode::Details;
     float icon_dip_ = 0, last_icon_dip_ = 0;
     ViewMode last_icon_mode_ = ViewMode::MediumIcons;
@@ -6261,8 +8837,6 @@ private:
     std::wstring normal_primary_text_;
     bool legacy_browse_ok_ = true;
     ComPtr<ID2D1Bitmap> app_icon_bitmap_;
-    std::vector<ComPtr<ID2D1Bitmap>> recent_thumbs_;
-    const void* recent_thumb_device_ = nullptr;
     PickerJumpPanel jump_;
     PickerJumpLayout jump_layout_;
     const void* app_icon_device_ = nullptr;
@@ -6278,11 +8852,18 @@ private:
     bool open_filter_changed_ = false;
     bool filename_from_selection_ = false;
     bool editing_selection_names_ = false;
-    std::vector<int> selection_tag_indices_;
+    std::vector<std::wstring> selection_tag_paths_;
+    std::wstring save_format_notice_, save_format_notice_filename_;
+    size_t save_format_notice_filter_ = static_cast<size_t>(-1);
+    std::vector<int> selection_tag_indices_;  // per tag: entry index, or -1 - basket index
+    struct BasketItem { std::wstring path, name; uint64_t size = 0; };
+    std::vector<BasketItem> basket_;          // picks kept from other folders (File mode, multi-select)
+    std::vector<BasketItem> last_file_picks_; // the files picked last in this folder
     bool validation_navigation_only_ = false;
     bool setting_edits_ = false;
     bool dragging_scrollbar_ = false;
     bool scrollbar_sidebar_ = false;
+    bool scrollbar_horizontal_ = false;  // the List view's bottom bar; scrollbar_drag_y_ then holds x
     float scrollbar_drag_y_ = 0.0f;
     float scrollbar_drag_scroll_ = 0.0f;
     D2D1_COLOR_F accent_ = HexColor(0x0078D4);
@@ -6301,8 +8882,10 @@ private:
     bool jump_context_touched_ = false;
     bool custom_details_open_ = false;
 #if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
-    unsigned test_recent_bitmap_draws_ = 0;
     int test_last_down_ = 0, test_last_up_ = 0, test_last_activate_ = 0;
+    bool test_middle_capture_ = false, test_middle_file_ = false;
+    unsigned test_middle_launch_count_ = 0;
+    std::wstring test_middle_path_;
 #endif
     uint64_t jump_save_generation_ = 0;
     std::wstring jump_save_filename_;
@@ -6372,17 +8955,13 @@ FilePickerOutcome ShowFilePickerDetailed(HWND owner, const FolderPickerSpec& spe
     if (!guard->Alive()) { outcome.status = FilePickerStatus::Cancelled; return outcome; }
     auto guarded_spec = spec;
     guarded_spec.owner_guard = guard;
-    {
-        FolderPickerWindow window;
-        const bool picked = window.Show(owner, guarded_spec, dark, accent, outcome.result);
-        outcome.error = window.Error();
-        outcome.failure = window.Failure();
-        if (!guard->Alive()) { outcome.result = {}; outcome.status = FilePickerStatus::Cancelled; return outcome; }
-        outcome.status = picked ? FilePickerStatus::Accepted :
-            outcome.error ? FilePickerStatus::Failed : FilePickerStatus::Cancelled;
-        PickerProofPhase("window-dtor-before");
-    }
-    PickerProofPhase("window-dtor-after");
+    FolderPickerWindow window;
+    const bool picked = window.Show(owner, guarded_spec, dark, accent, outcome.result);
+    if (!guard->Alive()) { outcome.result = {}; outcome.status = FilePickerStatus::Cancelled; return outcome; }
+    outcome.error = window.Error();
+    outcome.failure = window.Failure();
+    outcome.status = picked ? FilePickerStatus::Accepted :
+        outcome.error ? FilePickerStatus::Failed : FilePickerStatus::Cancelled;
     return outcome;
 }
 

@@ -4,6 +4,7 @@
 #include "file_save_model.h"
 #include "file_save_revalidation.h"
 #include "file_save_access_policy.h"
+#include "../common/picker_save_watch.h"
 #include <memory>
 
 namespace pulse::ui {
@@ -27,6 +28,9 @@ struct PickerValidation {
     uint64_t save_ui_generation = 0;
     std::optional<SaveAccessResult> save_access_diagnostic;
     std::optional<SaveConfirmationSnapshot> save_snapshot;
+    std::optional<picker_save::Stamp> save_before;
+    std::shared_ptr<PickerArchiveDelivery> archive_delivery;
+    std::wstring archive_source;
 };
 
 struct PickerSaveDirectories {
@@ -40,7 +44,7 @@ struct PickerSaveDirectories {
 // Two bounded workers share a latest-only queue; closing never waits on a network request.
 class PickerLoader {
 public:
-    PickerLoader(HWND hwnd, UINT message, UINT validation_message = 0, UINT folder_commit_message = 0, UINT directories_message = 0);
+    PickerLoader(HWND hwnd, UINT message, UINT validation_message = 0, UINT folder_commit_message = 0, UINT directories_message = 0, bool capture_save_followup = false);
     ~PickerLoader();
     PickerLoader(const PickerLoader&) = delete;
     PickerLoader& operator=(const PickerLoader&) = delete;

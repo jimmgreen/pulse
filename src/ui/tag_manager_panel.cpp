@@ -34,6 +34,27 @@ constexpr GUID kShadowEffectClsid = { 0xC67EA361, 0x1863, 0x4e69,
 
 constexpr wchar_t kClassName[] = L"PulseTagManager";
 
+// The light-dismiss loop dispatches the outside click before Edit unwinds.
+// That can synchronously invoke Edit again through the owner's sidebar.
+class OwnerSession {
+public:
+    explicit OwnerSession(HWND owner) : owner_(owner) {
+        if (owner_ && !GetPropW(owner_, kProperty))
+            acquired_ = SetPropW(owner_, kProperty, reinterpret_cast<HANDLE>(this)) != FALSE;
+    }
+    ~OwnerSession() {
+        if (acquired_ && GetPropW(owner_, kProperty) == reinterpret_cast<HANDLE>(this))
+            RemovePropW(owner_, kProperty);
+    }
+    OwnerSession(const OwnerSession&) = delete;
+    OwnerSession& operator=(const OwnerSession&) = delete;
+    explicit operator bool() const { return acquired_; }
+private:
+    static constexpr wchar_t kProperty[] = L"Pulse.TagManager.OwnerSession";
+    HWND owner_ = nullptr;
+    bool acquired_ = false;
+};
+
 constexpr float kCardW = 440.0f;
 constexpr float kPadX = 16.0f;
 constexpr float kPadTop = 10.0f;
@@ -837,6 +858,8 @@ TagManagerAction TagManagerPopup::Edit(HWND owner, Compositor* compositor, float
                                        int max_favorites) {
     if (!compositor || !compositor->Dc() || !RegisterPanelClass())
         return TagManagerAction::Cancelled;
+    const OwnerSession session(owner);
+    if (!session) return TagManagerAction::Cancelled;
     std::vector<bool> original_favorites;
     for (const auto& row : rows) original_favorites.push_back(row.favorite);
 

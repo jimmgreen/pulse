@@ -1218,6 +1218,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         }
         toggle(lay.alias_mark_row,I::AliasMark,I::AliasMarkDesc,L"\xE8AC",vm.settings_alias_mark,39);
         toggle(lay.tree_sticky_row,I::SettingsTreeSticky,I::SettingsTreeStickyDesc,L"\xE840",vm.settings_list_tree_sticky,79);
+        toggle(lay.scroll_past_end_row,I::SettingsScrollPastEnd,I::SettingsScrollPastEndDesc,L"\xE74B",vm.settings_list_scroll_past_end,84);
         if(lay.mtime_style_card.bottom>lay.mtime_style_card.top) {
             // 修改时间提示: style, then range / colors / switches while it is on.
             const auto& mt=vm.settings_mtime;
@@ -1598,6 +1599,10 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             toggle(lay.global_search_apps_row,I::GlobalSearchApps,I::GlobalSearchAppsDesc,L"\xE71D",vm.settings_global_search_apps,43);
             divider(lay.global_search_apps_row);
             dim_end(dim_apps);
+            const bool dim_apps_first=dim_begin(!vm.settings_global_search_enabled || !vm.settings_global_search_apps);
+            toggle(lay.global_search_apps_first_row,I::GlobalSearchAppsFirst,I::GlobalSearchAppsFirstDesc,L"\xE74A",vm.settings_global_search_apps_first,47);
+            divider(lay.global_search_apps_first_row);
+            dim_end(dim_apps_first);
         }
         toggle(lay.search_pinyin_row,I::SearchPinyin,I::SearchPinyinDesc,L"\xE721",vm.settings_search_pinyin,9);divider(lay.search_pinyin_row);
         toggle(lay.jump_history_row,I::JumpHistory,I::JumpHistoryDesc,L"\xE823",vm.settings_jump_history,44,lay.jump_history_clear.left-12*scale_);

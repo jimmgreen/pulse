@@ -87,7 +87,7 @@ constexpr UINT_PTR kAnimationTimer = 7;
 constexpr UINT_PTR kPreviewDeadlineTimer = 31;
 constexpr UINT_PTR kFindEditCaretTimer = 71;
 constexpr UINT_PTR kZoomCloseTimer = 72;
-constexpr UINT_PTR kNavSlideTimer = 74;  // the next item slides in (motion phase 6)
+constexpr UINT_PTR kNavSlideTimer = 74;  // short tonal transition between items
 constexpr UINT_PTR kSizeProbeTimer = 76;
 constexpr UINT_PTR kFitTimer = 75;       // 适应内容 once the first frame tells the size
 constexpr double kZoomOpenSeconds = 0.22;
@@ -120,6 +120,7 @@ enum {
     kViewCmdFirst,       // + 0 / 1: the header's view toggle, folded into the menu
     kViewCmdSecond,
     kWindowCmdAlwaysOnTop = 50,
+    kWindowCmdImmersive = 51,
     kSizeCmdFirst = 60,  // + PreviewSizeMode: the header's window size menu
     kSizeCmdRemember = 70,
     kArchiveSortFirst = 80,  // + ArchivePreview::SortKey
@@ -531,6 +532,11 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
     item_ = item;
     title_ = PreviewTitle(item_);
     open_app_cache_.clear();   // associations may have changed since the last preview
+    gallery_scroll_init_ = false;
+    gallery_target_ = -1;
+    gallery_alpha_ = 1.0f;
+    gallery_open_ = 1.0f;
+    gallery_activity_ = GetTickCount64();
     RefreshItemFacts();
     dark_ = dark;
     commands_.Clear();
@@ -663,8 +669,7 @@ void QuickPreviewWindow::SetMessageReceiver(HWND receiver, UINT open_message, UI
     if (command_message) command_message_ = command_message;
 }
 
-// Prev / next: remember the direction so the item that answers slides in
-// from that side (spring Smooth).
+// Prev / next requests are tracked separately from the content transition.
 // A peek pinned with Space: it takes the keyboard and its sound back.
 void QuickPreviewWindow::Activate() {
     if (!visible()) return;
@@ -674,6 +679,11 @@ void QuickPreviewWindow::Activate() {
 
 void QuickPreviewWindow::PostNavigate(int dir) {
     if (!HasNavigation() || !message_owner_) return;
+    if (GalleryActive()) {
+        // The photo viewer's filter decides the neighbour (an absolute row).
+        PostGalleryJump(GalleryTarget(dir));
+        return;
+    }
     pending_nav_dir_ = dir;
     pending_nav_at_ = motion::NowMs();
     PostMessageW(message_owner_, navigate_message_, static_cast<WPARAM>(static_cast<INT_PTR>(dir)), 0);
@@ -694,11 +704,14 @@ void QuickPreviewWindow::Update(const QuickPreviewItem& item) {
     commands_.Clear();
     const bool same = item.path == item_.path;
     const int position = item_.position, count = item_.count;
+    auto gallery = item_.gallery;
+    const bool was_immersive = Immersive();
     item_ = item;
     if (same && item_.count == 0) {   // a refresh of the shown item keeps its place
         item_.position = position;
         item_.count = count;
     }
+    if (same && !item_.gallery) item_.gallery = std::move(gallery);
     title_ = PreviewTitle(item_);
     RefreshItemFacts();
     ++generation_;
@@ -719,7 +732,10 @@ void QuickPreviewWindow::Update(const QuickPreviewItem& item) {
     KillTimer(hwnd_, kFitTimer);
     const RECT& kept = options_.remembered;
     const bool remembered = options_.remember_size && kept.right > kept.left && kept.bottom > kept.top;
-    if (!same && !fullscreen_ && !user_sized_ && !remembered && !IsZoomed(hwnd_) &&
+    // The photo viewer keeps its frame while stepping through pictures and
+    // videos (its arrows and filmstrip stay under the pointer).
+    const bool keep_viewer = was_immersive && Immersive();
+    if (!same && !keep_viewer && !fullscreen_ && !user_sized_ && !remembered && !IsZoomed(hwnd_) &&
         options_.size_mode == static_cast<int>(PreviewSizeMode::Fit)) {
         const RECT next = PlanRect(options_.size_mode, WindowCentre(), false);
         if (!fit_pending_) ApplyRect(next);   // pending: keep the size until the first frame
@@ -841,8 +857,9 @@ D2D1_RECT_F QuickPreviewWindow::ContentRect() const {
     const float width = static_cast<float>(compositor_.Width());
     const float height = static_cast<float>(compositor_.Height());
     const float header = HeaderHeight();
-    return D2D1::RectF(0, header + FindBarHeight() + preview_notice_height_, width - InfoDrawerWidth(),
+    const D2D1_RECT_F content = D2D1::RectF(0, header + FindBarHeight() + preview_notice_height_, width - InfoDrawerWidth(),
                        (std::max)(header + FindBarHeight() + preview_notice_height_, height - FooterHeight() - PlaybackHeight()));
+    return Immersive() ? ImmersiveContentRect(content) : content;
 }
 
 D2D1_RECT_F QuickPreviewWindow::ChromeButtonRect(ChromeButton button) const {
@@ -853,6 +870,8 @@ D2D1_RECT_F QuickPreviewWindow::ChromeButtonRect(ChromeButton button) const {
     case ChromeButton::Open: return header_.open;
     case ChromeButton::Size: return header_.size;
     case ChromeButton::Pin: return header_.pin;
+    case ChromeButton::Rotate: return header_.rotate;
+    case ChromeButton::Info: return header_.info;
     default: return D2D1::RectF(0, 0, 0, 0);
     }
 }
@@ -935,7 +954,8 @@ QuickPreviewWindow::ChromeButton QuickPreviewWindow::HitChromeButton(POINT clien
     const float y = static_cast<float>(client.y);
     if (fullscreen_) return ChromeButton::None;
     for (ChromeButton button : {ChromeButton::Prev, ChromeButton::Next, ChromeButton::Open,
-                                ChromeButton::Pin, ChromeButton::Size, ChromeButton::More}) {
+                                ChromeButton::Pin, ChromeButton::Size, ChromeButton::More,
+                                ChromeButton::Rotate, ChromeButton::Info}) {
         const D2D1_RECT_F rect = ChromeButtonRect(button);
         if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom) return button;
     }
@@ -962,6 +982,12 @@ void QuickPreviewWindow::ActivateChromeButton(ChromeButton button) {
         break;
     case ChromeButton::Pin:
         ToggleAlwaysOnTop();
+        break;
+    case ChromeButton::Rotate:
+        ActivateFooterControl(kFooterRotate);
+        break;
+    case ChromeButton::Info:
+        ActivateFooterControl(kFooterInfo);
         break;
     case ChromeButton::More: {
         const D2D1_RECT_F rect = ChromeButtonRect(ChromeButton::More);
@@ -2070,6 +2096,16 @@ void QuickPreviewWindow::ShowContextMenu(POINT screen) {
         add(kWindowCmdAlwaysOnTop,
             always_on_top_ ? StringId::PreviewCancelAlwaysOnTop : StringId::PreviewAlwaysOnTop,
             always_on_top_ ? kUnpinGlyph : kPinGlyph, L"T");
+        if (media_kind_ != 0) {
+            // Photo viewer on / off for pictures and videos (remembered).
+            FluentMenuItem immersive;
+            immersive.command = kWindowCmdImmersive;
+            immersive.text = pulse::l10n::Get(StringId::QuickLookImmersive);
+            immersive.glyph = L"\xE91B";
+            immersive.toggle = true;
+            immersive.checked = options_.immersive;
+            items.push_back(std::move(immersive));
+        }
     }
     if (items.empty()) return;
     const int cmd = text_menu_.TrackPopup(screen, std::move(items));
@@ -2078,6 +2114,7 @@ void QuickPreviewWindow::ShowContextMenu(POINT screen) {
             SetToggleSecond(cmd == kViewCmdFirst + 1);
     }
     else if (cmd == kWindowCmdAlwaysOnTop) ToggleAlwaysOnTop();
+    else if (cmd == kWindowCmdImmersive) ToggleImmersive();
     else if (cmd == kTextCmdCopy) CopyTextSelection(true);
     else if (cmd == kArchiveCmdCopyPath) pulse::ops::WriteClipboardText(archive_path);
     else if (cmd == kTextCmdSelectAll) SelectAllText();
@@ -2583,6 +2620,7 @@ bool QuickPreviewWindow::ClientPoint(LPARAM lparam, POINT& out) const {
 }
 
 HCURSOR QuickPreviewWindow::ContentCursor(POINT client) const {
+    if (const int hit = GalleryHit(client); hit != 0 && hit != 3) return LoadCursorW(nullptr, IDC_HAND);
     if (OverCodecButton(client) || HitFooterControl(client) != 0) return LoadCursorW(nullptr, IDC_HAND);
     if (client.y < static_cast<LONG>(HeaderHeight()) || client.y >= static_cast<LONG>(FooterRect().top))
         return LoadCursorW(nullptr, IDC_ARROW);
@@ -2704,6 +2742,7 @@ void QuickPreviewWindow::Render() {
     // Full screen: pictures and videos sit on black.
     dc->Clear(fullscreen_ && !high_contrast && (image_item_ || video_.active())
         ? D2D1::ColorF(0x000000) : background);
+    if (Immersive()) DrawImmersiveBackdrop(dc);
     ComPtr<ID2D1SolidColorBrush> text_brush;
     ComPtr<ID2D1SolidColorBrush> secondary_brush;
     dc->CreateSolidColorBrush(foreground, &text_brush);
@@ -2756,25 +2795,19 @@ void QuickPreviewWindow::Render() {
         preview_notice_height_ = DrawPreviewNotice(dc, compositor_.DwriteFactory(), compositor_.SmallFormat(),
             *notice, notice_rect, scale_, CurrentTheme().text, CurrentTheme().fill_hover);
     }
-    // Prev / next: the new item's content slides 36 px in from its side and
-    // fades in (160 ms). Preview handler windows stay put.
-    float nav_dx = 0.0f, nav_alpha = 1.0f;
+    // A short tonal transition keeps navigation continuous without moving
+    // content or concealing newly available text. Handler windows stay put.
+    float nav_alpha = 1.0f;
     if (nav_dir_ != 0) {
         const float t = static_cast<float>(motion::NowMs() - nav_start_);
-        if (t >= static_cast<float>(motion::SpringSettleMs(motion::spring::Smooth))) {
+        if (t >= 100.0f) {
             nav_dir_ = 0;
         } else {
-            const float p = motion::SpringProgress(motion::spring::Smooth, t);
-            nav_dx = std::round(36.0f * scale_ * static_cast<float>(nav_dir_) * (1.0f - p));
-            nav_alpha = (std::clamp)(t / 160.0f, 0.0f, 1.0f);
+            nav_alpha = 0.94f + 0.06f * motion::EaseOutCubic(t / 100.0f);
         }
     }
-    const bool nav_layer = nav_dx != 0.0f || nav_alpha < 1.0f;
-    D2D1_MATRIX_3X2_F nav_saved{};
+    const bool nav_layer = nav_alpha < 1.0f;
     if (nav_layer) {
-        dc->GetTransform(&nav_saved);
-        dc->SetTransform(D2D1::Matrix3x2F::Translation(nav_dx, 0.0f) *
-                         *D2D1::Matrix3x2F::ReinterpretBaseType(&nav_saved));
         dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr,
                                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(),
                                              nav_alpha, nullptr, D2D1_LAYER_OPTIONS1_NONE), nullptr);
@@ -2803,8 +2836,8 @@ void QuickPreviewWindow::Render() {
         const bool audio = VideoPreview::IsAudio(item_.path);
         const bool codec_card = CodecCardVisible(video);
         const bool picture = !audio && !codec_card && !video.opening && video.ready && SUCCEEDED(video.error);
-        if (picture && !high_contrast) {
-            // Video sits on black, transport bar included.
+        if (picture && !high_contrast && !Immersive()) {
+            // Video sits on black, transport bar included (the photo viewer keeps its backdrop).
             ComPtr<ID2D1SolidColorBrush> black;
             dc->CreateSolidColorBrush(D2D1::ColorF(0x000000), &black);
             if (black.get())
@@ -2880,6 +2913,8 @@ void QuickPreviewWindow::Render() {
         }
         const bool icon_unsized = icon && image_fit_ && (!decoded_w_ || !decoded_h_);
         dc->PushAxisAlignedClip(content, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // Photo viewer: rounded corners and a soft shadow (popped below).
+        BeginImmersivePicture(dc, draw, !icon && !folder && image_item_ && pages_count_ <= 1);
         const bool backdrop = !icon && !folder && image_item_ && pages_count_ <= 1 &&
                               DrawImageBackdrop(dc, content, draw);
         if (table_.TakePendingSheetRequest(sheet_request_)) {
@@ -2957,6 +2992,7 @@ void QuickPreviewWindow::Render() {
                 error = std::move(full_error);
             }
         }
+        EndImmersivePicture(dc);
         const std::wstring empty_text;
         const std::wstring& text = shared_payload ? *shared_payload : empty_text;
         if (result != PreviewDrawResult::Pending) {
@@ -3305,15 +3341,15 @@ void QuickPreviewWindow::Render() {
     }
     if (nav_layer) {
         dc->PopLayer();
-        dc->SetTransform(nav_saved);
     }
-    // The shell stays put while the content slides.
+    // The shell remains fully opaque during the content transition.
     LayoutHeader();
     DrawInfoDrawer(dc, palette);
     if (!fullscreen_) {
         DrawHeader(dc, palette);
-        DrawFooter(dc, palette);
+        if (FooterHeight() > 0.0f) DrawFooter(dc, palette);
     }
+    DrawImmersiveChrome(dc);
     SchedulePreviewDeadline();
     {
         // Frame building only; EndDraw's flush and Present wait on the GPU and vsync.
@@ -3506,6 +3542,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA;
         POINT cursor{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(hwnd_, &cursor);
+        if (GalleryWheel(cursor, steps)) return 0;
         if (PlaybackWheel(cursor, steps)) {
             return 0;
         }
@@ -3554,6 +3591,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
         if (PlaybackMouseDown(point)) return 0;
+        if (GalleryMouseDown(point)) return 0;
         if (const ChromeButton button = HitChromeButton(point); button != ChromeButton::None) {
             if (GetFocus() != hwnd_) SetFocus(hwnd_);  // provider may hold focus
             ActivateChromeButton(button);
@@ -3685,6 +3723,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         POINT point{};
         ClientPoint(lparam, point);
         if (PlaybackMouseDown(point)) return 0;
+        if (GalleryMouseDown(point)) return 0;   // rapid clicks keep stepping through the filmstrip
         if (const ChromeButton button = HitChromeButton(point); button != ChromeButton::None) {
             ActivateChromeButton(button);  // rapid clicks keep stepping through files
             return 0;
@@ -3777,6 +3816,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     case WM_MOUSEMOVE: {
         POINT point{};
         ClientPoint(lparam, point);
+        GalleryMouseMove(point);
         if (markdown_.DraggingScrollbar()) {
             if (!(wparam & MK_LBUTTON)) {
                 markdown_.EndScrollbarDrag();
@@ -3928,6 +3968,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     }
     case WM_MOUSELEAVE:
         mouse_tracking_ = false;
+        GalleryMouseLeave();
         if (markdown_.Leave()) InvalidateRect(hwnd_, nullptr, FALSE);
         if (archive_.Leave()) InvalidateRect(hwnd_, nullptr, FALSE);
         KillTimer(hwnd_, kTableTipTimer);
@@ -4068,6 +4109,10 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         return 0;
     }
     case WM_TIMER:
+        if (wparam == kGalleryTimer) {
+            TickGallery();
+            return 0;
+        }
         if (wparam == kPreviewDeadlineTimer) {
             KillTimer(hwnd_, kPreviewDeadlineTimer);
             if (preview_deadline_) {

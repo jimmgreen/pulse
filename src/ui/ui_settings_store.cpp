@@ -278,8 +278,12 @@ void MainRenderer::DrawNativeSettingsHeader(const WindowViewModel& vm,const D2D1
     settings_store_fields_[5] = d.more;
     DrawExtensionDetailHeader(p, d, h, A::StoreBrowse);
     int selected_slot = h.tab == 0 ? (std::max)(0, h.active_plugin_tab) : h.tab;
-    if (d.tab_count > 0 && h.tab != 0) {
-        const int target_action = static_cast<int>(A::NativeTabBase) + h.tab;
+    if (d.tab_count > 0) {
+        // Find the slot by action: 右键菜单 sits before the plugin's extra tabs, so slots and
+        // plugin tab indexes differ (plugin tab k > 0 is custom tab k - 1).
+        const int target_action = h.tab != 0 ? static_cast<int>(A::NativeTabBase) + h.tab
+            : h.active_plugin_tab > 0 ? static_cast<int>(A::NativeCustomTabBase) + h.active_plugin_tab - 1
+            : static_cast<int>(A::NativeTabBase);
         selected_slot = 0;
         for (int i = 0; i < d.tab_count; ++i) {
             if (d.tab_actions[i] == target_action) { selected_slot = i; break; }

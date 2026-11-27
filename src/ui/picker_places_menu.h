@@ -12,7 +12,8 @@ namespace pulse::ui {
 inline std::vector<FluentMenuItem> BuildPickerPlacesMenu(
     const picker_places::Snapshot& snapshot, const std::wstring& path,
     const std::vector<std::wstring>& hidden_paths, bool mutations_available,
-    bool is_folder = true) {
+    bool is_folder = true, const std::wstring& host_app_name = {}, bool pinned_to_app = false,
+    bool removable_common = false) {
     using Id = l10n::StringId;
     constexpr wchar_t group_prefix[] = L"pulse:star-group:";
     const auto item = [](int command, Id text, bool enabled = true) {
@@ -31,7 +32,8 @@ inline std::vector<FluentMenuItem> BuildPickerPlacesMenu(
     const auto group = std::find_if(snapshot.starred_groups.begin(), snapshot.starred_groups.end(),
         [&](const auto& entry) { return entry.id == group_id; });
     std::vector<FluentMenuItem> rows;
-    if (!path.empty()) {
+    // A 常用 row is removed (command 18), not hidden: hiding is for fixed places.
+    if (!path.empty() && !removable_common) {
         rows.push_back(item(1, Id::PickerHidePlace, hidden_paths.size() < 64));
         rows.back().mnemonic = L'H';
     }
@@ -95,6 +97,20 @@ inline std::vector<FluentMenuItem> BuildPickerPlacesMenu(
         rows.push_back(item(11, Id::WorkspaceMoveDown, mutations_available && workspace + 1 != snapshot.workspaces.end()));
     } else if (folder) {
         rows.push_back(item(7, Id::PinWorkspace, mutations_available));
+    }
+    if (folder && !host_app_name.empty()) {
+        std::wstring text = l10n::Get(pinned_to_app ? Id::PickerUnpinFromApp : Id::PickerPinToApp);
+        if (const auto pos = text.find(L"{name}"); pos != std::wstring::npos) text.replace(pos, 6, host_app_name);
+        FluentMenuItem pin_row;
+        pin_row.command = pinned_to_app ? 17 : 16;
+        pin_row.text = std::move(text);
+        pin_row.glyph = pinned_to_app ? L"\xE77A" : L"\xE718";
+        rows.push_back(std::move(pin_row));
+    }
+    if (removable_common) {
+        auto remove = item(18, Id::PickerCommonRemove);
+        remove.glyph = L"\xE711";
+        rows.push_back(std::move(remove));
     }
     return rows;
 }

@@ -61,6 +61,8 @@ enum class Icon {
     UiLayout, WinSwitch, TabStrip, StatusBar, ModeZen, ModeStandard, ModePro, SelectionBar, FileExt, TitleButtons, FileList, WindowParts, TabToWindow, NewWindow, WinOverview,
     // 查看 › view modes (sizes/tiles/content each their own), the shell menu, MCP, arranging.
     ViewXL, ViewLarge, ViewSmall, ViewTiles, ViewContent, SysMenu, Plug, WinArrange, ExtractSel,
+    // Title bar (title_bar_icons.html): the button group and the caption buttons on one grid and one weight.
+    TitleSettings, TitleTheme, TitleThemeDark, CapMinimize, CapMaximize, CapRestore, CapClose,
     Count
 };
 
@@ -109,6 +111,13 @@ inline constexpr const wchar_t* kGlyphSysMenu = L"\xF5DA";  // 系统右键菜�
 inline constexpr const wchar_t* kGlyphPlug = L"\xF5DB";  // AI 与 MCP / 外部工具: a connector plug
 inline constexpr const wchar_t* kGlyphWinArrange = L"\xF5DC";  // 排列窗口: two windows side by side
 inline constexpr const wchar_t* kGlyphExtractSel = L"\xF5DD";  // 解压所选到…: picked items leave an archive
+inline constexpr const wchar_t* kGlyphTitleSettings = L"\xF5DE";   // 设置 (title button): two switches, on and off
+inline constexpr const wchar_t* kGlyphTitleTheme = L"\xF5DF";      // 切换主题 in light: the solid half on the right
+inline constexpr const wchar_t* kGlyphTitleThemeDark = L"\xF5E0";  // 切换主题 in dark: the solid half on the left
+inline constexpr const wchar_t* kGlyphCapMinimize = L"\xF5E1";     // caption buttons: 13 of the 24 units, same weight
+inline constexpr const wchar_t* kGlyphCapMaximize = L"\xF5E2";
+inline constexpr const wchar_t* kGlyphCapRestore = L"\xF5E3";
+inline constexpr const wchar_t* kGlyphCapClose = L"\xF5E4";
 
 inline constexpr bool IsPinned(Icon icon) noexcept {
     return icon >= Icon::PinFavorites && icon <= Icon::PinToolbar;
@@ -241,6 +250,13 @@ inline Icon FromGlyph(std::wstring_view glyph) noexcept {
     case L'\xF5DB': return Icon::Plug;
     case L'\xF5DC': return Icon::WinArrange;
     case L'\xF5DD': return Icon::ExtractSel;
+    case L'\xF5DE': return Icon::TitleSettings;
+    case L'\xF5DF': return Icon::TitleTheme;
+    case L'\xF5E0': return Icon::TitleThemeDark;
+    case L'\xF5E1': return Icon::CapMinimize;
+    case L'\xF5E2': return Icon::CapMaximize;
+    case L'\xF5E3': return Icon::CapRestore;
+    case L'\xF5E4': return Icon::CapClose;
     case L'\xF168': return Icon::GroupBy;
     case L'\xE8F1': return Icon::FolderList;
     case L'\xE777': return Icon::Reset;
@@ -1157,13 +1173,13 @@ inline constexpr DesignPart kDesignParts[] = {
     {"M9.5 11.25h5", kAccent},
     {"M9.5 16.75h5", kAccent},
     // 255: UiLayout - 界面 (title button, 界面布局): window, top bar and sidebar edge
-    {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
-    {"M3.25 9h17.5", kAccent},
-    {"M9 9v10.25", kAccent},
+    {"M6 4.5h12A2.5 2.5 0 0 1 20.5 7v10a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 17V7A2.5 2.5 0 0 1 6 4.5Z", 0},
+    {"M3.5 9h17", kAccent},
+    {"M9 9v10.5", kAccent},
     // 258: WinSwitch - 窗口 (title button): two Pulse windows
-    {"M8.5 7.5V6.25a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-1.75", kAccent},
-    {"M5.5 8.25h9a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7.5a2 2 0 0 1 2-2Z", 0},
-    {"M3.5 11.75h13", 0},
+    {"M8.5 7.75V6.5A2.5 2.5 0 0 1 11 4h7a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5h-1.5", kAccent},
+    {"M6 8.5h8a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 18v-7A2.5 2.5 0 0 1 6 8.5Z", 0},
+    {"M3.5 12.25h13", 0},
     // 261: TabStrip - 标签页 / the ⧉ N tab list
     {"M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z", 0},
     {"M3.25 9h17.5", 0},
@@ -1257,7 +1273,27 @@ inline constexpr DesignPart kDesignParts[] = {
     // 330: ExtractSel - 解压所选到…: an archive (zipper) with one picked item leaving it
     {"M5.5 3.75h5.5A1.75 1.75 0 0 1 12.75 5.5v13A1.75 1.75 0 0 1 11 20.25h-5.5A1.75 1.75 0 0 1 3.75 18.5v-13A1.75 1.75 0 0 1 5.5 3.75Z", 0},
     {"M8.25 3.75v1.5M8.25 7.5v1.5M8.25 11.25v1.5", 0},
-    {"M15.75 9.25h3.5a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-3.5a1 1 0 0 1-1-1v-3.5a1 1 0 0 1 1-1ZM12.75 17.75h4.75M15.75 16l1.75 1.75-1.75 1.75", kAccent}
+    {"M15.75 9.25h3.5a1 1 0 0 1 1 1v3.5a1 1 0 0 1-1 1h-3.5a1 1 0 0 1-1-1v-3.5a1 1 0 0 1 1-1ZM12.75 17.75h4.75M15.75 16l1.75 1.75-1.75 1.75", kAccent},
+    // 333: TitleSettings - 设置 (title button): two switches with a gap, the upper on, the lower off
+    {"M7.25 4.25h9.5a3 3 0 0 1 0 6h-9.5a3 3 0 0 1 0-6Z", 0},
+    {"M16.75 5.75a1.5 1.5 0 1 1 0 3a1.5 1.5 0 1 1 0-3Z", kAccent|kFill},
+    {"M7.25 13.75h9.5a3 3 0 0 1 0 6h-9.5a3 3 0 0 1 0-6Z", 0},
+    {"M7.25 15.5a1.25 1.25 0 1 1 0 2.5a1.25 1.25 0 1 1 0-2.5Z", 0},
+    // 337: TitleTheme - 切换主题 in light: ring + the solid right half
+    {"M12 4.25a7.75 7.75 0 1 1 0 15.5a7.75 7.75 0 1 1 0-15.5Z", 0},
+    {"M12 4.25a7.75 7.75 0 1 1 0 15.5Z", kAccent|kFill},
+    // 339: TitleThemeDark - 切换主题 in dark: ring + the solid left half
+    {"M12 4.25a7.75 7.75 0 1 1 0 15.5a7.75 7.75 0 1 1 0-15.5Z", 0},
+    {"M12 4.25a7.75 7.75 0 1 0 0 15.5Z", kAccent|kFill},
+    // 341: CapMinimize - caption: one 13-unit line
+    {"M5.5 12h13", 0},
+    // 342: CapMaximize - caption: a 13-unit rounded square
+    {"M7.75 5.5h8.5a2.25 2.25 0 0 1 2.25 2.25v8.5a2.25 2.25 0 0 1-2.25 2.25h-8.5A2.25 2.25 0 0 1 5.5 16.25v-8.5A2.25 2.25 0 0 1 7.75 5.5Z", 0},
+    // 343: CapRestore - caption: the front square and the corner of the one behind
+    {"M7.25 8h7.5A1.75 1.75 0 0 1 16.5 9.75v7.5A1.75 1.75 0 0 1 14.75 19h-7.5A1.75 1.75 0 0 1 5.5 17.25v-7.5A1.75 1.75 0 0 1 7.25 8Z", 0},
+    {"M8.5 8V6.75A1.75 1.75 0 0 1 10.25 5h6.5a1.75 1.75 0 0 1 1.75 1.75v6.5a1.75 1.75 0 0 1-1.75 1.75H16.5", 0},
+    // 345: CapClose - caption: two diagonals as wide as the line above
+    {"M6.5 6.5l11 11M17.5 6.5l-11 11", 0}
 };
 inline constexpr Design kDesigns[] = {
     {Icon::Back, Tone::None, 0, 2, 2, 0},  // 后退
@@ -1361,6 +1397,13 @@ inline constexpr Design kDesigns[] = {
     {Icon::Plug, Tone::Nav, 324, 3, 327, 0},  // AI 与 MCP / 外部工具
     {Icon::WinArrange, Tone::Nav, 327, 3, 330, 0},  // 排列窗口
     {Icon::ExtractSel, Tone::Place, 330, 3, 333, 0},  // 解压所选到…
+    {Icon::TitleSettings, Tone::Nav, 333, 4, 337, 0},  // 设置 (title button)
+    {Icon::TitleTheme, Tone::Nav, 337, 2, 339, 0},  // 切换主题 (light)
+    {Icon::TitleThemeDark, Tone::Nav, 339, 2, 341, 0},  // 切换主题 (dark)
+    {Icon::CapMinimize, Tone::None, 341, 1, 342, 0},  // 最小化
+    {Icon::CapMaximize, Tone::None, 342, 1, 343, 0},  // 最大化
+    {Icon::CapRestore, Tone::None, 343, 2, 345, 0},  // 还原
+    {Icon::CapClose, Tone::None, 345, 1, 346, 0},  // 关闭
 };
 
 inline const Design* DesignFor(Icon icon) noexcept {

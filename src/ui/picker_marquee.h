@@ -9,17 +9,17 @@ namespace pulse::ui {
 struct PickerMarquee {
     bool pending = false, active = false, additive = false, toggle = false;
     D2D1_POINT_2F start{}, cursor{};
-    float origin_scroll = 0;
+    float origin_scroll = 0, origin_scroll_x = 0;
     int caret = -1, anchor = -1;
     std::unordered_set<int> before;
     std::vector<int> hits;
     app::MarqueeSelection delta;
 
     void Begin(const std::unordered_set<int>& selection, int focus, int range_anchor,
-               float x, float y, float scroll, bool ctrl, bool shift) {
+               float x, float y, float scroll, bool ctrl, bool shift, float scroll_x = 0) {
         Reset();
         pending = true; additive = ctrl || shift; toggle = ctrl;
-        start = cursor = {x, y}; origin_scroll = scroll;
+        start = cursor = {x, y}; origin_scroll = scroll; origin_scroll_x = scroll_x;
         before = selection; caret = focus; anchor = range_anchor;
     }
     bool Move(float x, float y, float slop_x, float slop_y) {
@@ -29,12 +29,14 @@ struct PickerMarquee {
         }
         return active;
     }
-    D2D1_RECT_F Rect(float scroll, const D2D1_RECT_F& list) const {
+    // The band in view coordinates: its start point moves with the content.
+    D2D1_RECT_F Rect(float scroll, const D2D1_RECT_F& list, float scroll_x = 0) const {
+        const float start_x = start.x - (scroll_x - origin_scroll_x);
         const float start_y = start.y - (scroll - origin_scroll);
         const float x = std::clamp(cursor.x, list.left, list.right);
         const float y = std::clamp(cursor.y, list.top, list.bottom);
-        const float left = (std::min)(start.x, x), top = (std::min)(start_y, y);
-        return {left, top, (std::max)((std::max)(start.x, x), left + 1),
+        const float left = (std::min)(start_x, x), top = (std::min)(start_y, y);
+        return {left, top, (std::max)((std::max)(start_x, x), left + 1),
             (std::max)((std::max)(start_y, y), top + 1)};
     }
     bool Apply(std::unordered_set<int>& selection, int count) {

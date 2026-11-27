@@ -254,6 +254,31 @@ WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row
     return out;
 }
 
+int ListRowsPerColumn(float viewport_height, float scale) noexcept {
+    const float row = kListRowDip * std::max(0.5f, scale);
+    return std::max(1, static_cast<int>(std::max(1.0f, viewport_height) / row));
+}
+
+ListColumns BuildListColumns(const std::vector<float>& text_px, int rows_per_column, float scale) {
+    ListColumns out;
+    out.rows_per_column = std::max(1, rows_per_column);
+    const float s = std::max(0.5f, scale);
+    const float chrome = kListItemChromeDip * s, lo = kListColumnMinDip * s, hi = kListColumnMaxDip * s;
+    const size_t rows = static_cast<size_t>(out.rows_per_column);
+    const size_t columns = std::max<size_t>(1, (text_px.size() + rows - 1) / rows);
+    out.left.reserve(columns + 1);
+    float x = 0.0f;
+    out.left.push_back(x);
+    for (size_t col = 0; col < columns; ++col) {
+        float widest = 0.0f;
+        const size_t end = std::min(text_px.size(), (col + 1) * rows);
+        for (size_t i = col * rows; i < end; ++i) widest = std::max(widest, text_px[i]);
+        x += std::round(std::clamp(widest + chrome, lo, hi));
+        out.left.push_back(x);
+    }
+    return out;
+}
+
 ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
                        float scroll_x, float scroll_y, float scale,
                        ViewLayoutParams params, const ListGroups* groups)
@@ -327,15 +352,19 @@ ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
     case ViewMode::SmallIcons: grid(144.0f, 28.0f, 16.0f); break;
     case ViewMode::Tiles: grid(280.0f, 72.0f, 48.0f); break;
     case ViewMode::List: {
-        metrics_.cell_width = 220.0f * scale_;
-        metrics_.cell_height = 24.0f * scale_;
+        metrics_.cell_width = kListColumnDefaultDip * scale_;
+        metrics_.cell_height = kListRowDip * scale_;
         metrics_.icon_size = 16.0f * scale_;
         metrics_.column_major = true;
-        metrics_.rows_per_column = std::max(1, static_cast<int>(height / metrics_.cell_height));
+        metrics_.rows_per_column = ListRowsPerColumn(height, scale_);
         const size_t cols = (count_ + static_cast<size_t>(metrics_.rows_per_column) - 1) /
                             static_cast<size_t>(metrics_.rows_per_column);
         metrics_.columns = static_cast<int>(std::max<size_t>(1, cols));
-        content_width_ = static_cast<float>(cols) * metrics_.cell_width;
+        const ListColumns* measured = params.list_columns;
+        if (measured && measured->rows_per_column == metrics_.rows_per_column &&
+            measured->left.size() == static_cast<size_t>(metrics_.columns) + 1)
+            list_left_ = &measured->left;
+        content_width_ = list_left_ ? list_left_->back() : static_cast<float>(cols) * metrics_.cell_width;
         content_height_ = height;
         break;
     }
@@ -509,9 +538,32 @@ D2D1_RECT_F ViewLayout::ItemRect(int index) const noexcept {
         col = index % metrics_.columns;
         row = index / metrics_.columns;
     }
-    const float left = viewport_.left + metrics_.origin_x + col * metrics_.pitch_x - scroll_x_;
+    const float left = viewport_.left + metrics_.origin_x - scroll_x_ +
+        (list_left_ ? ListColumnLeft(col) : col * metrics_.pitch_x);
     const float top = viewport_.top + metrics_.origin_y + row * metrics_.pitch_y - scroll_y_;
-    return D2D1_RECT_F{left, top, left + metrics_.cell_width, top + metrics_.cell_height};
+    const float width = list_left_ ? ListColumnWidth(col) : metrics_.cell_width;
+    return D2D1_RECT_F{left, top, left + width, top + metrics_.cell_height};
+}
+
+int ViewLayout::ListColumnAt(float content_x) const noexcept {
+    if (!list_left_ || list_left_->size() < 2) {
+        const float pitch = metrics_.cell_width > 0.0f ? metrics_.cell_width : 1.0f;
+        return std::clamp(static_cast<int>(std::floor(content_x / pitch)), 0, std::max(0, metrics_.columns - 1));
+    }
+    const auto it = std::upper_bound(list_left_->begin(), list_left_->end(), content_x);
+    const int col = static_cast<int>(it - list_left_->begin()) - 1;
+    return std::clamp(col, 0, static_cast<int>(list_left_->size()) - 2);
+}
+
+float ViewLayout::ListColumnLeft(int column) const noexcept {
+    if (!list_left_ || column < 0 || static_cast<size_t>(column) + 1 >= list_left_->size())
+        return static_cast<float>(column) * metrics_.pitch_x;
+    return (*list_left_)[static_cast<size_t>(column)];
+}
+
+float ViewLayout::ListColumnWidth(int column) const noexcept {
+    if (!list_left_ || column < 0 || static_cast<size_t>(column) + 1 >= list_left_->size()) return metrics_.cell_width;
+    return (*list_left_)[static_cast<size_t>(column) + 1] - (*list_left_)[static_cast<size_t>(column)];
 }
 
 D2D1_RECT_F ViewLayout::IconRect(int index) const noexcept {
@@ -637,7 +689,8 @@ int ViewLayout::HitTest(float x, float y) const noexcept {
     const float grid_x = local_x - metrics_.origin_x;
     const float grid_y = local_y - metrics_.origin_y;
     if (grid_x < 0.0f || grid_y < 0.0f) return -1;
-    const int col = static_cast<int>(grid_x / metrics_.pitch_x);
+    if (list_left_ && grid_x >= list_left_->back()) return -1;
+    const int col = list_left_ ? ListColumnAt(grid_x) : static_cast<int>(grid_x / metrics_.pitch_x);
     const int row = static_cast<int>(grid_y / metrics_.pitch_y);
     if (col >= metrics_.columns || (metrics_.column_major && row >= metrics_.rows_per_column)) return -1;
     const int index = metrics_.column_major
@@ -662,9 +715,9 @@ std::pair<int, int> ViewLayout::VisibleRange() const noexcept {
     int first = 0;
     int last = static_cast<int>(count_) - 1;
     if (metrics_.column_major) {
-        const int first_col = std::max(0, static_cast<int>(scroll_x_ / metrics_.cell_width) - 1);
+        const int first_col = std::max(0, ListColumnAt(scroll_x_) - 1);
         const int last_col = std::min(metrics_.columns - 1,
-            static_cast<int>((scroll_x_ + viewport_.right - viewport_.left) / metrics_.cell_width) + 1);
+            ListColumnAt(scroll_x_ + viewport_.right - viewport_.left) + 1);
         first = first_col * metrics_.rows_per_column;
         last = std::min(last, (last_col + 1) * metrics_.rows_per_column - 1);
     } else {
@@ -700,8 +753,8 @@ std::pair<int, int> ViewLayout::RangeForSpan(float lo, float hi) const noexcept 
     if (metrics_.column_major) {
         if (metrics_.cell_width <= 0.0f || metrics_.rows_per_column <= 0) return {0, last_index};
         const float a = lo - viewport_.left + scroll_x_, b = hi - viewport_.left + scroll_x_;
-        const int first_col = std::max(0, static_cast<int>(std::floor(a / metrics_.cell_width)) - 1);
-        const int last_col = std::max(0, static_cast<int>(std::floor(b / metrics_.cell_width)) + 1);
+        const int first_col = std::max(0, ListColumnAt(a) - 1);
+        const int last_col = std::max(0, ListColumnAt(b) + 1);
         first = first_col * metrics_.rows_per_column;
         last = std::min(last, (last_col + 1) * metrics_.rows_per_column - 1);
     } else {

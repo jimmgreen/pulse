@@ -1,4 +1,4 @@
-// advanced_search_dialog.h — Structured search form (no regex).
+// advanced_search_dialog.h — Structured search form with filename regex matching.
 #pragma once
 #include "../app/search_query.h"
 #include <windows.h>

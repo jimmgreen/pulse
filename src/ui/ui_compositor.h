@@ -46,6 +46,7 @@ struct ComPtr {
 
 class Compositor {
     friend struct QuickPreviewAuditTest;
+    friend struct RenameOverlayTest;
 public:
     Compositor();
     ~Compositor();
@@ -92,7 +93,10 @@ public:
     // buffers (FLIP_SEQUENTIAL) and the last frame reached the screen whole,
     // so the next one may redraw part of it. PULSE_PARTIAL_REDRAW=0 turns it off.
     static bool PartialRedrawEnabled();
-    bool CanPresentPartial() const { return partial_swap_ && !full_next_ && !device_lost_; }
+    bool CanPresentPartial() const {
+        return partial_swap_ && !full_next_ && !device_lost_ && !captureNext_ &&
+            (!FrameCopyEnabled() || frameCopy_.get());
+    }
     void ForceFullFrame() { full_next_ = true; }
     // A lost device, or a swap chain that could not be resized: the next
     // Recover() rebuilds the window's graphics.
@@ -200,7 +204,7 @@ private:
     std::wstring initialization_error_;
     bool InitD3D();
     bool CreateSwapChain();
-    void CopyFrame();
+    void CopyFrame(const RECT* dirty);
     void ResizeSwapChain();
     bool ResizeSwapChainTo(int width, int height);
     static bool IsDeviceLost(HRESULT hr);

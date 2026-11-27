@@ -36,6 +36,7 @@ class MainRenderer {
     friend struct ColumnResizeUiTest;
     friend struct UiModuleAuditTest;
     friend struct QuickPreviewAuditTest;
+    friend struct RenameOverlayTest;
     friend struct ItemGripTest;
 public:
     D2D1_RECT_F SettingsStoreField(int field) const;
@@ -45,6 +46,7 @@ public:
     // The title bar's tab-list button (⧉ N, or the strip's overflow button); empty when not shown.
     D2D1_RECT_F TitleTabListRect(const WindowViewModel& vm, float width) const;
     void SetResourceModule(HINSTANCE module) { resource_module_ = module; }
+    ID2D1Bitmap* PulseLogoBitmap() { return LogoBitmap(); }
     HINSTANCE ResourceModule() const { return resource_module_ ? resource_module_ : GetModuleHandleW(nullptr); }
     std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
     void ResumeVolume(const std::wstring& root);
@@ -389,10 +391,12 @@ public:
         if (!visible) details_preview_bounds_ = {};
     }
     bool DetailsPanelActive() const noexcept { return details_visible_ || details_anim_; }
+    void SetEmbeddedPickerPreviewForced(bool forced) { embedded_picker_preview_forced_ = forced; }
+    void SetEmbeddedPickerPreviewMinDip(float min_dip) { embedded_picker_preview_min_dip_ = min_dip; }
     // Preferred width, capped by the window so the file list keeps a usable width.
     float DetailsPanelWidth(float window_w) const;
     void SetDetailsPanelWidth(float width_dip) {
-        details_width_ = std::clamp(width_dip, kDetailsMinWidthDip, kPanelWidthMaxDip);
+        details_width_ = std::clamp(width_dip, EmbeddedPickerLayout() ? 236.0f : kDetailsMinWidthDip, kPanelWidthMaxDip);
     }
     // Splitter drag limits in DIPs for the current window size.
     float SidebarMaxWidthDip(float window_w) const;
@@ -471,6 +475,16 @@ public:
     // the caret should toggle, 0 when no drawn caret is showing.
     UINT CaretBlinkDueMs() const { return caret_due_ms_; }
     uint64_t ThumbnailRetryDeadline() { return thumbnail_cache_.WindowRetryDeadline(notify_hwnd_); }
+    // Input owns the final geometry; do not let a visual transition delay it.
+    bool FinishContentMotion() {
+        bool active = false;
+        for (auto& morph : view_morph_) active = morph.Finish() || active;
+        return active;
+    }
+    UINT TaskPillWakeDueMs(ULONGLONG now) const {
+        if (!task_pill_done_at_ || now - task_pill_done_at_ >= task_pill_hold_ms_) return 0;
+        return static_cast<UINT>(task_pill_hold_ms_ - (now - task_pill_done_at_));
+    }
     bool TickMotion(ULONGLONG now) {
         // Glides run on the NowMs clock; `now` (GetTickCount64) serves the
         // task pill and copy feedback below.
@@ -483,10 +497,9 @@ public:
         for (const auto& m : list_shift_) active = active || m.Active(motion_now);
         for (const auto& m : view_morph_) active = active || m.Active(motion_now);
         for (const auto& m : link_pill_motion_) active = active || m.Active(motion_now);
-        // Operation pill: the completion check fade and pop.
-        active = active ||
-                 (task_pill_done_at_ != 0 && now - task_pill_done_at_ < task_pill_hold_ms_ + 400) ||
-                 (task_pill_pop_at_ != 0 && now - task_pill_pop_at_ < kTaskPillPopMs + 40);
+        // The completed summary stays readable for 12 seconds, but that is
+        // a deadline, not 12 seconds of animation. Only the pop needs frames.
+        active = active || (task_pill_pop_at_ != 0 && now - task_pill_pop_at_ < kTaskPillPopMs + 40);
         bool ticked = false;
         if (copy_feedback_.Tick(now)) ticked = true;
         if (group_wheel_.Tick(motion_now)) ticked = true;
@@ -674,6 +687,8 @@ public:
     bool ListSmartDate() const { return list_smart_date_; }
     // 滚动时固定上级 (Settings > 列表): details tree folders pinned over the list.
     void SetTreeSticky(bool on) { tree_sticky_ = on; }
+    // 滚动到最后一项之后 (Settings > 列表): lists that overflow scroll on past their end.
+    void SetScrollPastEnd(bool on) { scroll_past_end_ = on; }
     // 修改时间提示 (mtime_hint.h).
     // 鼠标与选择: single click opens (names show a band), item check boxes.
     void SetItemClick(bool single_click, int name_band, bool check_boxes) {
@@ -920,6 +935,9 @@ public:
     bool PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                                D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
     float MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
+    // The room past the last item the list may scroll into (滚动到最后一项之后);
+    // 0 when it is off, the list fits, or it flows sideways (List view).
+    float ScrollPastEndForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
     float MaxScrollXForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
     D2D1_RECT_F ItemRectInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                                int view_index) const;
@@ -1294,6 +1312,8 @@ private:
     HWND notify_hwnd_ = nullptr;
     bool embedded_ = false;
     bool embedded_picker_layout_ = false;
+    bool embedded_picker_preview_forced_ = false;
+    float embedded_picker_preview_min_dip_ = -1.0f;
     float embedded_picker_strip_dip_ = 36.0f;
     float embedded_picker_recent_dip_ = 0.0f;
     bool favorites_bar_ = false;
@@ -1367,6 +1387,7 @@ private:
     bool list_tag_names_ = false;
     bool list_selection_outline_ = false;
     bool tree_sticky_ = true;
+    bool scroll_past_end_ = true;
     bool thumbnail_badges_ = true;
     unsigned row_actions_ = 7u;
     uint32_t details_columns_ = kDetailsColumnsDefault;

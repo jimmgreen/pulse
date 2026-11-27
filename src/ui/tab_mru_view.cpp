@@ -18,9 +18,9 @@ constexpr float kFootGap = 8.0f, kFootH = 20.0f, kFootBottom = 2.0f;
 constexpr float kPanelRadius = 14.0f, kRowRadius = 9.0f;
 
 constexpr motion::SpringSpec kRingSpring{700.0f, 40.0f};
-constexpr float kFadeInMs = 140.0f;
+constexpr float kFadeInMs = 100.0f;
 constexpr float kCloseMs = 110.0f;
-constexpr float kPanelFrom = 0.96f;
+constexpr float kPanelFrom = 0.985f;
 constexpr UINT_PTR kTabMruFrameTimer = 0x544D5255;  // 'TMRU'
 
 void CALLBACK TabMruFrameTick(HWND hwnd, UINT, UINT_PTR id, DWORD) {
@@ -170,8 +170,8 @@ void TabMruView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
         moving = true;
     } else if (animations_) {
         const float t = static_cast<float>(now - open_at_);
-        fade = std::min(1.0f, t / kFadeInMs);
-        panel_scale = kPanelFrom + (1.0f - kPanelFrom) * motion::EaseOutCubic(fade);
+        const float progress = std::min(1.0f, t / kFadeInMs);
+        panel_scale = kPanelFrom + (1.0f - kPanelFrom) * motion::EaseOutCubic(progress);
         if (t < kFadeInMs) moving = true;
     }
     struct FrameRequest {
@@ -227,6 +227,9 @@ void TabMruView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
     if (open_ && hover_ >= 0 && hover_ < count && hover_ != data_.selected)
         fill(row_rects_[static_cast<size_t>(hover_)], rr, theme.fill_hover);
     const int sel = std::clamp(data_.selected, 0, count - 1);
+    const bool high_contrast = IsHighContrast();
+    // High-contrast foreground and background must select the same row in the same frame.
+    ring_.SetAnimationsEnabled(animations_ && !high_contrast);
     {
         const D2D1_RECT_F r = ring_.Update(context_, sel, row_rects_[static_cast<size_t>(sel)], frame_, now, kRingSpring);
         if (ring_.Active(now)) moving = true;
@@ -235,28 +238,33 @@ void TabMruView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
         stroke(D2D1::RectF(r.left + h, r.top + h, r.right - h, r.bottom - h), rr - h, theme.accent, 1.5f * s);
     }
 
+    const auto highlight_ink = high_contrast ? ColorFromRef(GetSysColor(COLOR_HIGHLIGHTTEXT)) : theme.text;
     for (int i = 0; i < count; ++i) {
         const D2D1_RECT_F r = row_rects_[static_cast<size_t>(i)];
+        const bool highlighted = high_contrast && (i == sel || (open_ && i == hover_));
+        const auto primary_ink = highlighted ? highlight_ink : theme.text;
+        const auto secondary_ink = highlighted ? highlight_ink : theme.text_secondary;
+        const auto folder_ink = highlighted ? highlight_ink : theme.icon_folder;
         const TabMruRow& row = data_.rows[static_cast<size_t>(i)];
         float x = r.left + 12.0f * s;
         const float cy = (r.top + r.bottom) * 0.5f;
         // Folder: back tab + body, in the folder colour.
         const float fw = 22.0f * s, fh = 19.0f * s, fy = cy - fh * 0.5f;
-        fill(D2D1::RectF(x, fy, x + fw * 0.45f, fy + fh * 0.4f), 2.0f * s, Solid(Fade(theme.icon_folder, 0.75f), theme.bg));
-        fill(D2D1::RectF(x, fy + fh * 0.18f, x + fw, fy + fh), 2.5f * s, theme.icon_folder);
+        fill(D2D1::RectF(x, fy, x + fw * 0.45f, fy + fh * 0.4f), 2.0f * s, highlighted ? folder_ink : Solid(Fade(folder_ink, 0.75f), theme.bg));
+        fill(D2D1::RectF(x, fy + fh * 0.18f, x + fw, fy + fh), 2.5f * s, folder_ink);
         x += fw + 12.0f * s;
         float right = r.right - 12.0f * s;
         if (i == 0 && !data_.current.empty()) {
             const float cur_w = MeasureTextWidth(dwrite, f_hint_, data_.current);
-            text(f_hint_, data_.current, D2D1::RectF(right - cur_w - 1.0f, r.top, right + 1.0f, r.bottom), theme.text_secondary);
+            text(f_hint_, data_.current, D2D1::RectF(right - cur_w - 1.0f, r.top, right + 1.0f, r.bottom), secondary_ink);
             right -= cur_w + 12.0f * s;
         }
         const float name_w = std::min(MeasureTextWidth(dwrite, f_name_, row.name) + 1.0f, std::max(0.0f, right - x));
-        text(f_name_, row.name, D2D1::RectF(x, r.top, x + name_w, r.bottom), theme.text);
+        text(f_name_, row.name, D2D1::RectF(x, r.top, x + name_w, r.bottom), primary_ink);
         x += name_w + 12.0f * s;
         if (!row.parent.empty() && right - x > 24.0f * s)
             text(f_small_, FitPathTail(dwrite, f_small_, row.parent, right - x), D2D1::RectF(x, r.top, right, r.bottom),
-                 theme.text_secondary);
+                 secondary_ink);
     }
 
     // Footer hints, centred, keys as small caps.

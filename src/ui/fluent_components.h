@@ -261,6 +261,7 @@ struct SidebarItemSpec {
     bool suppress_text = false;
     bool ellipsize = false;
     bool skip_glyph = false;
+    bool accent_text = false;
     float trailing_reserve = 0.0f;
     bool alias_mark = false;   // the label is a 别名: the mark follows it
     // Count roll (motion v2 "dropbin"): below 1 the count / detail text is
@@ -363,6 +364,8 @@ struct SidebarSectionHeaderSpec {
     // The caller already painted the embedded vector icon for `glyph`; the text
     // still leaves room for it.
     bool skip_glyph = false;
+    // A trailing header button (e.g. '+' or pin) sits left of the chevron.
+    bool has_trailing_action = false;
     ControlState state{};
     bool expanded = true;
 };

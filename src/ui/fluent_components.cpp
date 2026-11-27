@@ -1652,6 +1652,8 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         }
         FillRoundedRect(item, Px(5.0f), interaction);
     }
+    const bool hc_highlight = high_contrast_ && spec.state.enabled &&
+        (spec.current || spec.state.hovered || spec.state.selected || spec.state.pressed);
     D2D1_COLOR_F foreground = spec.state.enabled ? theme_->text
                                                   : dark_ ? RgbaF(0xFFFFFF, 0.40f)
                                                           : Rgba(0x000000, 112);
@@ -1659,6 +1661,9 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         foreground = MultiplyAlpha(foreground, 0.70f);
     }
     if (spec.secondary && spec.state.enabled) foreground = theme_->text_secondary;
+    if (high_contrast_ && !spec.state.enabled) foreground = theme_->text_disabled;
+    if (hc_highlight) foreground = ColorFromRef(GetSysColor(COLOR_HIGHLIGHTTEXT));
+    const auto secondary_foreground = hc_highlight ? foreground : theme_->text_secondary;
     // Menu padding is horizontal. Applying it vertically as well leaves only
     // 8-12 px for a 13 px body font at common DPI scales and clips CJK glyphs.
     auto content = item;
@@ -1688,7 +1693,7 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
                                          content.left + icon_width, content.bottom);
     auto draw_glyph = [&]() {
         const D2D1_COLOR_F glyph_color =
-            spec.accent_glyph && spec.state.enabled ? theme_->accent : foreground;
+            spec.accent_glyph && spec.state.enabled && !hc_highlight ? theme_->accent : foreground;
         const float glyph_scale = std::clamp(spec.glyph_scale, 0.6f, 1.2f);
         IDWriteTextFormat* iconFormat = MenuIconFormat();
         if (std::abs(glyph_scale - 1.0f) < 0.001f || spec.glyph.empty()) {
@@ -1723,10 +1728,10 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
                         D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
     } else if (spec.custom_icon != 0) {
         DrawExtensionIcon(dc_, spec.custom_icon, icon_bounds,
-                          spec.accent_glyph && spec.state.enabled ? theme_->accent : foreground,
+                          spec.accent_glyph && spec.state.enabled && !hc_highlight ? theme_->accent : foreground,
                           theme_, Px(1.35f));
     } else if (spec.vector_icon != StoreIcon::None) {
-        DrawStoreIcon(dc_, ScratchBrush(spec.accent_glyph && spec.state.enabled ? theme_->accent : foreground),
+        DrawStoreIcon(dc_, ScratchBrush(spec.accent_glyph && spec.state.enabled && !hc_highlight ? theme_->accent : foreground),
                       icon_bounds, spec.vector_icon, Px(1.35f));
     } else if (spec.has_swatch) {
         const auto center = D2D1::Point2F((icon_bounds.left + icon_bounds.right) * 0.5f,
@@ -1803,7 +1808,7 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
             cap->SetTrimming(&trim, ellipsis_sign_.get());
         }
         DrawText(spec.shortcut, shortcut_bounds,
-                 cap, theme_->text_secondary,
+                 cap, secondary_foreground,
                  spec.shortcut_inline ? HorizontalAlignment::Left : HorizontalAlignment::Right);
         if (cap) {
             cap->SetTrimming(&old_trim, old_sign.get());
@@ -1893,7 +1898,7 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         line.top = label.bottom;
         line.bottom = label.bottom + Px(spec.group_tint ? 16.0f : 18.0f);
         if (spec.detail_inline) line = inline_detail;
-        DrawText(spec.detail, line, cap, spec.state.enabled ? theme_->text_secondary : foreground);
+        DrawText(spec.detail, line, cap, spec.state.enabled ? secondary_foreground : foreground);
         if (cap) {
             cap->SetTrimming(&cap_trim, cap_sign.get());
             cap->SetWordWrapping(cap_wrap);
@@ -1963,7 +1968,8 @@ void Painter::DrawSidebarItem(const SidebarItemSpec& spec) {
     if (spec.drop_target) {
         StrokeRounded(spec.bounds, radius, BrushId::Accent, std::max(2.0f, Px(2.0f)));
     }
-    const D2D1_COLOR_F foreground = spec.state.enabled ? theme_->text : theme_->text_disabled;
+    const D2D1_COLOR_F foreground = !spec.state.enabled ? theme_->text_disabled
+        : (spec.accent_text && !high_contrast_ ? theme_->accent : theme_->text);
     const float icon_slot = Px(16.0f);
     auto content = spec.bounds;
     content.left += Px(10.0f);
@@ -2718,8 +2724,10 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
     }
 
     const auto accent = spec.shared_track && dark_ && !high_contrast_ ? MixColor(theme_->accent, HexColor(0xFFFFFF), 0.3f) : theme_->accent;
-    const D2D1_COLOR_F foreground = spec.state.enabled ? ((spec.state.selected || spec.state.checked) ? accent : theme_->text_secondary)
-                                                        : theme_->text_disabled;
+    const bool highlighted = spec.state.selected || spec.state.checked || spec.state.hovered || spec.state.pressed;
+    const D2D1_COLOR_F foreground = !spec.state.enabled ? theme_->text_disabled
+        : high_contrast_ && highlighted ? ColorFromRef(GetSysColor(COLOR_HIGHLIGHTTEXT))
+        : (spec.state.selected || spec.state.checked) ? accent : theme_->text_secondary;
     auto content = Inset(spec.bounds, Px(spec.shared_track ? 3.0f : 6.0f));
     if (!spec.glyph.empty()) {
         const float icon_width = spec.text.empty() ? Width(content) : Px(18.0f);
@@ -3040,9 +3048,26 @@ void Painter::DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec) {
                                      : spec.bounds.left + Px(10.0f);
     // Disclosure chevron sits at the trailing edge and mirrors collapsed state.
     const float chevron_slot = Px(14.0f);
-    DrawText(spec.text,
-             D2D1::RectF(text_left, spec.bounds.top,
-                        spec.bounds.right - chevron_slot - Px(8.0f), spec.bounds.bottom),
+    const float text_right = spec.bounds.right - (spec.has_trailing_action ? Px(54.0f) : chevron_slot + Px(8.0f));
+    const float max_w = std::max(0.0f, text_right - text_left);
+    std::wstring fitted;
+    std::wstring_view draw_label = spec.text;
+    if (max_w > 0.0f && compositor_ && SectionFormat() &&
+        typography::MeasureLine(compositor_, SectionFormat(), spec.text) > max_w) {
+        size_t lo = 0, hi = spec.text.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi + 1) / 2;
+            std::wstring cand(spec.text.substr(0, mid));
+            cand.push_back(L'\x2026');
+            if (typography::MeasureLine(compositor_, SectionFormat(), cand) <= max_w) lo = mid;
+            else hi = mid - 1;
+        }
+        fitted.assign(spec.text.substr(0, lo));
+        fitted.push_back(L'\x2026');
+        draw_label = fitted;
+    }
+    DrawText(draw_label,
+             D2D1::RectF(text_left, spec.bounds.top, text_right, spec.bounds.bottom),
              SectionFormat(), foreground);
     DrawGlyphWithFormat(spec.expanded ? kChevronDown : kChevronRight,
                         D2D1::RectF(spec.bounds.right - chevron_slot - Px(8.0f), spec.bounds.top,

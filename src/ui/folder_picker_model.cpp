@@ -50,10 +50,14 @@ bool IsPickerImageName(std::wstring_view name) {
 }
 
 bool PickerMatchesFilter(std::wstring_view name, PickerMode mode, const PickerOptions& options) {
+    return PickerMatchesFilterAt(name, mode, options, options.filter_index);
+}
+
+bool PickerMatchesFilterAt(std::wstring_view name, PickerMode mode, const PickerOptions& options, size_t filter_index) {
     if (mode == PickerMode::Folder) return false;
     if (mode == PickerMode::Image && !IsPickerImageName(name)) return false;
     if (options.filters.empty()) return true;
-    const auto& patterns = options.filters[std::min(options.filter_index, options.filters.size() - 1)].pattern;
+    const auto& patterns = options.filters[std::min(filter_index, options.filters.size() - 1)].pattern;
     auto match = [&](std::wstring_view text, std::wstring_view pattern) {
         if (pattern == L"*.*") return true;
         if (mode == PickerMode::File && options.advisory_file_filters && pattern.find(L'?') != pattern.npos) {
@@ -127,9 +131,15 @@ bool ParsePickerNames(std::wstring_view text, std::vector<std::wstring>& names) 
     return true;
 }
 
+bool PickerAllowsAttributes(DWORD attributes, const PickerOptions& options) {
+    // Match Tab::AllowsAttributes: SYSTEM alone is not a protected file.
+    if (!(attributes & FILE_ATTRIBUTE_HIDDEN)) return true;
+    return options.show_hidden && (!(attributes & FILE_ATTRIBUTE_SYSTEM) || options.show_protected_os_files);
+}
+
 bool PickerShowsEntry(DWORD attributes, std::wstring_view name, PickerMode mode, const PickerOptions& options) {
     if (name.empty() || name == L"." || name == L"..") return false;
-    if (!options.show_hidden && (attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) return false;
+    if (!PickerAllowsAttributes(attributes, options)) return false;
     if (!options.search.empty()) {
         std::wstring folded(name), needle(options.search);
         for (auto& c : folded) c = static_cast<wchar_t>(std::towlower(c));
@@ -137,7 +147,9 @@ bool PickerShowsEntry(DWORD attributes, std::wstring_view name, PickerMode mode,
         if (folded.find(needle) == std::wstring::npos) return false;
     }
     const bool shortcut = name.size() >= 4 && CompareStringOrdinal(name.data() + name.size() - 4, 4, L".lnk", 4, TRUE) == CSTR_EQUAL;
-    return (attributes & FILE_ATTRIBUTE_DIRECTORY) || (shortcut && !options.no_dereference_links) || PickerMatchesFilter(name, mode, options);
+    // Save lists other formats as context unless the user chose "同格式"; acceptance still uses PickerMatchesFilter.
+    return (mode == PickerMode::Save && !options.save_same_format_only) || (attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (shortcut && !options.no_dereference_links) || PickerMatchesFilter(name, mode, options);
 }
 
 void SortPickerEntries(std::vector<PickerEntry>& entries, const PickerOptions& options) {
@@ -225,15 +237,25 @@ bool IsPickerDiskPath(std::wstring_view path) {
 }
 
 bool SamePickerPath(std::wstring_view a, std::wstring_view b) {
-    auto trimmed = [](std::wstring_view s) {
-        while (s.size() > 3 && IsSeparator(s.back())) s.remove_suffix(1);
-        return s;
+    auto canonical = [](std::wstring_view s) {
+        bool unc = false;
+        if (s.starts_with(L"\\\\?\\UNC\\") || s.starts_with(L"\\\\?\\unc\\")) {
+            s.remove_prefix(8);
+            unc = true;
+        } else if (s.starts_with(L"\\\\?\\")) {
+            s.remove_prefix(4);
+        } else if (s.starts_with(L"\\\\")) {
+            s.remove_prefix(2);
+            unc = true;
+        }
+        while (s.size() > (unc ? 1u : 3u) && IsSeparator(s.back())) s.remove_suffix(1);
+        return std::pair{unc, s};
     };
-    a = trimmed(a);
-    b = trimmed(b);
-    if (a.size() != b.size()) return false;
-    return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(),
-                                static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+    const auto [unc_a, ca] = canonical(a);
+    const auto [unc_b, cb] = canonical(b);
+    if (unc_a != unc_b || ca.size() != cb.size()) return false;
+    return CompareStringOrdinal(ca.data(), static_cast<int>(ca.size()), cb.data(),
+                                static_cast<int>(cb.size()), TRUE) == CSTR_EQUAL;
 }
 
 std::wstring PickerChosenPath(PickerMode mode, std::wstring_view current,

@@ -3,6 +3,7 @@
 #include "store_icons.h"
 #include "../app/extensions/icon_registry.h"
 #include "../common/localization.h"
+#include "typography.h"
 #include <wincodec.h>
 #include <commctrl.h>
 #include <wrl/client.h>
@@ -10,7 +11,10 @@
 #include <charconv>
 #include <cmath>
 #include <cwctype>
+#include <map>
+#include <mutex>
 #include <string>
+#include <tuple>
 #include <string_view>
 #include <vector>
 
@@ -33,6 +37,29 @@ fluent::BadgeKind BadgeKind(const std::string& value) {
     if (value == "danger") return fluent::BadgeKind::Danger;
     if (value == "keycap") return fluent::BadgeKind::Keycap;
     return fluent::BadgeKind::Neutral;
+}
+
+// A canvas `text size=` format: the UI text family at an exact pixel size, so labels scale with the
+// canvas and still go through Painter::DrawText (LumaText). Formats are kept for the process: text
+// caches key on the format's address, which must never be reused by a later format.
+IDWriteTextFormat* CanvasScaledFormat(Compositor& compositor, float px, DWRITE_FONT_WEIGHT weight) {
+    IDWriteFactory2* factory = compositor.DwriteFactory();
+    if (!factory || !(px > 0.0f)) return nullptr;
+    const int quarter = std::clamp(static_cast<int>(std::lround(px * 4.0f)), 16, 512);  // 4..128 px
+    using Key = std::tuple<IDWriteFactory2*, int, int>;
+    static std::mutex lock;
+    static auto* cache = new std::map<Key, IDWriteTextFormat*>();  // intentionally never released
+    const Key key{factory, quarter, static_cast<int>(weight)};
+    std::lock_guard guard(lock);
+    if (const auto it = cache->find(key); it != cache->end()) return it->second;
+    if (cache->size() >= 128) return nullptr;  // the caller falls back to a role format
+    IDWriteTextFormat* format = nullptr;
+    if (FAILED(typography::CreateTextFormat(factory, {typography::FontRole::Text, quarter / 4.0f, weight}, &format)) || !format)
+        return nullptr;
+    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    cache->emplace(key, format);
+    return format;
 }
 
 bool ParseCanvasFloat(std::string_view token, float& out) noexcept {
@@ -420,9 +447,19 @@ void DrawExtensionCanvas(const extensions::UiNode& node, const ExtensionControlV
             text_c.a *= eff_alpha;
             ResolveCanvasColor(col_tok, theme, visual.dark, eff_alpha, text_c);
             const auto role = get_kw("role");
-            auto* fmt = role == "caption" ? compositor.SmallFormat()
-                      : role == "section" ? compositor.HeaderFormat()
-                      : compositor.TextFormat();
+            IDWriteTextFormat* fmt = nullptr;
+            // size= (viewBox units) scales the text with the canvas, e.g. a format name on an icon.
+            if (float size = 0; ParseCanvasFloat(get_kw("size"), size) && size > 0.0f) {
+                const auto weight_kw = get_kw("weight");
+                const DWRITE_FONT_WEIGHT weight = weight_kw == "bold" ? DWRITE_FONT_WEIGHT_BOLD
+                                                : weight_kw == "semibold" ? DWRITE_FONT_WEIGHT_SEMI_BOLD
+                                                : DWRITE_FONT_WEIGHT_NORMAL;
+                fmt = CanvasScaledFormat(compositor, size * sy, weight);
+            }
+            if (!fmt)
+                fmt = role == "caption" ? compositor.SmallFormat()
+                    : role == "section" ? compositor.HeaderFormat()
+                    : compositor.TextFormat();
             const auto align_kw = get_kw("align");
             const auto align = align_kw == "center" ? fluent::HorizontalAlignment::Center
                              : align_kw == "right" ? fluent::HorizontalAlignment::Right
@@ -430,7 +467,7 @@ void DrawExtensionCanvas(const extensions::UiNode& node, const ExtensionControlV
             const float px_x = ox + tx * sx;
             const float px_y = oy + ty * sy;
             const float px_w = (std::max)(8.0f, max_w * sx);
-            const float px_h = (std::max)(14.0f * scale, max_h * sy);
+            const float px_h = get_kw("size").empty() ? (std::max)(14.0f * scale, max_h * sy) : (std::max)(4.0f, max_h * sy);
             painter.DrawText(label, D2D1::RectF(px_x, px_y, px_x + px_w, px_y + px_h), fmt, text_c, align);
             return;
         }
@@ -663,7 +700,8 @@ float WalkHostMenuPreview(const extensions::UiNode& node, D2D1_RECT_F card, floa
     };
     const bool context = node.menu_kind == "context";
     if (context) {
-        // The host right-click menu around the plugin's rows: quick actions, Open, Quick preview, Open with.
+        // The host right-click menu around the plugin's rows, kept short so the plugin's rows stay in
+        // view (as the store showcase): the quick-action strip and Open above, Properties below.
         if (draw) {
             const StoreIcon actions[] = {StoreIcon::Cut, StoreIcon::Copy, StoreIcon::Rename, StoreIcon::Trash};
             const float width = (card.right - card.left - 16.0f * s) / 4.0f;
@@ -681,8 +719,6 @@ float WalkHostMenuPreview(const extensions::UiNode& node, D2D1_RECT_F card, floa
                                           draw->theme.stroke_divider);
         }
         host_row(StoreIcon::Open, l10n::Get(l10n::StringId::Open), L"Enter", false);
-        host_row(StoreIcon::Eye, l10n::Get(l10n::StringId::QuickPreview), L"Space", false);
-        host_row(StoreIcon::OpenWith, l10n::Get(l10n::StringId::ContextOpenWith), {}, true);
         if (!node.menu.empty()) separator(card.left);
     }
     for (size_t i = 0; i < node.menu.size();) {
@@ -740,9 +776,6 @@ float WalkHostMenuPreview(const extensions::UiNode& node, D2D1_RECT_F card, floa
     }
     if (context) {
         if (!node.menu.empty()) separator(card.left);
-        host_row(StoreIcon::Path, l10n::Get(l10n::StringId::CopyPath), L"Ctrl+Shift+C", false);
-        host_row(StoreIcon::Star, l10n::Get(l10n::StringId::PinQuickAccess), {}, false);
-        separator(card.left);
         host_row(StoreIcon::Properties, l10n::Get(l10n::StringId::Properties), L"Alt+Enter", false);
     }
     y += 6.0f * s;
@@ -782,6 +815,65 @@ const extensions::UiNode* OptionCardArt(const extensions::UiNode& node) {
 
 float OptionTileArtHeight(const extensions::UiNode& art, float scale) {
     return static_cast<float>((std::max)(64, art.min_height)) * scale;
+}
+
+// A canvas of at most 48 DIP is an icon, not an illustration: a compact row tile with the icon on
+// the left (a square of that size), title and detail beside it, the check mark on the right.
+constexpr int kOptionInlineArtMax = 48;
+bool OptionCardInlineArt(const extensions::UiNode& art) {
+    return art.min_height > 0 && art.min_height <= kOptionInlineArtMax;
+}
+float OptionInlineTileHeight(const extensions::UiNode& node, const extensions::UiNode& art, float width, float scale,
+                             const fluent::Painter& painter) {
+    const float side = static_cast<float>(art.min_height) * scale;
+    const float lead = 12.0f * scale + side + 12.0f * scale, trail = (node.state.empty() ? 12.0f : 42.0f) * scale;
+    const float text_w = (std::max)(40.0f * scale, (width > 0.0f ? width : 220.0f * scale) - lead - trail);
+    const auto detail_w = WideExtra(node.detail);
+    const float text_h = 21.0f * scale + (detail_w.empty() ? 0.0f : 2.0f * scale + painter.MeasureWrappedCaptionHeight(detail_w, text_w));
+    return (std::max)(side, text_h) + 24.0f * scale;
+}
+void DrawExtensionOptionInlineTile(const extensions::UiNode& node, const extensions::UiNode& art,
+                                   const ExtensionControlVisual& visual, bool picked, Compositor& compositor,
+                                   fluent::Painter& painter, const Theme& theme) {
+    const auto bounds = visual.bounds;
+    const float scale = (std::max)(0.25f, visual.scale);
+    const float side = static_cast<float>(art.min_height) * scale;
+    const float pad = 12.0f * scale;
+    const float mid = (bounds.top + bounds.bottom) * 0.5f;
+    ExtensionControlVisual art_visual;
+    art_visual.host = visual.host;
+    art_visual.bounds = {bounds.left + pad, mid - side * 0.5f, bounds.left + pad + side, mid + side * 0.5f};
+    art_visual.state.enabled = visual.state.enabled;
+    art_visual.scale = visual.scale;
+    art_visual.dark = visual.dark;
+    DrawExtensionCanvas(art, art_visual, compositor, painter, theme);
+    float right = bounds.right - pad;
+    if (!node.state.empty() || node.selected) {
+        fluent::ControlState ind_state = visual.state;
+        ind_state.checked = picked;
+        const D2D1_RECT_F ind_rc{right - 20.0f * scale, mid - 10.0f * scale, right, mid + 10.0f * scale};
+        if (node.option_kind == "toggle") painter.DrawCheckBox(ind_rc, L"", ind_state);
+        else painter.DrawRadioButton(ind_rc, L"", ind_state, 18.0f);
+        right -= 30.0f * scale;
+    }
+    const float left = art_visual.bounds.right + pad;
+    if (right <= left) return;
+    const auto title_w = WideExtra(node.text);
+    const auto detail_w = WideExtra(node.detail);
+    const float detail_h = detail_w.empty() ? 0.0f : 2.0f * scale + painter.MeasureWrappedCaptionHeight(detail_w, right - left);
+    const float top = mid - (21.0f * scale + detail_h) * 0.5f;
+    const D2D1_COLOR_F ink = visual.state.enabled ? theme.text : theme.text_disabled;
+    const D2D1_COLOR_F sub_ink = visual.state.enabled ? theme.text_secondary : theme.text_disabled;
+    if (!title_w.empty()) {
+        painter.DrawText(title_w, D2D1::RectF(left, top, right, top + 21.0f * scale),
+                         painter.RampFormat(fluent::Painter::TextRamp::BodyStrong), ink);
+    }
+    if (!detail_w.empty()) {
+        painter.DrawWrappedCaption(detail_w, D2D1::Point2F(left, top + 23.0f * scale), (std::max)(1.0f, right - left), sub_ink);
+    }
+    if (visual.state.keyboard_focus) {
+        painter.DrawFocusRing(bounds, 8.0f * scale);
+    }
 }
 
 // Tile body (the card surface is already painted): illustration well, selection mark in the top-right
@@ -872,7 +964,8 @@ void DrawExtensionOptionCard(const extensions::UiNode& node, const ExtensionCont
         if (node.bordered) painter.StrokeRoundedRect(bounds, radius, theme.stroke_card);
     }
     if (const auto* art = OptionCardArt(node)) {
-        DrawExtensionOptionTile(node, *art, visual, picked, compositor, painter, theme);
+        if (OptionCardInlineArt(*art)) DrawExtensionOptionInlineTile(node, *art, visual, picked, compositor, painter, theme);
+        else DrawExtensionOptionTile(node, *art, visual, picked, compositor, painter, theme);
         return;
     }
 
@@ -1207,8 +1300,13 @@ float MeasureExtensionExtraControl(const extensions::UiNode& node, float width, 
     case UiNodeType::StatusBar: height = 32 * scale; break;
     case UiNodeType::Tooltip: height = 32 * scale; break;
     case UiNodeType::TitleBarButton: height = 32 * scale; break;
-    case UiNodeType::Canvas: height = 160 * scale; break;
+    // 160 DIP unless the extension caps it (a swatch or an icon-sized drawing).
+    case UiNodeType::Canvas: height = static_cast<float>(node.max_height > 0 ? (std::min)(160, node.max_height) : 160) * scale; break;
     case UiNodeType::OptionCard: {
+        if (const auto* art = OptionCardArt(node); art && OptionCardInlineArt(*art)) {
+            height = OptionInlineTileHeight(node, *art, width, scale, painter);
+            break;
+        }
         if (const auto* art = OptionCardArt(node)) {
             const float text_w = (std::max)(80.0f * scale, (width > 0.0f ? width : 220.0f * scale) - 20.0f * scale);
             const auto detail_w = WideExtra(node.detail);

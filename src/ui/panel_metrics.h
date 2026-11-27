@@ -33,6 +33,11 @@ inline constexpr bool SidebarRailLayout(float sidebar_width_px, float scale) {
     return sidebar_width_px <= kSidebarRailLayoutDip * scale;
 }
 inline constexpr float kDetailsVisibleWindowDip = 1000.0f;
+inline constexpr float DetailsVisibleWindowDip(bool picker, bool forced_picker = false, float custom_picker_min_dip = -1.0f) {
+    if (!picker) return kDetailsVisibleWindowDip;
+    if (forced_picker) return 0.0f;
+    return custom_picker_min_dip >= 0.0f ? custom_picker_min_dip : 760.0f;
+}
 
 // Widest the sidebar may become: window minus the open details panel, minus the
 // window chrome (margins) and the file-list minimum.

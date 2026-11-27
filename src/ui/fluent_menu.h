@@ -194,6 +194,7 @@ public:
     // (drawing happens on the UI thread between its own BeginDraw/EndDraw).
     bool Create(HWND owner, Compositor* compositor, float scale);
     void SetTheme(bool dark, D2D1_COLOR_F accent);
+    void SetGlassSurface(bool enabled) { glass_surface_ = enabled; }
     void SetNativeAcrylic(bool enabled, NativeMenuSurface::BackdropFactory factory = {}) {
         native_acrylic_requested_ = enabled;
         native_backdrop_factory_ = std::move(factory);
@@ -201,7 +202,16 @@ public:
     using MaterialPainter = std::function<bool(ID2D1DeviceContext*, const D2D1_RECT_F&,
         POINT, float, bool)>;
     // Draws only the supplied wallpaper material, in physical pixels at 96 DPI.
-    void SetMaterialPainter(MaterialPainter painter) { material_painter_ = std::move(painter); }
+    void SetMaterialPainter(MaterialPainter painter) {
+        material_painter_ = std::move(painter);
+        ResetMaterialRefresh();
+    }
+    // A GPU-backed material can become ready after the first paint. Retry without
+    // blocking input, and stop after a bounded number of attempts on device failure.
+    void RequestMaterialRefresh();
+    // Corner radius in DIPs (0: the theme's flyout radius) and the hover highlight's radius and side inset.
+    void SetCornerRadiusDip(float dip) { corner_radius_dip_ = dip; }
+    void SetHoverPlate(float radius_dip, float inset_dip) { plate_radius_dip_ = radius_dip; plate_inset_dip_ = inset_dip; }
     // Row height of this menu and its submenus, in DIPs (follows list density, #27).
     void SetRowHeightDip(float dip);
 
@@ -331,10 +341,11 @@ private:
     bool IsPaletteHwnd(HWND hwnd) const;
     bool RenderSurface(const FluentMenuModel& model, int hover_row, int hover_swatch,
                        float header_px, bool draw_filter_field, Surface& s);
-    // Device bitmap for a row's app icon, created on first use and kept for
-    // the popup's lifetime (reset by TrackPopup along with the plates).
+    // Device bitmap for a row's app icon, created on first use and kept in
+    // a bounded cache across popups, invalidated with its device/theme/DPI.
     ID2D1Bitmap* IconBitmapFor(const common::MenuIconRef& pixels, ID2D1DeviceContext* dc);
     bool Render();                 // model_ -> dib_ (pixels), current hover state
+    void ResetMaterialRefresh();
     // Bakes s.plate for `card` (bitmap px) of a window at screen `origin` from
     // the owner compositor's frame copy; false keeps the solid plate.
     bool EnsurePlate(Surface& s, const D2D1_RECT_F& card, POINT origin, ID2D1Image* target);
@@ -433,9 +444,15 @@ private:
     bool activate_on_open_ = false;
     bool activation_confirmed_ = false;
     MaterialPainter material_painter_;
+    unsigned material_retries_left_ = 16;
+    bool material_retry_pending_ = false;
+    float corner_radius_dip_ = 0.0f;
+    float plate_radius_dip_ = 5.0f;
+    float plate_inset_dip_ = 6.0f;
     NativeMenuSurface::BackdropFactory native_backdrop_factory_;
     bool native_acrylic_requested_ = false;
     bool native_acrylic_active_ = false;
+    bool glass_surface_ = false;
     bool acrylic_active_ = false;  // decided when a popup opens
     HWND external_edit_ = nullptr; // borrowed; never moved, hidden or destroyed
     HWND edit_ = nullptr;
@@ -469,8 +486,10 @@ private:
     struct IconBitmap {
         common::MenuIconRef pixels;
         ComPtr<ID2D1Bitmap> bitmap;
+        ComPtr<ID2D1DeviceContext> context; // Strong key: a recreated context cannot reuse its address.
+        uint64_t last_used = 0;
     };
-    std::vector<IconBitmap> icon_bitmaps_;  // a menu holds a few dozen rows at most
+    std::vector<IconBitmap> icon_bitmaps_;  // bounded LRU retained across popup invocations
 
     struct SubmenuState {
         ~SubmenuState();

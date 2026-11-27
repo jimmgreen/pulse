@@ -51,7 +51,7 @@ DetailsMotion& DetailsMotionFor(const void* renderer) {
 
 D2D1_RECT_F MainRenderer::DetailsPanelRect(float w, float h) const {
     if (DetailsPanelWidth(w) <= 0.0f) return D2D1::RectF(0.0f, 0.0f, 0.0f, 0.0f);
-    const float pw = details_width_ * scale_;
+    const float pw = EmbeddedPickerLayout() ? std::max(0.0f, DetailsPanelWidth(w) - margin_) : details_width_ * scale_;
     const float top = title_bar_height_ + toolbar_height_ + margin_;
     const float bottom = h - status_height_ - margin_;
     return D2D1::RectF(w - margin_ - pw, top, w - margin_, bottom);
@@ -69,7 +69,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         ? DetailsPreviewHeight(panel, s, d.preview_expansion, d) : 0.0f;
     DetailsHitRects hit;
     LayoutDetailsPanel(panel, s, d, compositor_->DwriteFactory(),
-                       compositor_->SmallFormat(), compositor_, previewH, hit);
+                       compositor_->SmallFormat(), compositor_, previewH, hit, EmbeddedPickerLayout() && d.preview_only);
 
     DetailsMotion& dm = DetailsMotionFor(this);
     if (motion_now_ - dm.animations_checked > 2000 || !dm.animations_checked) {
@@ -171,6 +171,104 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
              compositor_->SmallFormat(), theme.text);
     };
 
+    if (EmbeddedPickerLayout() && d.preview_only && d.picker_save_mode) {
+        const auto layout = LayoutPickerSavePreview(panel, s, d.picker_save_to_tray);
+        details_preview_bounds_ = {};
+        dc->PushAxisAlignedClip(panel, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        const auto draw_text = [&](const std::wstring& value, D2D1_RECT_F bounds, IDWriteTextFormat* fmt, const D2D1_COLOR_F& color) {
+            if (!fmt || bounds.right <= bounds.left || bounds.bottom <= bounds.top || value.empty()) return;
+            MakeBrush(dc, color, brText_);
+            DrawTextEndEllipsis(compositor_, fmt, brText_.get(), value,
+                bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+        };
+        const auto draw_kv = [&](const D2D1_RECT_F& row, l10n::StringId key_id, const std::wstring& val, const D2D1_COLOR_F& val_color) {
+            if (row.right <= row.left || row.bottom <= row.top) return;
+            const std::wstring key = l10n::Get(key_id);
+            const float kw = std::min((row.right - row.left) * 0.44f,
+                MeasureLayoutText(compositor_, compositor_->DwriteFactory(), compositor_->SmallFormat(), key) + 8.0f * s);
+            draw_text(key, {row.left, row.top, row.left + kw, row.bottom}, compositor_->SmallFormat(), theme.text_secondary);
+            draw_text(val, {row.left + kw, row.top, row.right, row.bottom}, compositor_->SmallFormat(), val_color);
+        };
+        const bool hc = IsHighContrast();
+        const D2D1_COLOR_F ok_ink = hc ? theme.text : (vm.dark ? HexColor(0x6CCB5F) : HexColor(0x0F7B0F));
+        const D2D1_COLOR_F warn_ink = hc ? theme.text : (vm.dark ? HexColor(0xFCE100) : HexColor(0x9D5D00));
+        const D2D1_COLOR_F ok_bg = hc ? theme.bg : (vm.dark ? WithAlpha(HexColor(0x6CCB5F), 0.14f) : WithAlpha(HexColor(0x0F7B0F), 0.10f));
+        const D2D1_COLOR_F warn_bg = hc ? theme.bg : (vm.dark ? WithAlpha(HexColor(0xFCE100), 0.14f) : WithAlpha(HexColor(0x9D5D00), 0.11f));
+
+        if (d.picker_save_to_tray) {
+            draw_text(l10n::Get(l10n::StringId::PickerSaveToTrayHeading), layout.heading, compositor_->HeaderFormat(), theme.text);
+            std::wstring loc_val = l10n::Get(l10n::StringId::PickerSaveToTrayLocationVal);
+            if (const auto pos = loc_val.find(L"{path}"); pos != std::wstring::npos)
+                loc_val.replace(pos, 6, d.save_folder_text.empty() ? L"Pulse\\shelf" : d.save_folder_text);
+            draw_kv(layout.kv_rows[0], l10n::StringId::Location, loc_val, theme.text);
+            std::wstring count_val = l10n::Get(l10n::StringId::PickerSaveToTrayInTrayValue);
+            if (const auto pos = count_val.find(L"{count}"); pos != std::wstring::npos)
+                count_val.replace(pos, 7, std::to_wstring(d.save_tray_count));
+            draw_kv(layout.kv_rows[1], l10n::StringId::PickerSaveToTrayInTrayLabel, count_val, theme.text);
+            draw_kv(layout.kv_rows[2], l10n::StringId::PickerSaveDestDisk, d.save_disk_text, theme.text);
+            if (layout.banner.right > layout.banner.left) {
+                painter_.FillRoundedRect(layout.banner, 6.0f * s, warn_bg);
+                painter_.StrokeRoundedRect(layout.banner, 6.0f * s, WithAlpha(warn_ink, hc ? 1.0f : 0.35f), std::max(1.0f, s));
+                painter_.DrawWrappedCaption(l10n::Get(l10n::StringId::PickerSaveToTrayTempHint),
+                    D2D1::Point2F(layout.banner.left + 8.0f * s, layout.banner.top + 6.0f * s),
+                    std::max(1.0f, layout.banner.right - layout.banner.left - 16.0f * s), warn_ink);
+            }
+            if (layout.divider.right > layout.divider.left) {
+                MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+                dc->FillRectangle(layout.divider, brStrokeDivider_.get());
+            }
+            draw_text(l10n::Get(l10n::StringId::PickerSaveToTrayLaterTitle), layout.subheading, compositor_->SmallFormat(), theme.text_secondary);
+            static constexpr l10n::StringId kBullets[3] = {
+                l10n::StringId::PickerSaveToTrayLater1,
+                l10n::StringId::PickerSaveToTrayLater2,
+                l10n::StringId::PickerSaveToTrayLater3
+            };
+            float by = layout.subheading.bottom + 6.0f * s;
+            const float bw = std::max(1.0f, layout.subheading.right - layout.subheading.left);
+            const float b_limit = panel.bottom - 10.0f * s;
+            for (size_t i = 0; i < 3; ++i) {
+                const std::wstring btext = l10n::Get(kBullets[i]);
+                const float bh = std::max(18.0f * s, painter_.MeasureWrappedCaptionHeight(btext, bw));
+                if (by + bh > b_limit) break;
+                painter_.DrawWrappedCaption(btext, D2D1::Point2F(layout.subheading.left, by), bw, theme.text_secondary);
+                by += bh + 6.0f * s;
+            }
+        } else {
+            draw_text(l10n::Get(l10n::StringId::PickerSaveHereHeading), layout.heading, compositor_->HeaderFormat(), theme.text);
+            draw_kv(layout.kv_rows[0], l10n::StringId::PickerSaveDestFolder, d.save_folder_text, theme.text);
+            draw_kv(layout.kv_rows[1], l10n::StringId::PickerSameNameSeries, d.save_series_text, theme.text);
+            draw_kv(layout.kv_rows[2], l10n::StringId::PickerSaveDestDisk, d.save_disk_text, theme.text);
+            draw_kv(layout.kv_rows[3], l10n::StringId::PickerSaveDestPerm, d.save_perm_text, d.save_perm_ok ? ok_ink : warn_ink);
+            draw_kv(layout.kv_rows[4], l10n::StringId::PickerSaveDestSync, d.save_sync_text, theme.text_secondary);
+            if (layout.banner.right > layout.banner.left && !d.save_banner_text.empty()) {
+                const D2D1_COLOR_F b_ink = d.save_clash ? warn_ink : ok_ink;
+                const D2D1_COLOR_F b_bg = d.save_clash ? warn_bg : ok_bg;
+                painter_.FillRoundedRect(layout.banner, 6.0f * s, b_bg);
+                painter_.StrokeRoundedRect(layout.banner, 6.0f * s, WithAlpha(b_ink, hc ? 1.0f : 0.35f), std::max(1.0f, s));
+                painter_.DrawWrappedCaption(d.save_banner_text,
+                    D2D1::Point2F(layout.banner.left + 8.0f * s, layout.banner.top + 6.0f * s),
+                    std::max(1.0f, layout.banner.right - layout.banner.left - 16.0f * s), b_ink);
+            }
+            if (layout.divider.right > layout.divider.left) {
+                MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+                dc->FillRectangle(layout.divider, brStrokeDivider_.get());
+            }
+            draw_text(l10n::Get(l10n::StringId::PickerSaveAfterHeading), layout.subheading, compositor_->SmallFormat(), theme.text_secondary);
+            const auto draw_after = [&](const D2D1_RECT_F& row, l10n::StringId label, bool checked, HitTestResult::Region region) {
+                if (row.right <= row.left || row.bottom <= row.top) return;
+                fluent::ControlState st{};
+                st.enabled = d.save_after_available;
+                st.checked = checked;
+                st.hovered = st.enabled && IsHovered(vm, region);
+                painter_.DrawCheckBox(row, l10n::Get(label), st);
+            };
+            draw_after(layout.after_show, l10n::StringId::PickerSaveAfterShowShort, d.save_after_show, HitTestResult::DetailsSaveAfterShow);
+            draw_after(layout.after_copy, l10n::StringId::PickerSaveAfterCopyShort, d.save_after_copy, HitTestResult::DetailsSaveAfterCopy);
+        }
+        dc->PopAxisAlignedClip();
+        return;
+    }
+
     if (!d.has_selection) {
         const D2D1_RECT_F content = D2D1::RectF(
             panel.left + 16.0f * s, panel.top + 16.0f * s,
@@ -199,6 +297,59 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
             D2D1::RectF(content.left, art.bottom + gap,
                         content.right, art.bottom + gap + titleHeight),
             compositor_->HeaderFormat(), theme.text_secondary);
+        return;
+    }
+
+    if (EmbeddedPickerLayout() && d.preview_only) {
+        const auto layout = LayoutPickerPreview(panel, s, previewH, d.picker_archive);
+        details_preview_bounds_ = layout.preview;
+        dc->PushAxisAlignedClip(panel, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        const auto line = [&](const std::wstring& value, D2D1_RECT_F bounds, const D2D1_COLOR_F& color) {
+            if (bounds.right <= bounds.left || bounds.bottom <= bounds.top || value.empty()) return;
+            MakeBrush(dc, color, brText_);
+            DrawTextEndEllipsis(compositor_, compositor_->SmallFormat(), brText_.get(), value,
+                bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top);
+        };
+        line(d.name, layout.name, theme.text);
+        auto subtitle = d.subtitle_text.empty() ? FormatListType(d.name, d.is_dir) : d.subtitle_text;
+        if (!d.is_dir) subtitle += L" \u00B7 " + format::ByteSize(d.size_value);
+        line(subtitle, layout.subtitle, theme.text_secondary);
+        if (d.modified_value) {
+            const FILETIME time{static_cast<DWORD>(d.modified_value), static_cast<DWORD>(d.modified_value >> 32)};
+            line(l10n::Get(l10n::StringId::Modified) + L" " + format::LocalFileTime(time), layout.modified, theme.text_secondary);
+        }
+        line(path::FriendlyPathText(d.path), layout.location, theme.text_secondary);
+        const auto action = [&](D2D1_RECT_F bounds, l10n::StringId label, HitTestResult::Region region) {
+            if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) return;
+            fluent::ControlState state;
+            state.hovered = IsHovered(vm, region);
+            painter_.DrawButton({bounds, {}, {}, fluent::ButtonKind::Standard, state});
+            bounds.left += 8.0f * s; bounds.right -= 8.0f * s;
+            line(l10n::Get(label), bounds, theme.text);
+        };
+        if (d.picker_archive)
+            action(layout.enter_archive, l10n::StringId::PickerEnterArchive, HitTestResult::DetailsOpen);
+        action(layout.copy_path, l10n::StringId::CopyPath, HitTestResult::DetailsCopyPath);
+        action(layout.reveal, l10n::StringId::AiAsstShowInPulse, HitTestResult::DetailsNewTab);
+        if (layout.footer_hint.right > layout.footer_hint.left) {
+            float hx = layout.footer_hint.left;
+            const float hy = layout.footer_hint.top;
+            const float hh = layout.footer_hint.bottom - hy;
+            const auto draw_kbd_hint = [&](const std::wstring& key, const std::wstring& desc) {
+                const float kw = std::max(22.0f * s, painter_.MeasureBadgeWidth(key));
+                if (hx + kw > layout.footer_hint.right) return;
+                painter_.DrawBadge({{hx, hy + 1.0f * s, hx + kw, hy + hh - 1.0f * s}, key, fluent::BadgeKind::Keycap});
+                hx += kw + 4.0f * s;
+                const float dw = MeasureLayoutText(compositor_, compositor_->DwriteFactory(), compositor_->SmallFormat(), desc);
+                if (hx < layout.footer_hint.right) {
+                    line(desc, {hx, hy, std::min(layout.footer_hint.right, hx + dw + 2.0f * s), layout.footer_hint.bottom}, theme.text_secondary);
+                    hx += dw + 10.0f * s;
+                }
+            };
+            draw_kbd_hint(l10n::Get(l10n::StringId::PickerPreviewSpaceKey), l10n::Get(l10n::StringId::PickerPreviewSpaceHint));
+            draw_kbd_hint(L"Ctrl C", l10n::Get(l10n::StringId::CopyPath));
+        }
+        dc->PopAxisAlignedClip();
         return;
     }
 

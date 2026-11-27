@@ -15,33 +15,12 @@ using namespace ai_draw;
 namespace {
 
 constexpr uint64_t kMenuMs = 220;     // the model menu's pop
-constexpr uint64_t kShakeMs = 450;    // .mic.shake
 constexpr uint64_t kShakeRedMs = 720; // the icon stays red for 60% of 1.2 s
-constexpr uint64_t kRingMs = 1400;    // micring
 
-// .shimmer: text2 with an accent band sweeping across every 1.8 s.
-void Shimmer(const Ctx& c, const std::wstring& text, IDWriteTextFormat* fmt, float x, float y, float h,
-             const AiPanelView::Palette& pal, uint64_t now, bool moving) {
+void StatusText(const Ctx& c, const std::wstring& text, IDWriteTextFormat* fmt, float x, float y, float h,
+                const AiPanelView::Palette& pal) {
     const float tw = c.Measure(text, fmt);
-    const D2D1_RECT_F r = D2D1::RectF(x, y, x + tw + 2.0f, y + h);
-    c.Text(text, fmt, r, pal.text2);
-    if (!moving || tw <= 0.0f) return;
-    const float t = static_cast<float>(now % 1800) / 1800.0f;
-    const float gx = x - 1.2f * tw * (1.0f - 2.2f * t);
-    const D2D1_GRADIENT_STOP stops[] = {{0.35f, Alpha(pal.accent, 0.0f)}, {0.5f, pal.accent}, {0.65f, Alpha(pal.accent, 0.0f)}};
-    ID2D1GradientStopCollection* col = nullptr;
-    if (FAILED(c.dc->CreateGradientStopCollection(stops, 3, &col))) return;
-    ID2D1LinearGradientBrush* mask = nullptr;
-    if (SUCCEEDED(c.dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(gx, 0.0f), D2D1::Point2F(gx + 2.2f * tw, 0.0f)), col, &mask))) {
-        c.dc->PushLayer(D2D1::LayerParameters1(r, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), 1.0f,
-                                               mask, D2D1_LAYER_OPTIONS1_NONE),
-                        nullptr);
-        c.Text(text, fmt, r, pal.accent);
-        c.dc->PopLayer();
-        mask->Release();
-    }
-    col->Release();
+    c.Text(text, fmt, D2D1::RectF(x, y, x + tw + 2.0f, y + h), pal.text2);
 }
 
 // The fill of `group` showing only inside `part` (a half-rounded hover).
@@ -92,42 +71,17 @@ void AiPanelView::DrawMic(Compositor* compositor, const AiPanelViewModel& vm, co
     if (!vm.voice.available) return;
     Ctx c{compositor, compositor->Dc(), brush_, s};
     const AiVoiceView& v = vm.voice;
-    const bool moving = animate_ && motion::SystemAnimationsEnabled();
-    // .mic.shake: ±3 px at 20/40/60/80%, the icon red for the first 60% of 1.2 s.
-    float dx = 0.0f;
+    const float dx = 0.0f;
     bool red = false;
-    if (v.shake_at && now_ms >= v.shake_at) {
-        const uint64_t t = now_ms - v.shake_at;
-        if (moving && t < kShakeMs) {
-            const float p = static_cast<float>(t) / static_cast<float>(kShakeMs);
-            constexpr float keys[] = {0.0f, -3.0f, 3.0f, -3.0f, 3.0f, 0.0f};
-            const float at = p * 5.0f;
-            const int i = (std::min)(4, static_cast<int>(at));
-            dx = (keys[i] + (keys[i + 1] - keys[i]) * (at - static_cast<float>(i))) * s;
-        }
-        if (t < kShakeRedMs) {
-            red = true;
-            decor_ = true;
-        }
+    if (v.shake_at && now_ms >= v.shake_at && now_ms - v.shake_at < kShakeRedMs) {
+        red = true;
+        decor_ = true;  // Expire the error colour without moving the hit target.
     }
     const D2D1_RECT_F mic = D2D1::RectF(mic_button_.left + dx, mic_button_.top, mic_button_.right + dx, mic_button_.bottom);
     const D2D1_RECT_F group = D2D1::RectF(mic.left, mic.top, mic_menu_.right + dx, mic.bottom);
     const float icon_x = (mic.left + mic.right) * 0.5f - 8.0f * s;
     const float icon_y = (mic.top + mic.bottom) * 0.5f - 8.0f * s;
     if (v.listening) {
-        // .composer.listen .mic: accent, white icon, radius 8; ::after a 2 px
-        // ring at inset -3 that grows (.92 → 1.3) and fades (.55 → 0) in 1.4 s.
-        if (moving) {
-            const float t = static_cast<float>(now_ms % kRingMs) / static_cast<float>(kRingMs);
-            const float k = 0.92f + 0.38f * t;
-            const float a = 0.55f * (1.0f - t);
-            const D2D1_POINT_2F mid = D2D1::Point2F((mic.left + mic.right) * 0.5f, (mic.top + mic.bottom) * 0.5f);
-            const float hw = ((mic.right - mic.left) * 0.5f + 3.0f * s) * k;
-            const float hh = ((mic.bottom - mic.top) * 0.5f + 3.0f * s) * k;
-            const D2D1_RECT_F ring = D2D1::RectF(mid.x - hw, mid.y - hh, mid.x + hw, mid.y + hh);
-            c.Stroke(ring, 10.0f * s * k, Alpha(pal.accent, a), 2.0f * s);
-            decor_ = true;
-        }
         c.Fill(mic, 8.0f * s, pal.accent);
         c.Icon(AiIcon::Mic, icon_x, icon_y, 16.0f * s, pal.on_accent);
         return;   // .composer.listen .vch: opacity 0
@@ -156,12 +110,12 @@ void AiPanelView::DrawVoiceInput(Compositor* compositor, const AiPanelViewModel&
         const float k = moving ? std::clamp(dt / 120.0f, 0.0f, 1.0f) : 1.0f;
         for (size_t i = 0; i < g.shown.size(); ++i) g.shown[i] += (v.levels[i] - g.shown[i]) * k;
         g.shown_at = now_ms;
-        decor_ = true;   // the waveform and the timer move while listening
+        if (v.listening) decor_ = true; // Live levels/time continue even with decorative motion off.
     }
     if (vm.composer_empty) {
         g.extra_line = false;
         if (v.recognizing) {
-            Shimmer(c, v.recognizing_text, formats_.small125, r.left, r.top, line, pal, now_ms, moving);
+            StatusText(c, v.recognizing_text, formats_.small125, r.left, r.top, line, pal);
             return;
         }
         // .rec: 14 bars (height 18), gap 10, the time (12 text2), the service
@@ -207,7 +161,7 @@ void AiPanelView::DrawVoiceInput(Compositor* compositor, const AiPanelViewModel&
     const float iy = r.top + end_y + (wrap ? line : 0.0f);
     if (iy + line > r.bottom + 0.5f) return;   // until the input has grown
     if (v.recognizing) {
-        Shimmer(c, v.recognizing_text, formats_.small125, ix, iy, line, pal, now_ms, moving);
+        StatusText(c, v.recognizing_text, formats_.small125, ix, iy, line, pal);
     } else {
         Bars(c, g.shown.data() + (g.shown.size() - 8), 8, ix, iy + line * 0.5f, 18.0f, pal.accent);
     }

@@ -3,6 +3,7 @@
 #include "edit_host.h"
 #include "extension_tree_extra_controls.h"
 #include "store_icons.h"
+#include "ui_motion.h"
 #include <algorithm>
 #include <charconv>
 #include <commctrl.h>
@@ -337,9 +338,10 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
         spec.paused = node.progress_state == "paused";
         spec.error = node.progress_state == "error";
         spec.indeterminate = node.progress_state == "indeterminate";
-        spec.animation_progress = static_cast<float>(GetTickCount64() % 100000) / 1000;
-        if (spec.indeterminate)
-            SetTimer(value.host, 1, 16, nullptr);
+        spec.animation_progress = motion::SystemAnimationsEnabled()
+            ? static_cast<float>(GetTickCount64() % 100000) / 1000 : 0.0f;
+        if (spec.indeterminate && motion::SystemAnimationsEnabled())
+            SetTimer(value.host, 1, 50, nullptr);
         if (node.progress_kind == "ring")
             painter.DrawProgressRing(spec);
         else
@@ -349,6 +351,12 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
     case UiNodeType::Badge: {
         fluent::BadgeSpec spec;
         spec.bounds = bounds;
+        // A badge is a 22 DIP pill centred in its row, not the full 32 DIP control height.
+        if (!node.dot && bounds.bottom - bounds.top > 24.0f * value.scale) {
+            const float mid = (bounds.top + bounds.bottom) * 0.5f;
+            spec.bounds.top = mid - 11.0f * value.scale;
+            spec.bounds.bottom = mid + 11.0f * value.scale;
+        }
         spec.text = label;
         spec.dot = node.dot;
         spec.kind = node.badge_kind == "accent"    ? fluent::BadgeKind::Accent
@@ -362,11 +370,14 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
     }
     case UiNodeType::Tag: {
         D2D1_COLOR_F chip_color = theme.accent;
-        if (node.color.size() == 7) {
+        if (node.color.size() == 7 && node.color[0] == '#') {
             unsigned color = 0;
             auto result = std::from_chars(node.color.data() + 1, node.color.data() + 7, color, 16);
             if (result.ec == std::errc{})
                 chip_color = HexColor(color);
+        } else if (!node.color.empty()) {
+            D2D1_COLOR_F token{};
+            if (ResolveExtensionColorToken(node.color, theme, value.dark, token)) chip_color = token;
         }
         if (!node.state.empty() || !node.command.empty()) {
             const bool active = state.checked || node.selected;

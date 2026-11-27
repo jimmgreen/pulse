@@ -508,17 +508,7 @@ void AiPanelView::DrawEmptyState(Compositor* compositor, const AiPanelViewModel&
     float y = top + (16.0f + (vm.setup ? 12.0f : 26.0f)) * s;
     // Breathing spark: scale .88 and 45 deg at the middle of a 3.2 s cycle.
     if (!vm.setup) {
-        // Nine breaths after opening, then it rests (a 30 fps repaint for as
-        // long as the panel stays open would cost an idle window CPU).
-        const uint64_t since = now_ms - opened_at_;
-        const bool breathe = motion::SystemAnimationsEnabled() && since < 9 * 3200;
-        const float phase = static_cast<float>(since % 3200) / 3200.0f;
-        const float b = breathe ? 0.5f - 0.5f * std::cos(phase * 2.0f * kPi) : 0.0f;
-        AiIconPose pose;
-        pose.scale = 1.0f - 0.12f * b;
-        pose.rotate_deg = 45.0f * b;
-        c.Icon(AiIcon::Spark, x0, y, 44.0f * s, pal.accent, pose);
-        if (breathe) decor_ = true;
+        c.Icon(AiIcon::Spark, x0, y, 44.0f * s, pal.accent);
         y += (44.0f + 16.0f) * s;
     }
     if (vm.setup) {

@@ -104,7 +104,9 @@ void GroupWheel::Open(GroupWheelData data, const D2D1_RECT_F& anchor, const D2D1
     seg_hot_ = -1;
     const int applied = std::clamp(data_.applied, 0, std::max(0, Count() - 1));
     t_ = static_cast<float>(applied);
-    p_ = animate_ ? t_ - 0.6f : t_;   // roll in to the current choice
+    // Opening must show the actual selection, not roll past another value.
+    // User-driven rolling, snapping and the short surface fade remain.
+    p_ = t_;
     v_ = 0.0f;
     open_ = true;
     closing_ = false;

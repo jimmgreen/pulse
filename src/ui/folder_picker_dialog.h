@@ -55,14 +55,6 @@ struct PickerRecentPlace {
     std::wstring label;   // empty: the folder's own name
     std::wstring detail;  // quiet tag on the right: "9 次", "今天"
 };
-// A recently used file of the accepted types, from any folder (open modes, HTML 打开).
-struct PickerRecentFile {
-    std::wstring path;
-    std::wstring detail;          // "设计稿-v3\\导出 · 10 分钟前"
-    HBITMAP thumbnail = nullptr;  // optional 32bpp premultiplied; borrowed until Show returns
-    DWORD attributes = 0;         // Worker snapshot for the isolated thumbnail cache.
-    uint64_t modified = 0, size = 0;
-};
 // A folder open elsewhere, for the jump strip (HTML 跳转条). The host fills these.
 struct PickerOpenFolder {
     std::wstring path;
@@ -106,6 +98,7 @@ struct FolderPickerSpec {
     std::vector<PickerCustomControl> custom_controls;
     size_t filter_index = 0;
     std::wstring filename;
+    std::wstring original_file_path; // Optional source file path for Save "原文件位置" chip.
     std::wstring default_extension; // Without leading period
     std::wstring navigation_root;
     bool legacy_browse = false, hide_new_folder_button = false;
@@ -116,7 +109,10 @@ struct FolderPickerSpec {
     bool prompt_overwrite = true;
     bool require_unencrypted_save = false;
     bool allow_multiselect = false;
-    bool show_hidden = false;
+    bool show_hidden = false; // explicit caller force; independent of Pulse preferences
+    bool show_hidden_files = false;
+    bool show_protected_os_files = false;
+    bool show_file_extensions = true;
     bool shell_item_filter = false; // Enumerated views only; never typed navigation/result validation.
     // The main window's list style, so rows look the same in both places.
     bool selection_outline = false;
@@ -134,6 +130,9 @@ struct FolderPickerSpec {
     WindowEffect window_effect = WindowEffect::Acrylic;
     int panel_transparency = 50;  // 界面透明度 (AppPrefs::wallpaper_look)
     int frame_transparency = 10;  // 侧边栏与标题栏 (AppPrefs::frame_transparency)
+    // The main window's sort and group-by for a folder (its per-folder memory);
+    // empty: the dialog's own order. Called on the dialog thread, memory only.
+    std::function<PickerListOrder(const std::wstring& folder)> folder_order;
     uint32_t details_columns = 0;         // Without explicit_details_columns, 0 uses defaults.
     bool explicit_details_columns = false;
     // ---- Jump strip (HTML 跳转条): all optional, filled by the host process. ----
@@ -144,9 +143,20 @@ struct FolderPickerSpec {
     common::MenuIconRef host_app_icon_pixels;
     std::vector<PickerOpenFolder> open_folders; // Pulse tabs, then Explorer windows; Alt+1..9 in order
                                                 // (empty: the folders the shared Pulse places mark open)
+    // Snapshot only: acceptance must still validate paths and caller FileOk rules.
+    std::vector<picker_places::SelectedItem> pulse_selected_items;
+    bool pulse_selection_available = false;
+    std::vector<picker_places::TrayItem> pulse_tray_items;
+    bool pulse_tray_available = false;
+    uint64_t pulse_tray_shelf_id = 0, pulse_tray_revision = 0, pulse_tray_total_count = 0;
+    std::wstring pulse_tray_shelf_name;
+    DWORD pulse_tray_publisher_pid = 0;
+    HWND pulse_tray_source = nullptr, pulse_tray_endpoint = nullptr;
+    DWORD pulse_tray_endpoint_pid = 0;
+    bool enable_save_followup = false; // Observe writes only after explicit result delivery.
+    bool enable_archive_selection = false; // Requires a result delivery commit (V2).
+    bool enable_tray_consume = false; // Caller explicitly commits result delivery (V2).
     std::vector<PickerRecentPlace> app_recent_places; // sidebar group "{host_app_name} 最近使用", first
-    std::vector<PickerRecentFile> recent_files; // File / Image modes: a card row under the strip
-    std::wstring recent_files_caption;          // empty: the default caption
     PickerOpenFolder last_location;        // where this program last saved / opened; path empty: none
     std::wstring last_location_source;     // "Word 上次"
     // initial_path was chosen by the host over the program's own folder (the automatic
@@ -158,6 +168,8 @@ struct FolderPickerSpec {
     std::function<std::vector<PickerJumpResult>(const std::wstring& query)> jump_search;
     // Memory-only polling; producers own background I/O and retain icon resources.
     std::function<bool(FolderPickerSpec&)> poll_jump_context;
+    // 常用: the user removed a folder from this program's history (after the undo window).
+    std::function<void(const std::wstring&)> forget_recent_place;
     bool allow_auto_jump = false; // Explicit SetFolder and unknown caller contracts stay put.
     int jump_index_status = 0; // 1 only after a connected per-user index is observed.
     std::wstring jump_search_query; // Completed background query; never applies to newer input.
@@ -200,6 +212,8 @@ struct FolderPickerSpec {
 struct FilePickerResult {
     std::vector<std::wstring> paths;
     size_t filter_index = 0;
+    std::wstring navigation_source; // Original archive, never the staging directory.
+    std::function<void()> on_result_delivered; // Invoke only after caller result buffers succeed.
 };
 
 enum class FilePickerStatus { Accepted, Cancelled, Failed };

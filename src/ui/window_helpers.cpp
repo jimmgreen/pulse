@@ -386,6 +386,10 @@ bool ApplyBackdrop(HWND hwnd, bool dark) { return ApplyBackdrop(hwnd, dark, Wind
 
 bool ApplyBackdrop(HWND hwnd, bool dark, WindowEffect effect) {
     UpdateWindowTheme(hwnd, dark);
+    // These dialogs draw their own title in the client area. As in the main
+    // window, suppress DWM's accent-colored caption band over that content.
+    const COLORREF caption = DWMWA_COLOR_NONE;
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     if (DrawsOwnCorners()) {
         // Windows 10 has no system acrylic: the dialog draws the Pulse window
         // under it, blurred (DialogAcrylicPlate), inside its own corners.

@@ -402,7 +402,7 @@ inline Theme MakeHighContrastTheme() noexcept {
     t.danger_hover = HexColor(0xA51910);
 
     // High contrast uses system colors without transparency.
-    auto sys = [](int idx) { return HexColor((uint32_t)GetSysColor(idx)); };
+    auto sys = [](int idx) { return ColorFromRef(GetSysColor(idx)); };
     t.bg = sys(COLOR_WINDOW);
     t.text = sys(COLOR_WINDOWTEXT);
     t.text_secondary = sys(COLOR_GRAYTEXT);

@@ -1,5 +1,6 @@
 #include "ellipsis_layout_cache.h"
 #include "pane_layout_strip.h"
+#include "picker_preview_layout.h"
 // ui_renderer_internal.h — Draw + HitTest shared geometry (not a public API).
 #pragma once
 #include <list>
@@ -307,7 +308,7 @@ void ClearTextWidthCache() {
         if (!vm.row_cache) vm.row_cache = std::make_shared<RowPresentationCache>();
         auto& cache = *vm.row_cache;
         const uint64_t alias_revision = app::AliasStore::Instance().Revision();
-        const uint64_t extension_revision = KnownExtensionsRevision();
+        const uint64_t extension_revision = KnownExtensionsRevision(vm.show_file_extensions);
         const uint64_t places_revision = vm.tag_catalog ? vm.tag_catalog->TagRevision() : 0;
         if (cache.snapshot != vm.snapshot || cache.alias_revision != alias_revision ||
             cache.extension_revision != extension_revision || cache.places_revision != places_revision) {
@@ -363,7 +364,8 @@ void ClearTextWidthCache() {
                                source.mtime.dwLowDateTime;
         entry.is_dir = penetrated ? source.link_target_is_dir : source.is_dir;
         // The suffix belongs to the shortcut file, not to its target folder.
-        entry.hidden_ext = HiddenExtensionLength(entry.name, source.is_dir);
+        entry.hidden_ext = HiddenExtensionLength(entry.name, source.is_dir,
+            vm.show_file_extensions < 0 ? HideKnownExtensions() : !vm.show_file_extensions);
         entry.is_reparse = source.is_reparse;
         entry.link_kind = fs::ClassifyLink(source.attrs, source.reparse_tag);
         entry.is_link = entry.link_kind != fs::LinkKind::None ||
@@ -500,6 +502,11 @@ void ClearTextWidthCache() {
         } kind = Header;
         D2D1_RECT_F rc{};
         D2D1_RECT_F clip{};  // nested favorites viewport, or empty for ordinary rows
+        // Wide layout: where the scrolled rows end (above the tray's gap). A
+        // row the edge runs through stays in the layout, drawn and hit only
+        // above it, so rows leave at the bottom as they do at the top instead
+        // of popping out whole. 0 = no edge (rail, the tray itself).
+        float content_bottom = 0.0f;
         int group = -1;
         int item = -1;
         int run = -1;
@@ -880,7 +887,8 @@ void ClearTextWidthCache() {
                 header.kind = SidebarSlot::Header;
                 header.rc = D2D1::RectF(innerL, y, innerR, y + m.headerH);
                 header.group = g;
-                if (header.rc.bottom > sb.top && header.rc.bottom <= contentBottom)
+                header.content_bottom = contentBottom;
+                if (header.rc.bottom > sb.top && header.rc.top < contentBottom)
                     out.push_back(header);
                 y += m.headerH + 4.0f * scale;
             }
@@ -932,6 +940,7 @@ void ClearTextWidthCache() {
                                               row_y, innerR - (max_scroll > 0.0f ? 13.0f * scale : 0.0f),
                                               row_y + height);
                         slot.clip = clip;
+                        slot.content_bottom = contentBottom;
                         if (clip.bottom > clip.top && slot.rc.bottom > clip.top && slot.rc.top < clip.bottom)
                             out.push_back(slot);
                         row_y += height + m.itemGap;
@@ -948,7 +957,8 @@ void ClearTextWidthCache() {
                 slot.group = g;
                 slot.item = i;
                 slot.run = run++;
-                if (slot.rc.bottom > sb.top && slot.rc.bottom <= contentBottom)
+                slot.content_bottom = contentBottom;
+                if (slot.rc.bottom > sb.top && slot.rc.top < contentBottom)
                     out.push_back(slot);
                 y += h + m.itemGap;
             }
@@ -1509,7 +1519,7 @@ void ClearTextWidthCache() {
     }
 
     bool SidebarItemHasUnpin(const SidebarItem& item) {
-        return item.tab_row || (item.indent == 0 && item.path.starts_with(L"pulse:workspace:"));
+        return item.tab_row || item.removable || (item.indent == 0 && item.path.starts_with(L"pulse:workspace:"));
     }
 
     D2D1_RECT_F WorkspaceUnpinRect(const D2D1_RECT_F& row, float scale) {
@@ -1986,13 +1996,31 @@ void ClearTextWidthCache() {
     void LayoutDetailsPanel(const D2D1_RECT_F& panel, float scale,
                             const DetailsPanelView& d, IDWriteFactory2* dwrite,
                             IDWriteTextFormat* small_fmt, Compositor* compositor,
-                            float preview_h, DetailsHitRects& out) {
+                            float preview_h, DetailsHitRects& out, bool picker_preview = false) {
         const float s = scale;
         const float pad = 12.0f * s;
         const float x = panel.left + pad;
         const float w = panel.right - panel.left - pad * 2.0f;
         out = DetailsHitRects{};
+        if (picker_preview && d.picker_save_mode) {
+            const auto layout = LayoutPickerSavePreview(panel, scale, d.picker_save_to_tray);
+            if (!d.picker_save_to_tray) {
+                out.save_after_show = layout.after_show;
+                out.save_after_copy = layout.after_copy;
+            }
+            out.content_height_dip = (panel.bottom - panel.top) / scale;
+            return;
+        }
         if (!d.has_selection) return;
+        if (picker_preview) {
+            const auto layout = LayoutPickerPreview(panel, scale, preview_h, d.picker_archive);
+            out.preview = layout.preview;
+            out.open = layout.enter_archive;
+            out.copy_path = layout.copy_path;
+            out.new_tab = layout.reveal;
+            out.content_height_dip = (panel.bottom - panel.top) / scale;
+            return;
+        }
         out.preview = D2D1::RectF(x, panel.top + pad, panel.right - pad,
                                   panel.top + pad + preview_h);
         const float previewBottom = panel.top + pad + preview_h;
@@ -2659,8 +2687,16 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h, const st
         x -= c.button_w;
         c.slots[static_cast<size_t>(i)] = {kinds[static_cast<size_t>(i)], x};
         if (i > 0) {
-            x -= 1.0f * scale;   // a hairline where the spec has '|', else a 1 DIP gap
-            if (divider_before[static_cast<size_t>(i)]) c.dividers[static_cast<size_t>(c.divider_count++)] = x;
+            if (divider_before[static_cast<size_t>(i)]) {
+                // A hairline where the spec has '|', with room on both sides so a hovered or selected
+                // button's plate never touches it.
+                constexpr float kDividerGap = 5.0f;
+                x -= (kDividerGap + 1.0f) * scale;
+                c.dividers[static_cast<size_t>(c.divider_count++)] = x;
+                x -= kDividerGap * scale;
+            } else {
+                x -= 1.0f * scale;   // a 1 DIP gap between neighbours
+            }
         }
     }
     c.count = n;
@@ -3129,6 +3165,7 @@ struct SettingsLayout {
     D2D1_RECT_F pinned_names_row{};
     D2D1_RECT_F alias_mark_row{};
     D2D1_RECT_F tree_sticky_row{};
+    D2D1_RECT_F scroll_past_end_row{};
     D2D1_RECT_F thumb_cache_row{};     // 缩略图缓存: usage bar and 清除缓存
     D2D1_RECT_F thumb_cache_button{};
     D2D1_RECT_F vertical_tabs_row{};
@@ -3153,7 +3190,7 @@ struct SettingsLayout {
     D2D1_RECT_F search_master_section{}, search_master_row{};
     D2D1_RECT_F global_search_row{}, global_search_hotkey_row{}, global_search_hotkey_button{};
     D2D1_RECT_F global_search_double_ctrl_row{}, global_search_gap_card{}, global_search_gap[3]{};
-    D2D1_RECT_F global_search_apps_row{}, dialog_jump_row{}, dialog_jump_auto_row{}, dialog_adaptive_row{};
+    D2D1_RECT_F global_search_apps_row{}, global_search_apps_first_row{}, dialog_jump_row{}, dialog_jump_auto_row{}, dialog_adaptive_row{};
     D2D1_RECT_F jump_history_row{}, jump_history_clear{};
     D2D1_RECT_F content_index_row{};
     D2D1_RECT_F index_info{};

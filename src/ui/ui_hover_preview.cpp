@@ -7,6 +7,7 @@
 #include "ffmpeg_playback.h"
 #include "snack_style.h"
 #include "typography.h"
+#include "ui_motion.h"
 #include "../common/localization.h"
 #include "../common/text_format.h"
 #include <algorithm>
@@ -347,7 +348,7 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     // Eased toward a new shape (the preview arrived, Ctrl went down or up);
     // a new card opens at its size.
     const unsigned long long now = GetTickCount64();
-    if (view.instant || hover_card_w_ <= 0.0f) {
+    if (view.instant || !motion::SystemAnimationsEnabled() || hover_card_w_ <= 0.0f) {
         hover_card_w_ = target_w;
         hover_well_h_ = target_h;
     } else {
@@ -616,7 +617,7 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
         dc->PushAxisAlignedClip(track, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         fill(D2D1::RectF(head, track.top, head + seg, track.bottom), 1.0f * s, palette.accent);
         dc->PopAxisAlignedClip();
-        hover_frame_ms_ = 33;
+        if (motion::SystemAnimationsEnabled()) hover_frame_ms_ = 50;
     }
 
     // Still easing, or this frame learned a new shape: another frame soon.
@@ -836,7 +837,7 @@ void MainRenderer::DrawHoverFolderCard(const HoverPreviewView& view, const D2D1_
             dc->PushAxisAlignedClip(track, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             fill(D2D1::RectF(head, track.top, head + seg, track.bottom), 1.0f * s, palette.accent);
             dc->PopAxisAlignedClip();
-            hover_frame_ms_ = 33;
+            if (motion::SystemAnimationsEnabled()) hover_frame_ms_ = 50;
         } else if (mosaic) {
             const uint32_t pixels = tile_w <= 120.0f ? 128u : 256u;
             ComPtr<ID2D1Factory> factory;

@@ -257,6 +257,8 @@ struct TagQueryChipView {
 struct AiListOverlay;
 
 struct PaneViewModel {
+    // -1 follows the application; embedded dialogs override only their own pane.
+    int show_file_extensions = -1;
     std::vector<std::wstring> history_preview_paths;
     using FilterMap = std::vector<int>;
     using TagDots = std::unordered_map<int, std::vector<D2D1_COLOR_F>>;
@@ -335,6 +337,8 @@ struct PaneViewModel {
     mutable std::shared_ptr<RowPresentationCache> row_cache;
     const app::PlacesCatalog* tag_catalog = nullptr;
     std::unordered_set<std::wstring> cut_names;
+    // Paint-only emphasis, independent of clipboard cut state and selection.
+    std::unordered_set<int> muted_indices;
     // Rows being deleted: they slide out and fade from leaving_since (NowMs).
     std::unordered_set<std::wstring> leaving_names;
     uint64_t leaving_since = 0;
@@ -457,6 +461,7 @@ struct PaneViewModel {
     // "Group by" (app::GroupBy value) and its spans over view rows.
     int group_by = 0;
     std::shared_ptr<const ListGroups> groups;
+    bool group_select = true;     // headers offer 选择本组 on hover (single-pick dialogs: no)
     // Inline folder expansion (details view of a real folder): facts per
     // view row. filter_map then lists child rows after their folder, so it
     // is not sorted and ViewIndex uses tree->view_of_source instead.
@@ -543,6 +548,13 @@ struct SidebarItem {
     std::wstring detail;
     std::wstring icon_glyph;       // Segoe Fluent Icons codepoint string.
     std::wstring icon_path;        // shell icon drawn instead, once resolved (网盘: "::{CLSID}")
+    // Opt-in content thumbnail in the existing icon slot; metadata comes from
+    // the producer's snapshot, never from filesystem reads during painting.
+    bool icon_thumbnail = false;
+    DWORD icon_thumbnail_attrs = 0;
+    uint64_t icon_thumbnail_modified = 0, icon_thumbnail_size = 0;
+    bool icon_thumbnail_checkable = false, icon_thumbnail_checked = false;
+    bool icon_thumbnail_check_enabled = true;
     std::wstring fallback_text;
     std::wstring badge;            // e.g. "Git"
     D2D1_COLOR_F badge_color = {};
@@ -570,9 +582,15 @@ struct SidebarItem {
     int tab_number = 0;            // 1-based position, badged on the icon rail
     bool tab_active = false;
     float flash = 0.0f;            // tab rows: attention pulse, see TabView::flash
+    bool selected_override = false; // picker: force active selection highlight (e.g. save-to-tray)
+    bool accent_label = false;      // picker: tint label & icon in accent
+    bool drop_slot = false;         // picker: dashed accent drop slot inside tray group
+    bool removable = false;         // picker 常用: an × on hover (SidebarItemAction) in place of the badge
+    bool detail_hint = false;       // picker: `detail` is a location hint shown after the name
+    bool ellipsize = false;         // a long label ends in an ellipsis instead of clipping
 };
 
-enum class SidebarAddAction { None, CreateTag, AddNetwork, AddQuickAccess, NewTab, SaveWorkspace };
+enum class SidebarAddAction { None, CreateTag, AddNetwork, AddQuickAccess, NewTab, SaveWorkspace, PinToApp };
 
 struct SidebarGroup {
     // Logical section id (pulse::app::SidebarSectionId). Collapse/hide masks and
@@ -593,6 +611,8 @@ struct SidebarGroup {
     int badge_count = 0;
     // Rail mode: the short section title (快速 / 磁盘 ...); empty falls back to header.
     std::wstring rail_header;
+    bool drop_highlight = false;   // picker: dashed accent border around tray group during drag/shake
+    bool pin_active = false;       // picker: current folder is already pinned to this app
 };
 
 // Vertical span a section occupies in the laid-out sidebar (header top through
@@ -906,11 +926,21 @@ struct DetailsPanelView {
     };
     std::vector<GitMiniDiffRow> git_preview_lines;
     std::vector<GitMiniHistRow> git_history;
+    // Embedded file picker preview extras (archive action + Save destination panel).
+    bool picker_archive = false;
+    bool picker_save_mode = false;
+    bool picker_save_to_tray = false;
+    std::wstring save_folder_text, save_series_text, save_disk_text, save_perm_text, save_sync_text;
+    bool save_perm_ok = true, save_clash = false;
+    std::wstring save_banner_text;
+    int save_tray_count = 0;
+    bool save_after_available = false, save_after_show = false, save_after_copy = false;
 };
 
 // Interactive rects inside the details panel, shared by draw and hit-test.
 struct DetailsHitRects {
     D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
+    D2D1_RECT_F save_after_show{}, save_after_copy{};
     D2D1_RECT_F tag_add{}, preview{}, preview_toggle{}, preview_enable{};
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
@@ -1181,6 +1211,7 @@ enum class PackAction : int {
     StoreDetailHomepage = 70401,
     NativeTabBase = 70410,          // + 0 常用设置, 1 右键菜单, 2 概览, 3 关于: a plugin page opened for one package
     NativeCustomTabBase = 70420,    // + 0..5: extra plugin settings tabs created via pulse.settings.pages V2
+    StoreDetailPluginTabBase = 70430, // + 0..5: the same extra tabs on the store detail page (opens the settings page there)
     InstalledMoreBase = 80000, // plus displayed installed index; existing management menu actions
     StoreItemDetailBase = 90000, // plus the index in settings_store_view.items: open its store detail/showcase page
     StoreQuickControlBase = 100000, // + card*16 + control_idx (up to 8 generic quick cards x 8 controls)
@@ -1395,6 +1426,7 @@ struct WindowViewModel {
     bool settings_jump_history = true;
     bool settings_jump_history_empty = true;
     bool settings_global_search_apps = true;
+    bool settings_global_search_apps_first = false;
     bool settings_search_enabled = true;
     bool settings_global_search_capturing = false;
     std::wstring settings_global_search_hotkey;
@@ -1545,6 +1577,7 @@ struct WindowViewModel {
     bool settings_uil_show_profile = false;          // 界面方案 › 方案内容 expanded
     std::wstring settings_uil_profile;               // its text while expanded
     bool settings_list_tree_sticky = true;
+    bool settings_list_scroll_past_end = true;
     bool settings_menu_acrylic = true;
     bool settings_list_size_bar = false;
     bool settings_list_tag_names = false;
@@ -1841,6 +1874,8 @@ struct HitTestResult {
         DetailsTagAdd,
         DetailsNewTab,
         DetailsCopyPath,
+        DetailsSaveAfterShow,
+        DetailsSaveAfterCopy,
         DetailsSection,
         DetailsAttrToggle,
         DetailsSecurityChange,
@@ -1986,6 +2021,9 @@ struct HitTestResult {
     // only, so its tooltips read this.
     std::wstring label;
     D2D1_RECT_F control_bounds{};
+    // Row hits: over the icon or the name itself, not the rest of the row
+    // (dropping on a program opens with it only there).
+    bool on_name = false;
 };
 
 class MainRenderer;

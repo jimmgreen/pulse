@@ -17,7 +17,7 @@ constexpr int kTabLines = 3;
 
 // Motion tokens (pulse_motion_v2).
 constexpr motion::SpringSpec kRingSpring{700.0f, 40.0f};  // a little overshoot as it lands
-constexpr float kPanelFrom = 0.94f;
+constexpr float kPanelFrom = 0.985f;
 constexpr float kFadeInMs = 120.0f;
 constexpr float kCloseMs = 110.0f;
 constexpr float kCardRise = 10.0f;  // DIP
@@ -29,7 +29,6 @@ void CALLBACK SwitcherFrameTick(HWND hwnd, UINT, UINT_PTR id, DWORD) {
     InvalidateRect(hwnd, nullptr, FALSE);
 }
 
-uint64_t CardDelayMs(size_t i) { return 20 + 9 * static_cast<uint64_t>(std::min<size_t>(i, 8)); }
 
 template <class T> void Release(T*& p) {
     if (p) { p->Release(); p = nullptr; }
@@ -224,12 +223,9 @@ void WindowSwitcherView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, ID
         panel_scale = 1.0f - 0.03f * k;
         moving = true;
     } else if (animations_) {
-        fade = std::min(1.0f, open_ms / kFadeInMs);
-        panel_scale = kPanelFrom + (1.0f - kPanelFrom) * motion::SpringProgress(motion::spring::Pop, open_ms);
-        const float settle = static_cast<float>(motion::SpringSettleMs(motion::spring::Pop) +
-                                                CardDelayMs(data_.cards.size()) +
-                                                motion::SpringSettleMs(motion::spring::Snappy));
-        if (open_ms < settle) moving = true;
+        const float progress = std::min(1.0f, open_ms / kFadeInMs);
+        panel_scale = kPanelFrom + (1.0f - kPanelFrom) * motion::EaseOutCubic(progress);
+        if (open_ms < kFadeInMs) moving = true;
     }
     // Asks for the next frame on every return below while something moves.
     struct FrameRequest {
@@ -274,12 +270,8 @@ void WindowSwitcherView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, ID
 
     const float cr = 10.0f * s;
     const int count = static_cast<int>(data_.cards.size());
-    // Where card i is this frame: rising in after its stagger delay.
-    const auto rise = [&](size_t i) {
-        if (closing_ || !animations_) return 1.0f;
-        const float t = open_ms - static_cast<float>(CardDelayMs(i));
-        return t <= 0.0f ? 0.0f : motion::SpringProgress(motion::spring::Snappy, t);
-    };
+    // Cards are readable immediately; only the container and selection move.
+    const auto rise = [](size_t) { return 1.0f; };
     const auto shifted = [&](D2D1_RECT_F r, float k) {
         const float dy = (1.0f - k) * kCardRise * s;
         r.top += dy;

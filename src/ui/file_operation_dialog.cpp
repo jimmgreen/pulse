@@ -2982,6 +2982,9 @@ bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
 
 void FileOperationWindow::Destroy() {
     flight_.Stop();
+    closing_ = opening_ = false;
+    success_dismiss_at_ = 0;
+    success_hiding_task_.reset();
     pending_locate_task_ = 0;
     if (hwnd_) { HideComposedDialog(hwnd_); DestroyWindow(hwnd_); }
     hwnd_ = nullptr;
@@ -3217,6 +3220,13 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
         board_scroll_ = 0;
     }
     if (had_board != board_.has_value()) ResizeForDetails(false);
+    // Cancel the completed card's flight before its old tick can hide incoming live progress.
+    // Manual hides have no success owner and must not be reversed by a status update.
+    const bool resume_success = status.active && closing_ && success_hiding_task_.has_value();
+    if (resume_success) {
+        pending_locate_task_ = 0;
+        EndZoom();
+    }
     TickZoom();
     const bool new_task = status.task_id != status_.task_id;
     const ULONGLONG now = GetTickCount64();
@@ -3245,7 +3255,8 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     const bool layout_changed = TaskLayoutReduction(status) != TaskLayoutReduction(status_);
     const bool authorization_changed = (status.authorization != ops::AuthorizationState::None) !=
                                        (status_.authorization != ops::AuthorizationState::None);
-    const ops::OpStatus presented = ops::PresentOperationStatus(status);
+    ops::OpStatus presented = ops::PresentOperationStatus(status);
+    if (TransferHasAdvisoryEta(presented)) presented.eta_detail.stage = TransferEtaStage(presented, now);
     const bool visual_changed = new_task || layout_changed || authorization_changed || had_board != board_.has_value() ||
         presented.active != status_.active || presented.phase != status_.phase ||
         presented.pause_requested != status_.pause_requested ||
@@ -3261,6 +3272,13 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
         presented.total_bytes != status_.total_bytes ||
         presented.failed_items != status_.failed_items ||
         presented.eta_seconds != status_.eta_seconds ||
+        presented.eta_detail.stage != status_.eta_detail.stage ||
+        presented.eta_detail.source != status_.eta_detail.source ||
+        presented.eta_detail.task_id != status_.eta_detail.task_id ||
+        presented.eta_detail.processed_items != status_.eta_detail.processed_items ||
+        presented.eta_detail.lower_seconds != status_.eta_detail.lower_seconds ||
+        presented.eta_detail.upper_seconds != status_.eta_detail.upper_seconds ||
+        presented.eta_detail.has_processed_items != status_.eta_detail.has_processed_items ||
         presented.current_item_token != status_.current_item_token ||
         static_cast<int64_t>(presented.bytes_per_second) != static_cast<int64_t>(status_.bytes_per_second) ||
         static_cast<int64_t>(presented.items_per_second) != static_cast<int64_t>(status_.items_per_second) ||
@@ -3298,13 +3316,7 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
         SyncGraph();
         graph_.Complete();
     }
-    // Keep the completed result visible briefly before returning to the status pill.
-    // A card shrinking into the pill counts as hidden (Shown).
-    if (succeeded && !was_succeeded && auto_close_ && Shown()) {
-        success_dismiss_at_ = now + kSuccessDismissMs;
-    } else if (!succeeded || !auto_close_) {
-        success_dismiss_at_ = 0;
-    }
+    SyncSuccessDismiss(now);
     if (hwnd_ && TickSuccessDismiss(now)) return;
     if (succeeded && !was_succeeded && auto_close_ && locate_after_ &&
         hwnd_ && !Shown() && callbacks_.locate_results) {
@@ -3314,6 +3326,10 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     if (!hwnd_) return;
     if (authorization_changed || new_task || was_active != status_.active || layout_changed)
         ResizeForDetails(authorization_changed);
+    if (resume_success) {
+        flight_activate_ = false;
+        FinishShowFromStatus();
+    }
     const bool armed_dismiss = previous_dismiss_at == 0 && success_dismiss_at_ != 0;
     if (visual_changed || armed_dismiss)
         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -3410,10 +3426,11 @@ void FileOperationWindow::DropBackdropForZoom(bool suppress_shadow) {
 
 void FileOperationWindow::EndZoom() {
     flight_.Stop();
-    if (!hwnd_) return;
-    KillTimer(hwnd_, kZoomTimer);
     closing_ = false;
     opening_ = false;
+    success_hiding_task_.reset();
+    if (!hwnd_) return;
+    KillTimer(hwnd_, kZoomTimer);
     compositor_.ClearZoom();
     const BOOL transitions = FALSE;
     DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions, sizeof(transitions));
@@ -3430,13 +3447,15 @@ void FileOperationWindow::EndZoom() {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
-void FileOperationWindow::HideToStatus() {
+void FileOperationWindow::HideToStatus(bool after_success) {
+    if (!after_success) success_hiding_task_.reset();
     if (!hwnd_ || closing_) return;
     const bool was_opening = opening_;
     const RECT initial = flight_.Bounds();
     const float initial_alpha = flight_.Opacity();
     const bool had_flight = flight_.Active();
     if (opening_) EndZoom();
+    success_hiding_task_ = after_success ? std::optional<uint64_t>(status_.task_id) : std::nullopt;
     if ((!IsWindowVisible(hwnd_) && !was_opening) || IsIconic(hwnd_) || !FlightAnimationsEnabled()) {
         closing_ = was_opening;
         FinishHideToStatus();
@@ -3470,6 +3489,17 @@ void FileOperationWindow::TickZoom() {
 
 void FileOperationWindow::FinishHideToStatus() {
     if (!hwnd_) return;
+    if (success_hiding_task_ && (*success_hiding_task_ != status_.task_id ||
+        !TransferCanAutoClose(status_) || !other_tasks_.empty())) {
+        pending_locate_task_ = 0;
+        if (!TransferCanAutoClose(status_) || !other_tasks_.empty()) {
+            flight_activate_ = false;
+            FinishShowFromStatus();
+        } else {
+            EndZoom();
+        }
+        return;
+    }
     const bool was_shown = closing_ || opening_ || IsWindowVisible(hwnd_) != FALSE;
     KillTimer(hwnd_, kRenderTimer);
     render_timer_ms_ = 0;
@@ -3490,22 +3520,41 @@ void FileOperationWindow::FinishShowFromStatus() {
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER |
                  (flight_activate_ ? 0 : SWP_NOACTIVATE) | SWP_SHOWWINDOW);
-    if (auto_close_ && success_dismiss_at_ == 0 && TransferCanAutoClose(status_))
-        success_dismiss_at_ = GetTickCount64() + kSuccessDismissMs;
+    SyncSuccessDismiss(GetTickCount64());
     SyncRenderTimer();
     if (flight_activate_) SetForegroundWindow(hwnd_);
+}
+
+void FileOperationWindow::SyncSuccessDismiss(ULONGLONG now) {
+    if (!auto_close_ || !TransferCanAutoClose(status_) || !other_tasks_.empty() || !Shown()) {
+        success_dismiss_at_ = 0;
+        return;
+    }
+    // A success hold belongs to one task, and only starts once all other work has ended.
+    if (success_dismiss_at_ == 0 || success_dismiss_task_id_ != status_.task_id) {
+        success_dismiss_task_id_ = status_.task_id;
+        success_dismiss_at_ = now + kSuccessDismissMs;
+    }
 }
 
 bool FileOperationWindow::TickSuccessDismiss(ULONGLONG now) {
     if (closing_ || !Shown() || success_dismiss_at_ == 0 || !auto_close_ || now < success_dismiss_at_)
         return false;
+    const uint64_t task = success_dismiss_task_id_;
     success_dismiss_at_ = 0;
-    diagnostics::runtime::Event("operation_ui_success_close", {{"task", status_.task_id},
+    if (task != status_.task_id || !TransferCanAutoClose(status_) || !other_tasks_.empty())
+        return false;
+    const HWND window = hwnd_;
+    diagnostics::runtime::Event("operation_ui_success_close", {{"task", task},
         {"type", static_cast<uint64_t>(status_.type)}});
-    if (callbacks_.dismiss_task) callbacks_.dismiss_task(status_.task_id);
+    if (callbacks_.dismiss_task) callbacks_.dismiss_task(task);
     else if (callbacks_.dismiss) callbacks_.dismiss();
-    pending_locate_task_ = locate_after_ ? status_.task_id : 0;
-    HideToStatus();
+    // The callback can replace the task, hide the card, or tear down its window.
+    if (!hwnd_ || hwnd_ != window || status_.task_id != task || !Shown() || !auto_close_ ||
+        !TransferCanAutoClose(status_) || !other_tasks_.empty()) return true;
+    success_dismiss_at_ = 0;
+    pending_locate_task_ = locate_after_ ? task : 0;
+    HideToStatus(true);
     return true;
 }
 
@@ -3573,17 +3622,15 @@ void FileOperationWindow::ShowMoreMenu() {
 
 void FileOperationWindow::SetAutoClose(bool on) {
     auto_close_ = on && !keep_open_requested_;
-    if (!auto_close_) {
-        success_dismiss_at_ = 0;
-    } else if (success_dismiss_at_ == 0 && TransferCanAutoClose(status_) && Shown()) {
-        success_dismiss_at_ = GetTickCount64() + kSuccessDismissMs;
-    }
+    SyncSuccessDismiss(GetTickCount64());
     SyncRenderTimer();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void FileOperationWindow::Hide() {
     pending_locate_task_ = 0;
+    success_dismiss_at_ = 0;
+    success_hiding_task_.reset();
     if (!hwnd_) return;
     KillTimer(hwnd_, kRenderTimer);
     render_timer_ms_ = 0;
@@ -3595,6 +3642,11 @@ void FileOperationWindow::Hide() {
 // A card shrinking into the status pill already counts as gone.
 bool FileOperationWindow::IsVisible() const {
     return Shown();
+}
+
+bool FileOperationWindow::CanFollowNextTask() const {
+    return Shown() || (hwnd_ && closing_ && success_hiding_task_ &&
+        *success_hiding_task_ == status_.task_id && TransferCanAutoClose(status_));
 }
 
 void FileOperationWindow::ApplyWindowTheme() {
@@ -3612,6 +3664,13 @@ void FileOperationWindow::SetOtherTasks(std::vector<ops::OpStatus> tasks) {
     // The strip grows the card downwards: the body is laid out from the top
     // and the footer from the bottom, so neither moves.
     if (TaskStripDip() != before) ResizeForDetails(false);
+    if (closing_ && success_hiding_task_ && !other_tasks_.empty()) {
+        pending_locate_task_ = 0;
+        flight_activate_ = false;
+        FinishShowFromStatus();
+    }
+    SyncSuccessDismiss(GetTickCount64());
+    SyncRenderTimer();
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
@@ -3964,7 +4023,7 @@ void FileOperationWindow::Render() {
         title = l10n::Get(deleting ? l10n::StringId::OpDeletePaused : restoring ? l10n::StringId::OpRestorePaused
             : moving ? l10n::StringId::OpMovePaused : l10n::StringId::OpCopyPaused);
     } else if (!status_.enumeration_complete) {
-        title = l10n::Get(l10n::StringId::OpCopying);
+        title = l10n::Get(deleting ? l10n::StringId::OpDeleting : l10n::StringId::OpCopying);
     } else if (scanning) {
         title = l10n::Get(l10n::StringId::OpPreparingList);
     } else {
@@ -4094,20 +4153,24 @@ void FileOperationWindow::Render() {
     const uint64_t elapsed_ms = task_start_tick_ != 0 && end_tick > task_start_tick_
         ? end_tick - task_start_tick_ : 0;
     const double elapsed_s = static_cast<double>(elapsed_ms) / 1000.0;
+    const bool child_work = TransferHasChildWork(status_);
     const double done_amount = byte_basis ? static_cast<double>(status_.transferred_bytes)
-                                          : static_cast<double>(status_.completed_items);
+        : static_cast<double>(child_work ? status_.eta_detail.processed_items : status_.completed_items);
     const double average = elapsed_s >= 0.25 ? done_amount / elapsed_s : 0.0;
 
-    // The engine's first estimates come from a cold start (the file cache, a
-    // slow first file) and can read hours for a copy of seconds. Hold 正在估算
-    // for the first 3 s, and while the estimate is far beyond what the
-    // current rate would take.
+    // Keep the initial settle period. A workload ETA includes per-item work,
+    // so its valid countdown can exceed remaining-bytes / MB/s for tiny files.
+    // External/other backends retain the byte-rate sanity check.
     const uint64_t left_bytes = status_.total_bytes > status_.transferred_bytes
         ? status_.total_bytes - status_.transferred_bytes : 0;
     const double rate_eta = byte_basis && status_.bytes_per_second > 0.0
         ? static_cast<double>(left_bytes) / status_.bytes_per_second : 0.0;
+    const bool workload_eta = !status_.external && (status_.type == ops::OpType::Copy ||
+        status_.type == ops::OpType::Move || status_.type == ops::OpType::RealDelete ||
+        status_.type == ops::OpType::RecycleDelete);
     const bool eta_unsettled = elapsed_ms < 3000 ||
-        (rate_eta > 0.0 && static_cast<double>(status_.eta_seconds) > rate_eta * 4.0 + 30.0);
+        (!workload_eta && rate_eta > 0.0 && static_cast<double>(status_.eta_seconds) > rate_eta * 4.0 + 30.0);
+    const auto advisory_eta = TransferAdvisoryEtaText(status_, now, [](uint64_t seconds) { return FormatDuration(seconds); });
     const std::wstring time_text = status_.external && status_.external_outcome == ops::ExternalOutcome::Cancelled ? l10n::Get(l10n::StringId::Canceled)
         : status_.external && status_.external_outcome == ops::ExternalOutcome::Partial ? l10n::Get(l10n::StringId::OpPartialBadge)
         : partial ? std::wstring(L"\x2014")
@@ -4117,6 +4180,7 @@ void FileOperationWindow::Render() {
         : waiting ? l10n::Get(l10n::StringId::OpWaiting)
         : emptying ? l10n::Get(l10n::StringId::OpEmptying)
         : status_.phase == ops::OpPhase::Verifying ? l10n::Get(l10n::StringId::Verifying)
+        : advisory_eta ? *advisory_eta
         : status_.speed_basis == ops::OpSpeedBasis::None ? l10n::Get(l10n::StringId::OpNoEstimate)
         : status_.eta_seconds == 0 || eta_unsettled ? l10n::Get(l10n::StringId::OpEstimating)
         : l10n::Get(l10n::StringId::OpApprox) + FormatDuration(status_.eta_seconds);
@@ -4129,7 +4193,10 @@ void FileOperationWindow::Render() {
                 + pulse::format::ByteSize(left_bytes) + L")";
         else remain_text = pulse::format::GroupedInt(remain_items) + l10n::Get(l10n::StringId::OpCountSuffix);
     }
-    const std::wstring remain_line = remain_text.empty() || (failed && remain_items == 0) ? std::wstring()
+    const std::wstring remain_line = child_work
+        ? l10n::Get(l10n::StringId::OpProcessedItems) + L" " + pulse::format::GroupedInt(status_.eta_detail.processed_items) +
+            l10n::Get(l10n::StringId::OpCountSuffix)
+        : remain_text.empty() || (failed && remain_items == 0) ? std::wstring()
         : l10n::Get(status_.enumeration_complete ? l10n::StringId::OpRemainingShort : l10n::StringId::OpDiscoveredPending) + L" " + remain_text;
     const std::wstring dot = L"  \x00B7  ";
     const std::wstring took = l10n::Get(l10n::StringId::OpTookLead) + FormatElapsed(elapsed_ms / 1000);
@@ -4267,7 +4334,9 @@ void FileOperationWindow::Render() {
                 l10n::Get(failed ? l10n::StringId::OpIncomplete : l10n::StringId::OpCompleted), theme.text_secondary);
         } else if (indeterminate) {
             DrawEllipsizedText(compositor_, value_format_.get(), Rect(s, kPadX, hero_y + 10.0f, content_w * 0.55f, 20.0f),
-                               l10n::Get(status_.external ? l10n::StringId::OpPreparing : !status_.enumeration_complete ? l10n::StringId::OpScanningAndCopying :
+                               l10n::Get(status_.external ? l10n::StringId::OpPreparing : !status_.enumeration_complete && deleting
+                                   ? (paused ? l10n::StringId::OpPaused : l10n::StringId::OpDeleting)
+                                   : !status_.enumeration_complete ? l10n::StringId::OpScanningAndCopying :
                                    (scanning ? l10n::StringId::OpScanning : l10n::StringId::OpPreparing)),
                                theme.text_secondary);
             if (status_.scanned_items > 0) {
@@ -4413,7 +4482,7 @@ void FileOperationWindow::Render() {
                 item_line = l10n::Get(l10n::StringId::OpItemPrefix) +
                 (status_.current_item.empty() ? src : status_.current_item);
             std::wstring counter;
-            if (status_.total_items > 0 && !scanning)
+            if (status_.total_items > 0 && !scanning && !child_work)
                 counter = pulse::format::GroupedInt(status_.completed_items) + L" / " +
                           pulse::format::GroupedInt(status_.total_items);
             const float counter_w = counter.empty() ? 0.0f
@@ -4425,7 +4494,8 @@ void FileOperationWindow::Render() {
                 painter_.DrawText(counter, Rect(s, dip_w - kPadX - counter_w, rows_top, counter_w, row_h),
                                   label_format_.get(), text3, fluent::HorizontalAlignment::Right);
             std::wstring second;
-            if (!status_.enumeration_complete) {
+            if (child_work) second = remain_line;
+            else if (!status_.enumeration_complete) {
                 second = l10n::Get(l10n::StringId::OpCopiedPrefix) +
                     pulse::format::GroupedInt(status_.completed_items) + l10n::Get(l10n::StringId::OpCountSuffix);
                 if (byte_basis) second += dot + pulse::format::ByteSize(status_.transferred_bytes);
@@ -4536,7 +4606,7 @@ void FileOperationWindow::Render() {
             l10n::Get(l10n::StringId::OpAverageSpeed), l10n::Get(l10n::StringId::OpPeakSpeed),
             l10n::Get(l10n::StringId::OpElapsed), l10n::Get(l10n::StringId::OpRemainingTime) };
         const std::wstring detail_values[6] = {
-            status_.total_items > 0
+            child_work ? pulse::format::GroupedInt(status_.eta_detail.processed_items) : status_.total_items > 0
                 ? pulse::format::GroupedInt(status_.completed_items) + L" / " + pulse::format::GroupedInt(status_.total_items)
                 : pulse::format::GroupedInt(status_.completed_items),
             byte_basis && status_.total_bytes > 0

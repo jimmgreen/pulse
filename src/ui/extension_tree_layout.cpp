@@ -68,6 +68,39 @@ ExtensionTreeLayout::Flow ExtensionTreeLayout::ChildFlow(const UiNode &node, flo
                                                          const ExtensionLayoutCallbacks &callbacks) const {
     Flow flow;
     const float gap = node.gap * scale_;
+    // A horizontal stack of badges/tags only: a wrapping line, each at its label width.
+    if (node.type == UiNodeType::Stack && node.orientation == "horizontal" && callbacks.chip_width &&
+        !node.children.empty()) {
+        bool chips = true, any = false;
+        for (size_t index = 0; index < node.children.size() && chips; ++index) {
+            const auto &child = node.children[index];
+            if (!ChildVisible(node, index, callbacks)) continue;
+            any = true;
+            chips = child.type == UiNodeType::Badge && !child.min_width &&
+                    !child.max_width && !child.flex && callbacks.chip_width(child) > 0;
+        }
+        if (chips && any) {
+            flow.widths.assign(node.children.size(), 0);
+            flow.row_end.assign(node.children.size(), 0);
+            flow.columns = static_cast<int>(node.children.size());
+            float x = 0;
+            size_t last = node.children.size();
+            for (size_t index = 0; index < node.children.size(); ++index) {
+                if (!ChildVisible(node, index, callbacks)) continue;
+                const float w = std::min(width, callbacks.chip_width(node.children[index]));
+                if (last != node.children.size() && x + gap + w > width) {
+                    flow.row_end[last] = 1;
+                    x = 0;
+                    last = node.children.size();
+                }
+                x += (last != node.children.size() ? gap : 0) + w;
+                flow.widths[index] = w;
+                last = index;
+            }
+            if (last != node.children.size()) flow.row_end[last] = 1;
+            return flow;
+        }
+    }
     const auto intrinsic = [&](const UiNode &child) {
         return !child.min_width && !child.max_width && !child.flex && callbacks.intrinsic_width
                    ? callbacks.intrinsic_width(child)
@@ -159,7 +192,7 @@ float ExtensionTreeLayout::Measure(const UiNode &node, float width, const Extens
             for (size_t i = 0; i < node.children.size(); ++i) {
                 if (!ChildVisible(node, i, callbacks)) continue;
                 r = std::max(r, Measure(node.children[i], flow.widths[i], callbacks));
-                if (++col == flow.columns) {
+                if (flow.EndRow(i, ++col)) {
                     stacked_h += r + row_gap;
                     r = 0.0f;
                     col = 0;
@@ -185,7 +218,7 @@ float ExtensionTreeLayout::Measure(const UiNode &node, float width, const Extens
         if (!ChildVisible(node, index, callbacks))
             continue;
         row = std::max(row, Measure(node.children[index], flow.widths[index], callbacks));
-        if (++column == flow.columns) {
+        if (flow.EndRow(index, ++column)) {
             used += row + gap;
             row = 0;
             column = 0;
@@ -338,7 +371,7 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
                 if (!child_visible) continue;
                 row = std::max(row, ch);
                 left += flow.widths[i] + gap;
-                if (++column == flow.columns) {
+                if (flow.EndRow(i, ++column)) {
                     used += row + gap;
                     row = 0.0f;
                     column = 0;
@@ -446,7 +479,7 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
                 continue;
             row = std::max(row, height);
             left += flow.widths[index] + gap;
-            if (++column == flow.columns) {
+            if (flow.EndRow(index, ++column)) {
                 used += row + gap;
                 row = 0;
                 column = 0;

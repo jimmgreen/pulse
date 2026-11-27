@@ -16,21 +16,10 @@ namespace {
 
 constexpr wchar_t kConfirmClass[] = L"PulseConfirmWindow";
 
-// Motion (animation phase 9b, pulse_motion_v2): the icon pops in (and a
-// warning glyph wobbles once), the text, item rows and buttons rise in one
-// after another, and the keyboard focus ring springs between the buttons.
-// Frames come from a timer armed only while something moves.
+// Confirmation content is readable in the first frame. Only keyboard focus
+// transitions animate; idle dialogs do not redraw just to reveal their controls.
 constexpr UINT_PTR kConfirmFrameTimer = 0x43464D54;  // 'CFMT'
-constexpr float kBodyDelayMs = 30.0f;
-constexpr float kRowsDelayMs = 50.0f;
-constexpr float kFooterDelayMs = 80.0f;
-constexpr float kWobbleDelayMs = 90.0f;
-constexpr float kWobbleMs = 460.0f;
 constexpr motion::SpringSpec kFocusSpring{700.0f, 44.0f};
-
-float After(float t_ms, float delay_ms, motion::SpringSpec spec) {
-    return t_ms <= delay_ms ? 0.0f : motion::SpringProgress(spec, t_ms - delay_ms);
-}
 
 bool CopyTextToClipboard(HWND hwnd, const std::wstring& text) {
     if (!OpenClipboard(hwnd)) return false;
@@ -92,7 +81,11 @@ public:
                           placed.bottom - placed.top);
         const bool owner_enabled = owner_ && IsWindowEnabled(owner_);
         if (owner_enabled) EnableWindow(owner_, FALSE);
+        // Prepare text/layout/glyph drawing while hidden, rather than exposing
+        // an empty composition surface and waiting for a low-priority paint.
+        Render();
         ShowWindow(hwnd_, SW_SHOW);
+        UpdateWindow(hwnd_);
         SetForegroundWindow(hwnd_);
         if (spec_.on_open) spec_.on_open(hwnd_);
 
@@ -229,30 +222,8 @@ private:
     // Fills the motion fields of visual_ for this frame; true while moving.
     bool StepMotion() {
         const uint64_t now = motion::NowMs();
-        if (!opened_at_) opened_at_ = now;  // the first frame starts it
         ++frame_;
         bool moving = false;
-        if (animations_) {
-            const float t = static_cast<float>(now - opened_at_);
-            const motion::SpringSpec rise = motion::spring::Snappy;
-            visual_.icon_scale = 0.6f + 0.4f * motion::SpringProgress(motion::spring::Pop, t);
-            visual_.body_in = After(t, kBodyDelayMs, rise);
-            for (size_t i = 0; i < kConfirmMaxItemRows; ++i)
-                visual_.rows_in[i] = After(t, kRowsDelayMs + 9.0f * static_cast<float>(i), rise);
-            visual_.footer_in = After(t, kFooterDelayMs, rise);
-            const ConfirmTone tone = ResolveConfirmTone(spec_);
-            const bool wobble = tone == ConfirmTone::Danger || tone == ConfirmTone::Warning;
-            const float w = t - kWobbleDelayMs;
-            visual_.icon_turn = wobble && w > 0.0f && w < kWobbleMs
-                ? 10.0f * std::sin(w * 0.0345f) * std::exp(-w / 120.0f) : 0.0f;
-            const float settle = kFooterDelayMs + static_cast<float>(motion::SpringSettleMs(rise));
-            if (t < std::max(settle, kWobbleDelayMs + kWobbleMs)) moving = true;
-            else {
-                visual_.icon_scale = visual_.body_in = visual_.footer_in = 1.0f;
-                for (float& k : visual_.rows_in) k = 1.0f;
-                visual_.icon_turn = 0.0f;
-            }
-        }
         visual_.focus_glide = animations_;
         if (visual_.show_focus) {
             visual_.focus_rect = focus_motion_.Update(1, visual_.focus, ButtonRect(visual_.focus),
@@ -427,7 +398,6 @@ private:
     bool sizing_ = false;
     bool armed_ = false;   // confirm_again_text: the first press is in
     bool animations_ = true;
-    uint64_t opened_at_ = 0;
     uint64_t frame_ = 0;
     motion::SpringRectMotion focus_motion_;
 };

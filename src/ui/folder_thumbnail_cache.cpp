@@ -31,11 +31,26 @@ FolderThumbnailCache::FolderThumbnailCache() : cache_(32ull * 1024 * 1024, 256) 
     cache_.folder_revisit_->preserve_bitmap_on_replace_ = true;
     cache_.folder_revisit_->ShareUploadBudget(cache_);
 }
-void FolderThumbnailCache::Reset() { visible_.clear(); cache_.Reset(); }
+void FolderThumbnailCache::Reset() {
+    visible_.clear();
+    owner_visible_.clear();
+    frame_owner_ = nullptr;
+    visibility_changed_ = false;
+    cache_.Reset();
+}
+void FolderThumbnailCache::RemoveNotifyWindow(HWND hwnd) {
+    cache_.RemoveNotifyWindow(hwnd);
+    std::lock_guard lock(cache_.mutex_);
+    owner_visible_.erase(hwnd);
+    RetireInvisibleLocked();
+}
 void FolderThumbnailCache::TrimForBackground(size_t max_bytes) {
     {
         std::lock_guard lock(cache_.mutex_);
         visible_.clear();
+        owner_visible_.clear();
+        frame_owner_ = nullptr;
+        visibility_changed_ = false;
     }
     cache_.TrimToBytes(max_bytes);
 }
@@ -92,13 +107,26 @@ void FolderThumbnailCache::Refresh() {
         visible.force = true; visible.attempted = false; visible.blocked = false;
     }
 }
-void FolderThumbnailCache::BeginFrame() {
+void FolderThumbnailCache::BeginFrame(HWND owner, bool full) {
     cache_.BeginFrame();
     visibility_changed_ = false;
-    for (auto& [key, visible] : visible_) visible.seen = false;
+    frame_owner_ = owner;
+    // Damage-only draws do not enumerate the whole viewport. Other windows
+    // also retain their interest until their own full frame or detach.
+    if (full) owner_visible_[owner].clear();
 }
 void FolderThumbnailCache::EndFrame() {
     std::lock_guard lock(cache_.mutex_);
+    RetireInvisibleLocked();
+}
+void FolderThumbnailCache::RetireInvisibleLocked() {
+    for (auto& [key, visible] : visible_) visible.seen = false;
+    for (const auto& [owner, keys] : owner_visible_) {
+        for (const auto& key : keys) {
+            if (const auto found = visible_.find(key); found != visible_.end())
+                found->second.seen = true;
+        }
+    }
     for (auto it = visible_.begin(); it != visible_.end();) {
         if (!it->second.seen) {
             visibility_changed_ = true;
@@ -142,11 +170,17 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
     const auto now = GetTickCount64();
     const std::wstring identity = path + (single ? L"\nfolder-single" : L"\nfolder-stack");
     const std::wstring key = cache_.Key(identity, pixel_size, modified, size);
+    owner_visible_[frame_owner_].insert(key);
     auto [visible, inserted] = visible_.try_emplace(key, Visible{now, generation, true});
     visible->second.seen = true;
     if (inserted) visibility_changed_ = true;
     std::unique_lock lock(cache_.mutex_);
-    if (!inserted && visible->second.generation != generation) {
+    const bool shared = std::any_of(owner_visible_.begin(), owner_visible_.end(),
+        [&](const auto& owner) { return owner.first != frame_owner_ && owner.second.contains(key); });
+    // Window-local generation numbers must not cancel another window's
+    // compatible request for the same content-addressed thumbnail key.
+    if (!inserted && visible->second.generation != generation &&
+        visible->second.generation_owner == frame_owner_ && !shared) {
         visibility_changed_ = true;
         visible->second = {now, generation, true, visible->second.force};
         cache_.pending_.erase(key); cache_.folder_requests_.erase(key);
@@ -155,6 +189,8 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
             if (it->key == key) it = cache_.queue_.erase(it); else ++it;
         }
     }
+    visible->second.generation = generation;
+    visible->second.generation_owner = frame_owner_;
     visible->second.estimate = static_cast<size_t>(pixel_size) * pixel_size * 8;
     auto found = cache_.items_.find(key);
     if (found != cache_.items_.end() && found->second.folder_refresh_complete) visible->second.force = false;

@@ -1,5 +1,6 @@
 #pragma once
 #include "../common/picker_places_snapshot.h"
+#include "../common/picker_tray_consume.h"
 #include <future>
 #include <functional>
 
@@ -32,6 +33,11 @@ inline bool RunPickerFavoriteRequest(HWND owner, picker_places::Snapshot snapsho
     std::function<bool(const std::vector<picker_places::StarredItem>&, const std::wstring&)> mutate = {}) {
     return RunPickerPlacesRequest(owner, [snapshot = std::move(snapshot), items = std::move(items), group = std::move(group), mutate = std::move(mutate)] {
         return mutate ? mutate(items, group) : picker_places::RequestAddStarredBatch(snapshot, items, group);
+    });
+}
+inline bool RunPickerStageTrayRequest(HWND owner, picker_places::Snapshot snapshot, std::vector<std::wstring> paths) {
+    return RunPickerPlacesRequest(owner, [snapshot = std::move(snapshot), paths = std::move(paths)] {
+        return picker_places::RequestStageTray(snapshot, paths);
     });
 }
 } // namespace pulse::ui

@@ -61,8 +61,46 @@ PickerOperationResult PickerOperationSession::Undo(HWND owner, bool dark, D2D1_C
     return Execute(owner, [&] { manager_.Undo(); return true; }, dark, accent);
 }
 
+PickerOperationResult PickerOperationSession::RunBackground(HWND owner,
+    std::function<std::wstring(const std::atomic_bool&)> worker, bool dark, D2D1_COLOR_F accent) {
+    std::future<std::wstring> pending;
+    std::wstring error;
+    bool finished = false;
+    bool launched = false;
+    ops::OpStatus status;
+    status.active = true;
+    status.type = ops::OpType::Copy;
+    status.phase = ops::OpPhase::Running;
+    status.can_pause = false;
+    status.summary = l10n::Get(l10n::StringId::Paste);
+    status.percent = -1;
+    auto result = Execute(owner, [&] {
+        if (pending.valid()) {
+            try { error = pending.get(); }
+            catch (...) { error = l10n::Get(l10n::StringId::OpFailed); }
+        }
+        finished = true;
+        return true;
+    }, dark, accent, [&] {
+        if (!launched) {
+            launched = true;
+            try {
+                pending = std::async(std::launch::async,
+                    [this, worker = std::move(worker)] { return worker(cancelling_); });
+            } catch (...) {
+                error = l10n::Get(l10n::StringId::OpFailed);
+                return true;
+            }
+        }
+        return !pending.valid() || pending.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+    }, &status);
+    if (finished) result.error = std::move(error);
+    return result;
+}
+
 PickerOperationResult PickerOperationSession::Execute(HWND owner, const std::function<bool()>& submit,
-                                                     bool dark, D2D1_COLOR_F accent, const std::function<bool()>& ready) {
+                                                     bool dark, D2D1_COLOR_F accent, const std::function<bool()>& ready,
+                                                     const ops::OpStatus* background_status) {
     PickerOperationResult result;
     if (executing_) return result;
     executing_ = true;
@@ -101,7 +139,8 @@ PickerOperationResult PickerOperationSession::Execute(HWND owner, const std::fun
             preparing = false;
             if (!submit()) { result.error = l10n::Get(l10n::StringId::Canceled); break; }
         }
-        const auto status = manager.Status();
+        auto status = preparing && background_status ? *background_status : manager.Status();
+        if (preparing && background_status && cancelling_) status.phase = ops::OpPhase::Cancelling;
         progress.Update(status);
         if (!preparing && !manager.HasPendingOperations()) {
             result.error = manager.Status().last_error;

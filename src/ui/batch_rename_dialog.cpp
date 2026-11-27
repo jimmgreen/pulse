@@ -836,7 +836,7 @@ private:
         p.opts = opts_;
         if (r.has_order) p.opts.order = r.order;
         p.opts.daily = r.daily;
-        ApplyPreset(p, true, 260);   // the cards come in one by one, as in the design
+        ApplyPreset(p, false);   // The generated rules are immediately readable and editable.
         preset_name_.clear();
         preset_key_.clear();
         ai_note_ = AiNote::Info;
@@ -3657,7 +3657,9 @@ private:
             return 0;
         case WM_TIMER:
             if (options_.review_valid && !options_.review_valid()) { Complete(false); return 0; }
-            if (wparam == kAnimTimer) InvalidateRect(hwnd_, nullptr, FALSE);
+            if (wparam == kAnimTimer && (anim_active_ ||
+                (options_.proposed_names && options_.on_review_ready && review_frames_ < 2)))
+                InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_MOUSEWHEEL: {
             POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};

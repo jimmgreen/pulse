@@ -145,6 +145,8 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         }
         l.global_search_apps_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
         y += 68*scale;
+        l.global_search_apps_first_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
+        y += 68*scale;
         l.search_pinyin_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
         y += 68*scale;
         l.jump_history_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
@@ -561,15 +563,16 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                 const int base = static_cast<int>(PackAction::NativeTabBase);
                 titles[count] = l10n::Get(I::SzTabSettings);
                 actions[count++] = base + 0;
-                const int custom_base = static_cast<int>(PackAction::NativeCustomTabBase);
-                for (size_t k = 0; k < h.extra_tabs.size() && count < SettingsLayout::DetailHeader::kMaxTabs; ++k) {
-                    if (count + (h.has_menu_tab ? 1 : 0) + (h.has_about_tab ? 2 : 0) >= SettingsLayout::DetailHeader::kMaxTabs) break;
-                    titles[count] = h.extra_tabs[k];
-                    actions[count++] = custom_base + static_cast<int>(k);
-                }
+                // 右键菜单 right after 常用设置: the plugin's own extra tabs (支持格式, ...) follow it.
                 if (h.has_menu_tab && count < SettingsLayout::DetailHeader::kMaxTabs) {
                     titles[count] = l10n::Get(I::SzTabMenu);
                     actions[count++] = base + 1;
+                }
+                const int custom_base = static_cast<int>(PackAction::NativeCustomTabBase);
+                for (size_t k = 0; k < h.extra_tabs.size() && count < SettingsLayout::DetailHeader::kMaxTabs; ++k) {
+                    if (count + (h.has_about_tab ? 2 : 0) >= SettingsLayout::DetailHeader::kMaxTabs) break;
+                    titles[count] = h.extra_tabs[k];
+                    actions[count++] = custom_base + static_cast<int>(k);
                 }
                 if (h.has_about_tab) {
                     if (count < SettingsLayout::DetailHeader::kMaxTabs) {

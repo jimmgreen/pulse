@@ -206,10 +206,23 @@ SaveAccessResult ValidateLocalSaveAccessV1(const SaveConfirmationSnapshot& snaps
             if (!primary) primary = Cancelled(cancelled);
             result.primary_error = primary;
             result.stage = SaveAccessStage::CleanupQuery;
-            Handle check(CreateFileW(native.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+            Handle check;
+            // Metadata-only readers may briefly retain a delete-on-close probe.
+            // Wait only for observable cleanup, never recreate or delete by path.
+            const auto cleanup_deadline = GetTickCount64() + 250;
+            DWORD query_error = ERROR_SUCCESS;
+            for (;;) {
+                check.value = CreateFileW(native.c_str(), FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+                if (check.value != INVALID_HANDLE_VALUE) break;
+                query_error = GetLastError();
+                if ((query_error != ERROR_ACCESS_DENIED && query_error != ERROR_SHARING_VIOLATION) ||
+                    GetTickCount64() >= cleanup_deadline || Cancelled(cancelled)) break;
+                Sleep(10);
+            }
             if (check.value == INVALID_HANDLE_VALUE) {
-                const DWORD error = GetLastError();
+                const DWORD error = query_error;
                 if (error != ERROR_FILE_NOT_FOUND) {
                     result.error = error; result.cleanup_error = error; return result;
                 }

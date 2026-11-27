@@ -126,11 +126,13 @@ private:
     friend struct DetailsPreviewProbe;
     friend struct NativePreviewProbe;
     friend struct QuickPreviewAuditTest;
+    friend struct QuickPreviewGalleryProbe;
     friend struct QuickPreviewPlaybackProbe;
+    friend struct AnimationAuxProbe;
     friend struct PreviewDeadlineProbe;
     // Pages: multi-page PDF / AI read as a continuous scroll (quick_preview_pages.cpp).
     enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree, Model };
-    enum class ChromeButton { None, Prev, Next, More, Open, Size, Pin };
+    enum class ChromeButton { None, Prev, Next, More, Open, Size, Pin, Rotate, Info };
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -371,7 +373,7 @@ private:
     // Unified header and footer (quick_preview_chrome.cpp).
     struct HeaderLayout {
         D2D1_RECT_F badge{}, name{}, meta{}, tools{}, separator{}, prev{}, counter{}, next{},
-            open{}, pin{}, size{}, more{}, close{};
+            open{}, pin{}, size{}, more{}, close{}, rotate{}, info{};
         bool nav_visible = true;      // detached/independent windows hide list navigation
         bool meta_visible = true;     // narrow windows drop the meta line first,
         bool tools_visible = true;    // then fold the type tools into the more menu,
@@ -562,6 +564,73 @@ private:
     uint64_t pointer_tick_ = 0;
     POINT pointer_last_{};
     float PlaybackBarOpacity();
+    // Immersive photo viewer (quick_preview_gallery.cpp): pictures and videos on
+    // an ambient backdrop with edge arrows, a filter pill in the header and a
+    // floating filmstrip. options_.immersive; never in embedded previews.
+    static constexpr UINT_PTR kGalleryTimer = 77;
+    bool Immersive() const noexcept;
+    bool GalleryActive() const noexcept;
+    bool GalleryStripWanted() const noexcept;
+    bool GalleryMatches(int row) const noexcept;
+    int GalleryTarget(int dir) const noexcept;
+    int GalleryRank(int row) const noexcept;
+    bool GalleryNavEnd(int dir, bool fallback) const noexcept;
+    float GalleryPanelHeight() const noexcept;
+    float GalleryReserve() const noexcept;
+    float ImmersiveSide() const noexcept;
+    D2D1_RECT_F ImmersiveContentRect(const D2D1_RECT_F& content) const noexcept;
+    D2D1_RECT_F GalleryPanelRect() const noexcept;
+    void OnGalleryItem();
+    void PostGalleryJump(int row);
+    void SetGalleryFilter(int filter);
+    void ToggleImmersive();
+    void DrawImmersiveBackdrop(ID2D1DeviceContext* dc);
+    D2D1_RECT_F BeginImmersivePicture(ID2D1DeviceContext* dc, const D2D1_RECT_F& draw, bool allowed);
+    void EndImmersivePicture(ID2D1DeviceContext* dc);
+    void DrawImmersiveChrome(ID2D1DeviceContext* dc);
+    void DrawGalleryPanel(ID2D1DeviceContext* dc, float alpha);
+    float LayoutGalleryFilter(float left, float right, float cy);
+    void DrawGalleryFilter(ID2D1DeviceContext* dc);
+    void GalleryCounterText(std::wstring& text) const;
+    int GalleryHit(POINT client) const noexcept;
+    bool GalleryMouseDown(POINT client);
+    void GalleryMouseMove(POINT client);
+    void GalleryMouseLeave();
+    bool GalleryWheel(POINT client, float steps);
+    void StartGalleryTimer(UINT ms);
+    void TickGallery();
+    int media_kind_ = 0;                     // QuickPreviewMediaKind of the item
+    static inline int gallery_filter_ = 0;   // 0 all, 1 pictures, 2 videos (session-wide)
+    int gallery_cursor_ = -1;                // view row shown, or the row a jump heads to
+    int gallery_target_ = -1;
+    uint64_t gallery_target_at_ = 0;
+    int gallery_counts_[3]{};
+    int gallery_hover_ = 0;
+    int gallery_filter_ids_[3]{};
+    int gallery_filter_count_ = 0;
+    D2D1_RECT_F gallery_filter_rects_[3]{};
+    D2D1_RECT_F gallery_filter_pill_{};
+    D2D1_RECT_F gallery_edges_[2]{};
+    D2D1_RECT_F gallery_panel_{};
+    struct GalleryTile { D2D1_RECT_F rect{}; int row = -1; };
+    std::vector<GalleryTile> gallery_tiles_;
+    float gallery_scroll_ = 0.0f;
+    bool gallery_scroll_init_ = false;
+    float gallery_alpha_ = 1.0f;
+    float gallery_open_ = 1.0f;
+    uint64_t gallery_activity_ = 0;
+    uint64_t gallery_tick_ = 0;
+    POINT gallery_pointer_{};
+    POINT gallery_move_{-1, -1};
+    UINT gallery_timer_ms_ = 0;
+    uint64_t gallery_wheel_at_ = 0;
+    bool picture_layer_ = false;
+    ComPtr<ID2D1Bitmap1> ambient_, ambient_prev_;
+    std::wstring ambient_key_;
+    uint64_t ambient_fade_at_ = 0;
+    ComPtr<ID2D1Device> ambient_device_;
+    ComPtr<IDWriteTextFormat> gallery_badge_format_;
+    float gallery_badge_scale_ = 0.0f;
     // Shared by every Quick Look window of this session.
     static inline int image_backdrop_ = 0;   // 0 auto (checkerboard when translucent), 1 light, 2 dark, 3 checkerboard
     static inline bool info_open_ = false;
@@ -610,8 +679,8 @@ private:
     uint32_t loop_count_ = 0;
     uint32_t completed_loops_ = 0;
     bool animation_active_ = false;
-    // Prev / next slide (motion phase 6): direction asked for, and the slide
-    // of the item that answered it.
+    // Prev / next: track the requested direction and the answering item's
+    // short tonal transition.
     int pending_nav_dir_ = 0;
     uint64_t pending_nav_at_ = 0;   // motion::NowMs
     int nav_dir_ = 0;

@@ -56,8 +56,9 @@ inline bool Registered(const std::wstring& ext) noexcept {
 
 inline bool HideKnownExtensions() noexcept { return known_extensions_detail::Hide().load(std::memory_order_relaxed); }
 // Rows built before a change rebuild when this moves.
-inline uint64_t KnownExtensionsRevision() noexcept {
-    return known_extensions_detail::Revision().load(std::memory_order_relaxed);
+inline uint64_t KnownExtensionsRevision(int show_extensions = -1) noexcept {
+    return show_extensions < 0 ? known_extensions_detail::Revision().load(std::memory_order_relaxed) << 2
+                              : (show_extensions ? 1 : 2);
 }
 inline void SetHideKnownExtensions(bool hide) noexcept {
     if (known_extensions_detail::Hide().exchange(hide, std::memory_order_relaxed) != hide)
@@ -68,8 +69,8 @@ inline void SetHideKnownExtensions(bool hide) noexcept {
 // its dot while hiding is on and the type is registered, else 0. Folders
 // keep their whole name, as does a name that is only an extension
 // (".gitignore"). The registry answer is kept per extension.
-inline size_t HiddenExtensionLength(std::wstring_view name, bool is_dir) {
-    if (is_dir || !HideKnownExtensions()) return 0;
+inline size_t HiddenExtensionLength(std::wstring_view name, bool is_dir, bool hide = HideKnownExtensions()) {
+    if (is_dir || !hide) return 0;
     const size_t dot = name.find_last_of(L'.');
     if (dot == std::wstring_view::npos || dot == 0 || dot + 1 == name.size() || name.size() - dot > 64) return 0;
     std::wstring ext(name.substr(dot));
