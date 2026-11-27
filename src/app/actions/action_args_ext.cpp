@@ -705,7 +705,7 @@ constexpr std::pair<std::string_view, Runner> kExtRunners[] = {
 // Every action that asks each time has its words here (check_actions.py and
 // the self test hold the list to the inventory's External rows).
 constexpr std::string_view kAskIds[] = {
-    "git.push", "git.pull", "shell.run_verb", "toolbar.open_with", "cloud.keep", "cloud.free",
+    "git.push", "git.pull", "git.sync", "shell.run_verb", "toolbar.open_with", "cloud.keep", "cloud.free",
     "preview.cloud_download", "drive.eject", "drive.disconnect",
 };
 
@@ -743,6 +743,7 @@ bool HasAskText(std::string_view id) noexcept {
 ArgAsk AskFor(AppState& s, std::string_view id, const json::Value& args) {
     if (id == "git.push") return AskGit(s, true);
     if (id == "git.pull") return AskGit(s, false);
+    if (id == "git.sync") return AskGit(s, true);   // sync pushes: same words as push
     if (id == "shell.run_verb") return AskVerb(s, args);
     if (id == "toolbar.open_with") return AskOpenWith(s, args);
     if (id == "cloud.keep") return AskCloudPin(s, true);
