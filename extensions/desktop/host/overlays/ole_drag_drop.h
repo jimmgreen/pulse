@@ -29,6 +29,8 @@ enum class DropZoneKind : uint8_t {
     PinnedFolderTile = 3,
     RecycleBinTile = 4,
     StagingTrayTile = 5,
+    DockBar = 6,
+    DockTrash = 7,
 };
 
 struct DropZoneQueryResult {

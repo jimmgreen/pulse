@@ -24,6 +24,7 @@ struct DesktopBeautifyTestPeer {
         overlay.card_screen_x_ = 0;
         overlay.card_screen_y_ = 0;
         overlay.beautify_settings_ = settings;
+        overlay.beautify_tab_ = DesktopOverlayController::BeautifyTab::Desk;
         overlay.callbacks_.on_beautify_changed = [&](const auto& changed) { settings = changed; ++calls; };
     }
 };

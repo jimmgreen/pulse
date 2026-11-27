@@ -17,9 +17,12 @@
 #include <wrl/client.h>
 
 #include "host/ai/desktop_ai_organizer.h"
+#include "host/live/dock_system_provider.h"
 #include "host/model/desktop_model.h"
 #include "host/overlays/desktop_menu_policy.h"
+#include "host/overlays/ole_drag_drop.h"
 #include "host/render/desktop_renderer.h"
+#include "host/video/video_wallpaper_types.h"
 #include "ipc/desktop_ipc.h"
 #include "../../../../src/ui/fluent_menu.h"
 
@@ -48,7 +51,21 @@ enum class OverlayKind : uint8_t {
     AiOrganizeDrawer = 10,
     WidgetGalleryDrawer = 11,
     InlineRename = 12,
-    WidgetDetail = 13,   // the card a 天气 / 日历 / 系统 tile opens (widget_detail.cpp)
+    WidgetDetail = 13,    // the card a 天气 / 日历 / 系统 tile opens (widget_detail.cpp)
+    DockSystemPanel = 14, // frosted glass panel for Dock .dk-sys (dock_system_panel.cpp)
+    DockVolumeOsd = 15,   // 1.2s auto-dismiss floating Volume OSD pill on Dock wheel scroll
+};
+
+enum class DockPanelKind : uint8_t {
+    None = 0,
+    TrayOverflow = 1, // 4-col tray icon grid + pin dots + taskbar settings
+    TrayAppMenu = 2,  // pinned tray icon right-click popover (open / unpin)
+    Ime = 3,          // input method switcher + 中/英 toggle + language settings
+    Wifi = 4,         // Wi-Fi toggle + SSID list + network settings
+    Volume = 5,       // interactive draggable volume pill + mute + audio outputs + mixer
+    Bluetooth = 6,    // BT radio + devices with battery % + add device
+    Battery = 7,      // battery % + remaining time + 节能/平衡/性能 + power settings
+    Clock = 8,        // lunar date + 7-col month calendar + notification center
 };
 
 // What a widget detail card shows: a snapshot the host refreshes while it is open.
@@ -56,6 +73,9 @@ struct WidgetDetailData {
     model::TileKind kind = model::TileKind::Weather;
     render::LiveTileRuntimeData::WeatherView weather;
     render::LiveTileRuntimeData::SystemView system;
+    live::BatteryPowerSnapshot battery;
+    std::wstring countdown_title;
+    std::wstring countdown_date;
     std::vector<model::TodoItem> todos;
     std::wstring weather_city;
     std::vector<mount::DriveSpaceStats> drives;   // 磁盘
@@ -89,6 +109,7 @@ enum class ContextMenuTargetKind : uint8_t {
     GroupHeader = 2,
     LiveTile = 3,
     AppTileShortcut = 4,
+    DockBar = 5,
 };
 
 struct ColorTagOption {
@@ -175,6 +196,19 @@ struct ContextMenuSpec {
     std::wstring current_weather_city;
     bool recycle_bin_empty = true;
     std::string initial_open_submenu_id;
+
+    // DockBar context menu metadata (matching WacOS dock.cpp & liquid_dock.cpp).
+    int dock_item_index = -1;
+    std::wstring dock_item_key;
+    std::wstring dock_item_aumid;
+    uint8_t dock_item_kind = 0; // render::DockBarItemKind
+    bool dock_item_pinned = false;
+    bool dock_item_running = false;
+    bool dock_item_minimized = false;
+    bool dock_item_has_visible_window = false;
+    uint64_t dock_active_hwnd = 0;
+    std::vector<std::pair<uint64_t, std::wstring>> dock_item_windows;
+    std::vector<std::pair<std::wstring, std::wstring>> dock_recent_downloads;
 };
 
 struct OverlayCallbacks {
@@ -215,7 +249,24 @@ struct OverlayCallbacks {
     std::function<void(const ai::AiOrganizePlan& plan)> on_ai_apply_virtual_groups;
     std::function<void()> on_ai_open_desktop_in_pulse;
 
+    // Dock .dk-sys glass panel action callbacks (dock_system_panel.cpp)
+    std::function<void(const std::string& action_id)> on_dock_panel_action;
+    std::function<void(int new_volume_pct, bool dragging)> on_dock_volume_changed;
+
+    // Video live wallpaper actions from the redesigned tabbed BeautifyDrawer
+    std::function<void(const std::wstring& video_path)> on_set_video_wallpaper;
+    std::function<void()> on_pick_video_wallpaper;
+    std::function<void()> on_toggle_video_pause;
+    std::function<void(video::VideoFillMode mode)> on_set_video_fill_mode;
+    std::function<void()> on_cancel_video_optimize;
+    std::function<void()> on_confirm_heavy_video_optimize;
+    std::function<void(const std::wstring& store_uri)> on_open_codec_store;
+    std::function<void()> on_enable_icon_takeover;
+
     std::function<void()> on_overlay_dismissed;
+    // 添加小组件: the selected widget drawn by the desktop renderer itself (premultiplied BGRA, DIP-sized).
+    std::function<bool(model::TileKind kind, model::TileSize size, std::vector<uint8_t>& bgra, uint32_t& w,
+                       uint32_t& h)> on_render_widget_preview;
 };
 
 class DesktopOverlayController {
@@ -237,6 +288,14 @@ public:
         accent_argb_ = accent_argb;
     }
 
+    void SetBeautifySettings(const model::BeautifySettings& settings) noexcept {
+        beautify_settings_ = settings;
+    }
+
+    void SetDockPanelLightInk(bool light_ink) noexcept {
+        dock_panel_light_ink_ = light_ink;
+    }
+
     void SetTagPalette(std::vector<ColorTagOption> palette) {
         rule_tag_palette_ = std::move(palette);
     }
@@ -248,6 +307,14 @@ public:
         backdrop_ = backdrop;
         backdrop_owner_dc_ = owner_dc;
     }
+    // Zero-copy shared GPU live video wallpaper source (same shared UI-thread ID2D1Device).
+    // Drives both Liquid Glass overlay refraction AND BeautifyDrawer's 16:9 live preview!
+    void SetLiveWallpaperSource(const render::LiveWallpaperSource* live,
+                                ID2D1Device* owner_d2d_device) noexcept {
+        live_wallpaper_ = live;
+        live_wallpaper_owner_dev_ = owner_d2d_device;
+    }
+    void OnLiveVideoFrameArrived(bool force = false);
 
     // Dismisses popups and releases overlay surfaces. The shared menu device is
     // retained with a 1x1 target for bounded warm reuse; menu bitmaps are released.
@@ -304,6 +371,12 @@ public:
                           size_t total_desktop_items = 0);
     bool OpenBeautifyDrawer(const RECT& work_area, const model::BeautifySettings& settings,
                             const std::unordered_set<uint8_t>& active_widget_kinds = {});
+    enum class BeautifyTab : uint8_t { Wall = 0, Fx = 1, Desk = 2, Dock = 3 };
+    void SetBeautifyVideoState(const video::VideoWallpaperUiState& state, bool rerender = true);
+    void UpdateBeautifyVideoLiveFrame(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t stride);
+    void SetBeautifyTab(BeautifyTab tab, bool rerender = true);
+    void SetDeactivateSuppressed(bool suppressed) noexcept { beautify_suppress_deactivate_ = suppressed; }
+    void SetBeautifyDropHover(bool hover, const std::wstring& filename = {});
     bool OpenWidgetGalleryDrawer(const RECT& work_area,
                                  int tile_board_screen_left,
                                  int tile_board_screen_top,
@@ -346,6 +419,36 @@ public:
                    const std::wstring& action_label = {},
                    std::function<void()> on_action = {},
                    uint32_t duration_ms = 5000);
+
+    // 6. Dock .dk-sys Frosted Glass System Panels & Volume Wheel OSD (dock_system_panel.cpp)
+    bool OpenDockSystemPanel(const RECT& work_area,
+                             const RECT& anchor_screen_rc,
+                             uint8_t dock_position,
+                             DockPanelKind kind,
+                             const live::DockSystemSnapshot& snap,
+                             int tray_app_index = -1,
+                             uint8_t week_start = 1,
+                             uint8_t battery_low_pct = 20,
+                             const std::vector<model::TodoItem>& todos = {});
+    void UpdateDockSystemPanel(const live::DockSystemSnapshot& snap);
+    bool ShowDockVolumeOsd(const RECT& work_area,
+                           const RECT& anchor_screen_rc,
+                           uint8_t dock_position,
+                           int volume_pct,
+                           bool muted,
+                           uint32_t duration_ms = 1200);
+    bool SaveDockPanelSnapshot(const wchar_t* path,
+                               DockPanelKind kind,
+                               const live::DockSystemSnapshot& snap,
+                               bool dark,
+                               uint8_t week_start = 1,
+                               uint8_t battery_low_pct = 20);
+    DockPanelKind ActiveDockPanelKind() const noexcept {
+        return active_kind_ == OverlayKind::DockSystemPanel ? dock_panel_kind_ : DockPanelKind::None;
+    }
+    int ActiveDockPanelTrayIndex() const noexcept {
+        return active_kind_ == OverlayKind::DockSystemPanel ? dock_panel_tray_index_ : -1;
+    }
 
 private:
     friend struct DesktopMenuPolicyTestPeer;
@@ -500,6 +603,9 @@ private:
     uint32_t accent_argb_ = 0xFF4CC2FFu;
     const render::WallpaperBackdrop* backdrop_ = nullptr;
     ID2D1DeviceContext* backdrop_owner_dc_ = nullptr;
+    const render::LiveWallpaperSource* live_wallpaper_ = nullptr;
+    ID2D1Device* live_wallpaper_owner_dev_ = nullptr;
+    uint64_t last_live_overlay_render_ms_ = 0;
 
     // Shared lightweight D3D11/D2D/DWrite factories; swapchains & DComp visuals are destroyed on Dismiss()!
     Microsoft::WRL::ComPtr<ID3D11Device> d3d_device_;
@@ -582,6 +688,24 @@ private:
     model::BeautifySettings beautify_settings_{};
     model::CardMaterial host_material_ = model::CardMaterial::MicaAlt;
     std::unordered_set<uint8_t> active_widget_kinds_;
+    BeautifyTab beautify_tab_ = BeautifyTab::Wall;
+    video::VideoWallpaperUiState beautify_video_{};
+    bool beautify_drop_hover_ = false;
+    std::wstring beautify_drop_filename_;
+    bool beautify_suppress_deactivate_ = false;
+    ID2D1DeviceContext* beautify_bmp_dc_ = nullptr;
+    Microsoft::WRL::ComPtr<IWICImagingFactory> beautify_wic_;
+    std::unordered_map<std::wstring, Microsoft::WRL::ComPtr<ID2D1Bitmap>> beautify_img_cache_;
+    std::vector<uint8_t> beautify_live_bgra_;
+    uint32_t beautify_live_w_ = 0;
+    uint32_t beautify_live_h_ = 0;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> beautify_live_bmp_;
+    bool beautify_drop_registered_ = false;
+    Microsoft::WRL::ComPtr<IDropTarget> beautify_drop_target_;
+    ID2D1Bitmap* GetBeautifyCachedImage(ID2D1DeviceContext* dc, const std::wstring& path) noexcept;
+    ID2D1Bitmap* GetBeautifySystemWallpaper(ID2D1DeviceContext* dc) noexcept;
+    void AttachBeautifyDropTarget() noexcept;
+    void DetachBeautifyDropTarget() noexcept;
     struct BeautifySliderTrack {
         std::string id;
         RECT bounds{};
@@ -600,6 +724,10 @@ private:
     std::vector<model::DesktopTile> gallery_tiles_;
     model::TileKind gallery_selected_kind_ = model::TileKind::Calendar;
     model::TileSize gallery_selected_size_{1, 1};
+    // The last real preview (see on_render_widget_preview), refreshed when the pick changes or every second.
+    std::vector<uint8_t> gallery_preview_px_;
+    uint32_t gallery_preview_w_ = 0, gallery_preview_h_ = 0;
+    uint64_t gallery_preview_key_ = 0, gallery_preview_ms_ = 0;
     std::optional<model::PointI> gallery_target_cell_;
     int gallery_board_left_ = 0;
     int gallery_board_top_ = 0;
@@ -618,6 +746,29 @@ private:
     std::wstring toast_message_;
     std::wstring toast_action_label_;
     std::function<void()> toast_on_action_;
+
+    // Dock .dk-sys glass panel & Volume OSD state (dock_system_panel.cpp)
+    DockPanelKind dock_panel_kind_ = DockPanelKind::None;
+    live::DockSystemSnapshot dock_panel_snap_{};
+    int dock_panel_tray_index_ = -1;
+    uint8_t dock_panel_week_start_ = 1;
+    uint8_t dock_panel_battery_low_pct_ = 20;
+    std::vector<model::TodoItem> dock_panel_todos_;
+    int dock_panel_month_offset_ = 0;
+    bool dock_panel_light_ink_ = true;
+    bool dock_panel_drew_live_glass_ = false;
+    RECT dock_vol_track_{};
+    bool dock_vol_dragging_ = false;
+    int dock_osd_volume_pct_ = 50;
+    bool dock_osd_muted_ = false;
+    Microsoft::WRL::ComPtr<IWICImagingFactory> dock_tray_wic_;
+    ID2D1DeviceContext* dock_tray_icon_dc_ = nullptr;
+    std::unordered_map<std::wstring, Microsoft::WRL::ComPtr<ID2D1Bitmap>> dock_tray_icon_cache_;
+    ID2D1Bitmap* GetOrLoadDockTrayIcon(ID2D1DeviceContext* dc, const std::wstring& exe_path, HWND hwnd) noexcept;
+    bool ApplyDockVolumeTrackAtX(int card_x, bool dragging) noexcept;
+    bool HandleDockPanelAction(const std::string& act);
+    void DrawDockSystemPanel(ID2D1DeviceContext* dc, float ox, float oy);
+    void DrawDockVolumeOsd(ID2D1DeviceContext* dc, float ox, float oy);
 
     // Pulse hosted child EDIT (EditHost + LumaTextRenderer + FluentMenu context menu)
     HWND popup_edit_hwnd_ = nullptr;

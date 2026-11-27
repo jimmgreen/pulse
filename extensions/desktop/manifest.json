@@ -99,6 +99,30 @@
         "kinds": ["background"],
         "minSelection": 0,
         "maxSelection": 4096
+      },
+      {
+        "id": "desktop-set-video-wallpaper",
+        "title": {
+          "zh": "设为桌面壁纸",
+          "en": "Set as desktop wallpaper",
+          "tw": "設為桌面桌布"
+        },
+        "detail": {
+          "zh": "将选中的视频设为桌面动态壁纸",
+          "en": "Use the selected video as a live desktop wallpaper",
+          "tw": "將選取的影片設為桌面動態桌布"
+        },
+        "group": {
+          "zh": "桌面整理",
+          "en": "Desktop Organizer",
+          "tw": "桌面整理"
+        },
+        "submenu": false,
+        "icon": "pc",
+        "kinds": ["files"],
+        "minSelection": 1,
+        "maxSelection": 1,
+        "extensions": [".mp4", ".mov", ".mkv", ".m4v", ".webm", ".wmv"]
       }
     ]
   }

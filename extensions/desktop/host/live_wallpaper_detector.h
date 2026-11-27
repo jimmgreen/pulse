@@ -39,6 +39,7 @@ struct LiveWallpaperDecision {
     uintptr_t wallpaper_hwnd = 0;
     uintptr_t capture_target_hwnd = 0;
     uint32_t wallpaper_pid = 0;
+    bool is_desktop_host = false;
 
     constexpr bool operator==(const LiveWallpaperDecision&) const noexcept = default;
 };

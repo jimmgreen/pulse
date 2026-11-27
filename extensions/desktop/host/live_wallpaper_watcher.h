@@ -18,7 +18,9 @@ namespace pulse::desktop::host {
 LiveWallpaperDecision ProbeLiveWallpaperFromSystem(
     const mount::DesktopHierarchyInfo& hierarchy,
     int32_t primary_work_w,
-    int32_t primary_work_h) noexcept;
+    int32_t primary_work_h,
+    HWND self_surface_hwnd = nullptr,
+    bool allow_desktop_host_capture = false) noexcept;
 
 // Out-of-context WinEvent listener (zero polling timers, zero injection) that posts
 // `notify_msg` to `notify_hwnd` only when window show/hide/destroy/parent/cloak changes occur.
@@ -36,7 +38,14 @@ public:
     // Returns true if `decision_` changed since the previous probe.
     bool Refresh(const mount::DesktopHierarchyInfo& hierarchy,
                  int32_t primary_work_w,
-                 int32_t primary_work_h) noexcept;
+                 int32_t primary_work_h,
+                 HWND self_surface_hwnd = nullptr,
+                 bool allow_desktop_host_capture = false) noexcept;
+
+    void Clear() noexcept {
+        notify_pending_.store(false, std::memory_order_release);
+        decision_ = {};
+    }
 
     const LiveWallpaperDecision& Current() const noexcept { return decision_; }
 

@@ -3,6 +3,7 @@
 #include "host/overlays/desktop_overlays.h"
 #include "host/overlays/lunar_calendar.h"
 #include "host/render/vector_glyphs.h"
+#include "host/render/widget_painters.h"
 
 #include <algorithm>
 #include <cmath>
@@ -70,8 +71,10 @@ bool DesktopOverlayController::OpenWidgetDetail(const RECT& anchor_screen_rc, co
     detail_sel_year_ = detail_sel_month_ = detail_sel_day_ = 0;
     int w = 368, h = 508;
     if (detail_.kind == model::TileKind::Calendar) { w = 360; h = 540; }
-    if (detail_.kind == model::TileKind::System) { w = 336; h = 318; }
+    if (detail_.kind == model::TileKind::System) { w = 348; h = 412; }
     if (detail_.kind == model::TileKind::Clock) { w = 336; h = 300; }
+    if (detail_.kind == model::TileKind::Countdown) { w = 348; h = 360; }
+    if (detail_.kind == model::TileKind::Battery) { w = 348; h = 356; }
     if (detail_.kind == model::TileKind::DiskRing) {
         w = 336;
         h = 70 + 54 * static_cast<int>(std::clamp<size_t>(detail_.drives.size(), 1, 6)) + 56;
@@ -148,37 +151,11 @@ void DesktopOverlayController::DrawWidgetDetail(ID2D1DeviceContext* dc, float ox
     auto button = [&](float l, float tp, float r, const std::wstring& label, const std::string& act, bool primary) {
         PulseButton(dc, ox, oy, D2D1::RectF(l, tp - 1.0f, r, tp + 31.0f), label, act, primary);
     };
-    // Sun / cloud / rain / snow, drawn (no font glyphs).
-    auto weather_icon = [&](float x, float y, float size, int code) {
-        const float s = size / 24.0f;
-        const bool sun = code <= 2, cloud = code >= 2, rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82) || code >= 95,
-                   snow = (code >= 71 && code <= 77) || code == 85 || code == 86;
-        if (sun) {
-            const float cx = ox + x + (cloud ? 9.0f : 12.0f) * s, cy = oy + y + (cloud ? 9.0f : 12.0f) * s, r = (cloud ? 4.6f : 5.4f) * s;
-            for (int i = 0; i < 8; ++i) {
-                const float a = static_cast<float>(i) * 0.785398f;
-                dc->DrawLine(D2D1::Point2F(cx + std::cos(a) * (r + 2.2f * s), cy + std::sin(a) * (r + 2.2f * s)),
-                             D2D1::Point2F(cx + std::cos(a) * (r + 4.0f * s), cy + std::sin(a) * (r + 4.0f * s)),
-                             Brush(dc, 0xFFFFC53Du), 1.4f * s, round.Get());
-            }
-            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), Brush(dc, 0xFFFFC53Du));
-        }
-        if (cloud) {
-            const uint32_t cc = dark_mode_ ? 0xFFE8EEF6u : 0xFFA7B4C6u;
-            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox + x + 10.0f * s, oy + y + 14.0f * s), 4.6f * s, 4.6f * s), Brush(dc, cc));
-            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox + x + 15.0f * s, oy + y + 12.5f * s), 5.6f * s, 5.6f * s), Brush(dc, cc));
-            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(ox + x + 5.0f * s, oy + y + 13.5f * s, ox + x + 21.0f * s, oy + y + 19.0f * s),
-                                                       2.8f * s, 2.8f * s), Brush(dc, cc));
-        }
-        if (rain)
-            for (int i = 0; i < 3; ++i) {
-                const float dx = ox + x + (8.0f + 4.5f * static_cast<float>(i)) * s;
-                dc->DrawLine(D2D1::Point2F(dx, oy + y + 20.5f * s), D2D1::Point2F(dx - 1.2f * s, oy + y + 23.5f * s), Brush(dc, 0xFF4CA6FFu), 1.5f * s, round.Get());
-            }
-        if (snow)
-            for (int i = 0; i < 3; ++i)
-                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox + x + (8.0f + 4.5f * static_cast<float>(i)) * s, oy + y + 22.0f * s), 1.2f * s, 1.2f * s),
-                                Brush(dc, dark_mode_ ? 0xFFFFFFFFu : 0xFF8FA3BBu));
+    // SF-Symbols-style vector weather icons shared with desktop tiles.
+    auto weather_icon = [&](float x, float y, float size, int code, bool is_day = true) {
+        render::DrawTahoeWeatherIcon(fac.Get(), dc, Brush(dc, 0xFFFFFFFFu), round.Get(),
+                                     D2D1::RectF(ox + x, oy + y, ox + x + size, oy + y + size),
+                                     code, is_day, dark_mode_);
     };
 
     switch (detail_.kind) {
@@ -196,7 +173,7 @@ void DesktopOverlayController::DrawWidgetDetail(ID2D1DeviceContext* dc, float ox
             break;
         }
         // Now: icon, temperature, condition and range; the extras on the right.
-        weather_icon(14.0f, 44.0f, 60.0f, wx.code);
+        weather_icon(14.0f, 44.0f, 60.0f, wx.code, wx.is_day);
         text(std::to_wstring(wx.temp_c) + L"°", fmt_gallery_big_.Get(), 80.0f, 46.0f, 170.0f, 96.0f, pri);
         text(WeatherText(wx.code), fmt_body_semi_.Get(), 80.0f, 96.0f, 220.0f, 116.0f, pri);
         wchar_t range[40]{};
@@ -227,7 +204,7 @@ void DesktopOverlayController::DrawWidgetDetail(ID2D1DeviceContext* dc, float ox
                 const auto& hr = wx.hours[i];
                 const float cx = 18.0f + step * (static_cast<float>(i) + 0.5f);
                 text(hr.label, fmt_small_center_.Get(), cx - 22.0f, 178.0f, cx + 22.0f, 194.0f, sec);
-                weather_icon(cx - 11.0f, 198.0f, 22.0f, hr.code);
+                weather_icon(cx - 11.0f, 198.0f, 22.0f, hr.code, hr.is_day);
                 const float py = 252.0f - 18.0f * static_cast<float>(hr.temp_c - lo) / span;
                 if (path) {
                     if (i == 0) sink->BeginFigure(D2D1::Point2F(ox + cx, oy + py), D2D1_FIGURE_BEGIN_HOLLOW);
@@ -428,27 +405,18 @@ void DesktopOverlayController::DrawWidgetDetail(ID2D1DeviceContext* dc, float ox
         wchar_t yr[32]{};
         std::swprintf(yr, 32, L"今年已过 %d%%", static_cast<int>(year_ratio * 100.0f));
         text(yr, fmt_small_.Get(), 18.0f, 108.0f, 196.0f, 126.0f, sec);
-        // The dial, with a sweeping second hand.
+        // The Tahoe crystal dial, with 60 ticks, 1-12 numerals, and counterweight sweep second hand.
         const float cx = ox + w - 72.0f, cy = oy + 70.0f, r = 52.0f;
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy + 1.5f), r, r), Brush(dc, 0x40000000u));
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), Brush(dc, dark_mode_ ? 0xFF2A2F3Bu : 0xFFF7F8FAu));
-        dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r - 0.5f, r - 0.5f), Brush(dc, line), 1.0f);
-        for (int i = 0; i < 12; ++i) {
-            const float a = static_cast<float>(i) * 0.5235988f;
-            const float in = i % 3 == 0 ? r - 11.0f : r - 7.0f;
-            dc->DrawLine(D2D1::Point2F(cx + std::sin(a) * in, cy - std::cos(a) * in), D2D1::Point2F(cx + std::sin(a) * (r - 4.0f), cy - std::cos(a) * (r - 4.0f)),
-                         Brush(dc, pri, i % 3 == 0 ? 0.9f : 0.4f), i % 3 == 0 ? 2.0f : 1.0f, round.Get());
-        }
-        auto hand = [&](float turns, float len, float width, uint32_t color) {
-            const float a = turns * 6.2831853f;
-            dc->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(cx + std::sin(a) * len, cy - std::cos(a) * len), Brush(dc, color), width, round.Get());
+        const render::WidgetTextDrawFn dial_num = [&](const std::wstring& s, const D2D1_RECT_F& nr,
+                                                      uint32_t argb, float opacity, DWRITE_TEXT_ALIGNMENT) {
+            const DWRITE_TEXT_ALIGNMENT was = fmt_small_.Get()->GetTextAlignment();
+            fmt_small_.Get()->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            detail_text_.DrawText(dwrite_.Get(), dc, s.c_str(), static_cast<UINT32>(s.size()),
+                                  fmt_small_.Get(), nr, Brush(dc, argb, opacity));
+            fmt_small_.Get()->SetTextAlignment(was);
         };
-        const float sec_f = static_cast<float>(now.wSecond) + static_cast<float>(now.wMilliseconds) / 1000.0f;
-        const float min_f = static_cast<float>(now.wMinute) + sec_f / 60.0f;
-        hand((static_cast<float>(now.wHour % 12) + min_f / 60.0f) / 12.0f, r * 0.52f, 3.2f, pri);
-        hand(min_f / 60.0f, r * 0.76f, 2.2f, pri);
-        hand(sec_f / 60.0f, r * 0.82f, 1.1f, 0xFFFF8A2Bu);
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 3.0f, 3.0f), Brush(dc, 0xFFFF8A2Bu));
+        render::DrawTahoeAnalogDial(dc, Brush(dc, 0xFFFFFFFFu), round.Get(),
+                                    cx, cy, r, now, dark_mode_, false, true, true, dial_num);
         hline(140.0f);
         // The weather city's clock, when it keeps another time (as a phone's world clock).
         FILETIME lf{}, uf{};
@@ -513,29 +481,189 @@ void DesktopOverlayController::DrawWidgetDetail(ID2D1DeviceContext* dc, float ox
         button(136.0f, h - 46.0f, 246.0f, L"磁盘清理", "wd:disk-cleanup", false);
         break;
     }
+    case model::TileKind::Countdown: {
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        const auto cd = live::ComputeCountdown(detail_.countdown_title, detail_.countdown_date, now);
+        const uint32_t col_ind = dark_mode_ ? 0xFF7B9DFFu : 0xFF4755E8u;
+        text(cd.title, fmt_title_.Get(), 20.0f, 14.0f, w - 108.0f, 40.0f, pri);
+        text(cd.target_iso, fmt_small_right_.Get(), w - 110.0f, 18.0f, w - 18.0f, 36.0f, sec);
+
+        const D2D1_RECT_F hero = D2D1::RectF(ox + 18.0f, oy + 48.0f, ox + w - 18.0f, oy + 124.0f);
+        render::DrawTahoeGlassCard(dc, Brush(dc, 0xFFFFFFFFu), hero, 12.0f, dark_mode_);
+        const std::wstring big_num = cd.is_today ? L"就是今天"
+            : (std::to_wstring(std::abs(cd.days_delta)) + L" 天");
+        const std::wstring sub_lbl = cd.is_today ? L"愿一切如期而至"
+            : (cd.is_past ? L"已经过去" : L"距离目标日还有");
+        text(sub_lbl, fmt_small_.Get(), 30.0f, 58.0f, w - 30.0f, 76.0f, sec);
+        text(big_num, fmt_title_.Get(), 30.0f, 78.0f, w - 30.0f, 114.0f, col_ind);
+
+        struct ProgRow { const wchar_t* label; float pct; uint32_t col; };
+        const ProgRow rows[4] = {
+            {L"今日进度", cd.day_pct,   dark_mode_ ? 0xFF54C8FFu : 0xFF0078D4u},
+            {L"本周进度", cd.week_pct,  dark_mode_ ? 0xFF4EE08Au : 0xFF18984Au},
+            {L"本月进度", cd.month_pct, dark_mode_ ? 0xFFFFB84Du : 0xFFD97706u},
+            {L"今年进度", cd.year_pct,  dark_mode_ ? 0xFFB888FFu : 0xFF7C4DFFu},
+        };
+        float ry = 138.0f;
+        for (const auto& pr : rows) {
+            wchar_t pb[16]{};
+            std::swprintf(pb, ARRAYSIZE(pb), L"%.1f%%", pr.pct);
+            text(pr.label, fmt_small_.Get(), 20.0f, ry, 130.0f, ry + 18.0f, pri);
+            text(pb, fmt_small_right_.Get(), 130.0f, ry, w - 20.0f, ry + 18.0f, sec);
+            const float bx0 = ox + 20.0f, bx1 = ox + w - 20.0f;
+            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 22.0f, bx1, oy + ry + 28.0f), 3.0f, 3.0f), Brush(dc, track));
+            const float fill = bx0 + (bx1 - bx0) * std::clamp(pr.pct / 100.0f, 0.0f, 1.0f);
+            if (fill > bx0 + 1.0f) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 22.0f, std::max(bx0 + 6.0f, fill), oy + ry + 28.0f), 3.0f, 3.0f),
+                                         Brush(dc, pr.col));
+            }
+            ry += 40.0f;
+        }
+        button(18.0f, h - 46.0f, 120.0f, L"改名称…", "wd:countdown-edit-title", false);
+        button(128.0f, h - 46.0f, 232.0f, L"设日期…", "wd:countdown-edit-date", true);
+        button(240.0f, h - 46.0f, w - 18.0f, L"+30天", "wd:countdown-plus30", false);
+        break;
+    }
+    case model::TileKind::Battery: {
+        const auto& bt = detail_.battery;
+        const uint32_t col_ok = dark_mode_ ? 0xFF38DB70u : 0xFF18984Au;
+        const uint32_t col_ac = dark_mode_ ? 0xFF4CC2FFu : 0xFF0078D4u;
+        const uint32_t col_warn = dark_mode_ ? 0xFFFFB02Eu : 0xFFD97706u;
+        const uint32_t col_low = dark_mode_ ? 0xFFFF5C5Cu : 0xFFD93838u;
+        const uint32_t pc_col = !bt.has_battery ? col_ac : (bt.battery_pct < 20 ? col_low : (bt.battery_pct < 35 ? col_warn : col_ok));
+
+        text(L"电池与设备电源", fmt_title_.Get(), 20.0f, 14.0f, w - 104.0f, 40.0f, pri);
+        text(bt.power_plan.empty() ? L"平衡" : bt.power_plan, fmt_small_right_.Get(), w - 106.0f, 18.0f, w - 18.0f, 36.0f, sec);
+
+        const D2D1_RECT_F pc_card = D2D1::RectF(ox + 18.0f, oy + 48.0f, ox + w - 18.0f, oy + 124.0f);
+        render::DrawTahoeGlassCard(dc, Brush(dc, 0xFFFFFFFFu), pc_card, 12.0f, dark_mode_);
+        render::DrawTahoeGlassRing(fac.Get(), dc, Brush(dc, 0xFFFFFFFFu), round.Get(),
+                                   pc_card.left + 38.0f, (pc_card.top + pc_card.bottom) * 0.5f,
+                                   23.0f, 4.8f, static_cast<float>(bt.has_battery ? bt.battery_pct : 100), pc_col, dark_mode_);
+        const std::wstring pct_s = bt.has_battery ? (std::to_wstring(bt.battery_pct) + L"%") : L"AC";
+        centered(pct_s, fmt_small_.Get(), 18.0f + 12.0f, 76.0f, 18.0f + 64.0f, 96.0f, pri);
+        const std::wstring pc_title = bt.has_battery
+            ? (bt.charging ? L"本机电池 · 充电中" : (bt.ac_online ? L"本机电池 · 已接电源" : L"本机电池 · 使用电池"))
+            : L"台式机交流电源供电";
+        const uint64_t mins = bt.uptime_sec / 60ull;
+        wchar_t up_buf[64]{};
+        if (mins >= 1440ull) std::swprintf(up_buf, ARRAYSIZE(up_buf), L"已运行 %llu 天 %llu 小时 · %ls模式", mins / 1440ull, (mins % 1440ull) / 60ull, bt.power_plan.c_str());
+        else std::swprintf(up_buf, ARRAYSIZE(up_buf), L"已运行 %llu 小时 %llu 分钟 · %ls模式", mins / 60ull, mins % 60ull, bt.power_plan.c_str());
+        text(pc_title, fmt_body_semi_.Get(), 96.0f, 62.0f, w - 28.0f, 84.0f, pri);
+        text(up_buf, fmt_small_.Get(), 96.0f, 86.0f, w - 28.0f, 108.0f, sec);
+
+        text(L"已连接的蓝牙设备电量", fmt_small_.Get(), 20.0f, 138.0f, w - 20.0f, 156.0f, sec);
+        float ry = 162.0f;
+        if (bt.bt_devices.empty()) {
+            const D2D1_RECT_F empty_rc = D2D1::RectF(ox + 18.0f, oy + ry, ox + w - 18.0f, oy + ry + 52.0f);
+            render::DrawTahoeGlassCard(dc, Brush(dc, 0xFFFFFFFFu), empty_rc, 10.0f, dark_mode_);
+            text(L"未检测到上报电量的蓝牙外设", fmt_small_.Get(), 30.0f, ry + 16.0f, w - 30.0f, ry + 36.0f, sec);
+        } else {
+            for (size_t i = 0; i < bt.bt_devices.size() && i < 3; ++i) {
+                const auto& d = bt.bt_devices[i];
+                const uint32_t dc_col = d.percent < 20 ? col_low : (d.percent < 35 ? col_warn : col_ok);
+                text(d.name, fmt_body_.Get(), 20.0f, ry, w - 76.0f, ry + 20.0f, pri);
+                text(std::to_wstring(d.percent) + L"%", fmt_small_right_.Get(), w - 74.0f, ry + 1.0f, w - 20.0f, ry + 19.0f, dc_col);
+                const float bx0 = ox + 20.0f, bx1 = ox + w - 20.0f;
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 24.0f, bx1, oy + ry + 30.0f), 3.0f, 3.0f), Brush(dc, track));
+                const float fill = bx0 + (bx1 - bx0) * std::clamp(static_cast<float>(d.percent) / 100.0f, 0.0f, 1.0f);
+                if (fill > bx0 + 1.0f) {
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 24.0f, std::max(bx0 + 6.0f, fill), oy + ry + 30.0f), 3.0f, 3.0f),
+                                             Brush(dc, dc_col));
+                }
+                ry += 44.0f;
+            }
+        }
+        button(18.0f, h - 46.0f, 176.0f, L"电源与电池设置", "wd:open-power-settings", false);
+        break;
+    }
     default: {  // System
         const auto& sy = detail_.system;
-        text(L"系统", fmt_title_.Get(), 20.0f, 14.0f, 160.0f, 40.0f, pri);
-        text(L"每 3 秒更新", fmt_small_right_.Get(), w - 140.0f, 18.0f, w - 18.0f, 36.0f, sec);
-        const int mem_pct = sy.mem_total ? static_cast<int>(sy.mem_used * 100 / sy.mem_total) : 0;
-        const int net_pct = static_cast<int>(std::min<uint64_t>(100, sy.net_down_bps / (1024 * 1024 / 4)));
-        struct Row { const wchar_t* label; int pct; uint32_t color; std::wstring value; };
-        const Row rows[] = {{L"CPU", sy.cpu_pct, 0xFF5A72E8u, std::to_wstring(sy.cpu_pct) + L"%"},
-                            {L"内存", mem_pct, 0xFF30A46Cu, Bytes(sy.mem_used) + L" / " + Bytes(sy.mem_total)},
-                            {L"C: 盘", sy.disk_used_pct, 0xFFF5A524u, L"可用 " + Bytes(sy.disk_free)},
-                            {L"网络下载", net_pct, 0xFF8E6BE8u, Bytes(sy.net_down_bps) + L"/s"}};
-        float ry = 52.0f;
+        const uint32_t col_cpu = dark_mode_ ? 0xFF33B8FFu : 0xFF0078D4u;
+        const uint32_t col_mem = dark_mode_ ? 0xFF38DB70u : 0xFF18984Au;
+        const uint32_t col_vram = dark_mode_ ? 0xFFBF6BFAu : 0xFF8839D8u;
+        const uint32_t col_disk = dark_mode_ ? 0xFFFFA629u : 0xFFD97706u;
+        const uint32_t col_net = dark_mode_ ? 0xFF5CD6FFu : 0xFF0284C7u;
+
+        text(L"系统性能监控", fmt_title_.Get(), 20.0f, 14.0f, 200.0f, 40.0f, pri);
+        text(sy.gpu_name.empty() ? L"每秒更新" : sy.gpu_name, fmt_small_right_.Get(), w - 164.0f, 18.0f, w - 18.0f, 36.0f, sec);
+        const float mem_pct_f = sy.mem_total
+            ? std::clamp(static_cast<float>(static_cast<double>(sy.mem_used) * 100.0 / static_cast<double>(sy.mem_total)), 0.0f, 100.0f)
+            : sy.mem_pct_exact;
+        const int mem_pct = static_cast<int>(std::lround(mem_pct_f));
+        const int net_pct = static_cast<int>(std::min<uint64_t>(100, (sy.net_down_bps + sy.net_up_bps) / (1024 * 1024 / 4)));
+        struct Row { std::wstring label; int pct; uint32_t color; std::wstring value; };
+        std::vector<Row> rows;
+        const std::wstring cpu_lbl = (sy.physical_cores > 0 && sy.logical_cores > sy.physical_cores)
+            ? (L"CPU · " + std::to_wstring(sy.physical_cores) + L"核 " + std::to_wstring(sy.logical_cores) + L"线程")
+            : (sy.logical_cores > 0 ? (L"CPU · " + std::to_wstring(sy.logical_cores) + L" 线程") : L"CPU");
+        rows.push_back({cpu_lbl, sy.cpu_pct, col_cpu, std::to_wstring(sy.cpu_pct) + L"%"});
+        wchar_t mp_buf[24]{};
+        std::swprintf(mp_buf, ARRAYSIZE(mp_buf), L" (%.1f%%)", mem_pct_f);
+        rows.push_back({L"内存", mem_pct, col_mem, Bytes(sy.mem_used) + L" / " + Bytes(sy.mem_total) + mp_buf});
+        if (sy.has_vram) {
+            wchar_t vb[48]{};
+            std::swprintf(vb, ARRAYSIZE(vb), L"%.1f / %.1f GB (%ld%%)", sy.vram_used_gb, sy.vram_total_gb, std::lround(sy.vram_pct));
+            rows.push_back({L"显存", static_cast<int>(std::lround(sy.vram_pct)), col_vram, vb});
+        }
+        rows.push_back({L"C: 盘", sy.disk_used_pct, col_disk, L"可用 " + Bytes(sy.disk_free)});
+        rows.push_back({L"网络", net_pct, col_net,
+                        L"↓ " + render::FormatSpeedPerSec(sy.net_down_bps) + L"  ↑ " + render::FormatSpeedPerSec(sy.net_up_bps)});
+
+        const float step_y = sy.has_vram ? 44.0f : 50.0f;
+        float ry = 50.0f;
         for (const auto& r : rows) {
-            text(r.label, fmt_body_.Get(), 18.0f, ry, 140.0f, ry + 20.0f, pri);
-            text(r.value, fmt_small_right_.Get(), 120.0f, ry + 1.0f, w - 18.0f, ry + 19.0f, sec);
+            text(r.label, fmt_body_.Get(), 18.0f, ry, 172.0f, ry + 20.0f, pri);
+            text(r.value, fmt_small_right_.Get(), 130.0f, ry + 1.0f, w - 18.0f, ry + 19.0f, sec);
             const float bx0 = ox + 18.0f, bx1 = ox + w - 18.0f;
-            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 26.0f, bx1, oy + ry + 32.0f), 3.0f, 3.0f), Brush(dc, track));
+            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 24.0f, bx1, oy + ry + 30.0f), 3.0f, 3.0f), Brush(dc, track));
             const float fill = bx0 + (bx1 - bx0) * static_cast<float>(std::clamp(r.pct, 0, 100)) / 100.0f;
             if (fill > bx0 + 1.0f)
-                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 26.0f, std::max(bx0 + 6.0f, fill), oy + ry + 32.0f), 3.0f, 3.0f),
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, oy + ry + 24.0f, std::max(bx0 + 6.0f, fill), oy + ry + 30.0f), 3.0f, 3.0f),
                                          Brush(dc, r.color));
-            ry += 54.0f;
+            ry += step_y;
         }
+
+        // Live 48-second split CPU (0-100%) and RAM (auto-zoomed) sparkline cards above the footer button
+        const float box_top = ry + 2.0f;
+        const float box_bot = h - 58.0f;
+        if (box_bot - box_top >= 58.0f) {
+            const float gap = 8.0f;
+            const float card_w = (w - 36.0f - gap) * 0.5f;
+            const D2D1_RECT_F cbox = D2D1::RectF(ox + 18.0f, oy + box_top, ox + 18.0f + card_w, oy + box_bot);
+            const D2D1_RECT_F mbox = D2D1::RectF(cbox.right + gap, oy + box_top, ox + w - 18.0f, oy + box_bot);
+            render::DrawTahoeGlassCard(dc, Brush(dc, 0xFFFFFFFFu), cbox, 12.0f, dark_mode_);
+            render::DrawTahoeGlassCard(dc, Brush(dc, 0xFFFFFFFFu), mbox, 12.0f, dark_mode_);
+
+            const float c_one = static_cast<float>(sy.cpu_pct);
+            const float m_one = mem_pct_f;
+            const std::span<const float> c_sp = sy.cpu_history.empty() ? std::span<const float>(&c_one, 1) : std::span<const float>(sy.cpu_history);
+            const std::span<const float> m_sp = sy.mem_history.empty() ? std::span<const float>(&m_one, 1) : std::span<const float>(sy.mem_history);
+            const float total_gb = static_cast<float>(static_cast<double>(sy.mem_total) / (1024.0 * 1024.0 * 1024.0));
+            const render::SparklineRange mr = render::ComputeMemoryZoomRange(m_sp, total_gb);
+            const std::wstring mr_lbl = render::FormatMemoryZoomLabel(mr);
+
+            wchar_t cl[24]{}, ml[28]{};
+            std::swprintf(cl, ARRAYSIZE(cl), L"● CPU %d%%", sy.cpu_pct);
+            std::swprintf(ml, ARRAYSIZE(ml), L"● 内存 %.1f%%", mem_pct_f);
+            const float c_x0 = 18.0f, c_x1 = 18.0f + card_w;
+            const float m_x0 = c_x1 + gap, m_x1 = w - 18.0f;
+            text(cl, fmt_small_.Get(), c_x0 + 8.0f, box_top + 6.0f, c_x0 + card_w * 0.62f, box_top + 22.0f, col_cpu);
+            text(L"0–100%", fmt_small_right_.Get(), c_x0 + card_w * 0.52f, box_top + 6.0f, c_x1 - 8.0f, box_top + 22.0f, sec);
+            text(ml, fmt_small_.Get(), m_x0 + 8.0f, box_top + 6.0f, m_x0 + card_w * 0.60f, box_top + 22.0f, col_mem);
+            text(mr_lbl, fmt_small_right_.Get(), m_x0 + card_w * 0.50f, box_top + 6.0f, m_x1 - 8.0f, box_top + 22.0f, sec);
+
+            const D2D1_RECT_F cplot = D2D1::RectF(cbox.left + 8.0f, cbox.top + 25.0f, cbox.right - 8.0f, cbox.bottom - 8.0f);
+            const D2D1_RECT_F mplot = D2D1::RectF(mbox.left + 8.0f, mbox.top + 25.0f, mbox.right - 8.0f, mbox.bottom - 8.0f);
+            dc->DrawLine(D2D1::Point2F(cplot.left, (cplot.top + cplot.bottom) * 0.5f),
+                         D2D1::Point2F(cplot.right, (cplot.top + cplot.bottom) * 0.5f), Brush(dc, line), 0.7f);
+            dc->DrawLine(D2D1::Point2F(mplot.left, (mplot.top + mplot.bottom) * 0.5f),
+                         D2D1::Point2F(mplot.right, (mplot.top + mplot.bottom) * 0.5f), Brush(dc, line), 0.7f);
+            render::DrawTahoeSparkline(fac.Get(), dc, Brush(dc, 0xFFFFFFFFu), round.Get(), c_sp, 100.0f, cplot, col_cpu, true, dark_mode_);
+            render::DrawTahoeSparkline(fac.Get(), dc, Brush(dc, 0xFFFFFFFFu), round.Get(), m_sp, mr.max_val, mplot, col_mem, true, dark_mode_, 48, mr.min_val);
+        }
+
         button(18.0f, h - 46.0f, 148.0f, L"打开任务管理器", "wd:open-taskmgr", false);
         break;
     }

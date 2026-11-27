@@ -5,11 +5,15 @@
 #include "../../../../src/ui/window_material.h"
 
 #include <d2d1effects.h>
+#include <d2d1_2.h>
+#include "menu_underlay_frost_vs.h"
+#include "menu_underlay_frost_ps.h"
 #include <d2d1effects_2.h>
 #include <commctrl.h>
 #include <commoncontrols.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 
 #include <algorithm>
@@ -922,6 +926,38 @@ uint32_t ExtractVibrantAccentArgb(const uint8_t* pbgra, uint32_t width, uint32_t
     return HslToArgb(h, s, l);
 }
 
+namespace {
+
+std::wstring QueryTranscodedWallpaperPath() {
+    wchar_t appdata[MAX_PATH]{};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appdata)) && appdata[0] != L'\0') {
+        std::wstring p(appdata);
+        if (!p.empty() && p.back() != L'\\' && p.back() != L'/') p.push_back(L'\\');
+        p += L"Microsoft\\Windows\\Themes\\TranscodedWallpaper";
+        if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return p;
+        }
+    }
+    return {};
+}
+
+bool QueryFileStamp(const std::wstring& path, uint64_t& out_mtime, uint64_t& out_size) noexcept {
+    out_mtime = 0;
+    out_size = 0;
+    if (path.empty()) return false;
+    WIN32_FILE_ATTRIBUTE_DATA fad{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) {
+        return false;
+    }
+    out_mtime = (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
+                static_cast<uint64_t>(fad.ftLastWriteTime.dwLowDateTime);
+    out_size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) |
+               static_cast<uint64_t>(fad.nFileSizeLow);
+    return true;
+}
+
+} // namespace
+
 std::wstring WallpaperBackdrop::QueryCurrentWallpaperPath() {
     ComPtr<IDesktopWallpaper> dw;
     if (SUCCEEDED(CoCreateInstance(CLSID_DesktopWallpaper, nullptr,
@@ -934,6 +970,33 @@ std::wstring WallpaperBackdrop::QueryCurrentWallpaperPath() {
                 return out;
             }
         }
+        // Multi-monitor setups with distinct wallpapers return S_FALSE + empty string for nullptr;
+        // query the primary monitor (origin 0,0) or monitor 0 instead.
+        UINT mon_count = 0;
+        if (SUCCEEDED(dw->GetMonitorDevicePathCount(&mon_count)) && mon_count > 0) {
+            std::wstring first_valid;
+            for (UINT i = 0; i < mon_count; ++i) {
+                LPWSTR mon_id = nullptr;
+                if (FAILED(dw->GetMonitorDevicePathAt(i, &mon_id)) || !mon_id) continue;
+                RECT mrc{};
+                const bool is_primary = SUCCEEDED(dw->GetMonitorRECT(mon_id, &mrc)) &&
+                                        mrc.left == 0 && mrc.top == 0 && mrc.right > mrc.left && mrc.bottom > mrc.top;
+                LPWSTR mon_wp = nullptr;
+                if (SUCCEEDED(dw->GetWallpaper(mon_id, &mon_wp)) && mon_wp) {
+                    std::wstring candidate(mon_wp);
+                    CoTaskMemFree(mon_wp);
+                    if (!candidate.empty() && GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        if (is_primary) {
+                            CoTaskMemFree(mon_id);
+                            return candidate;
+                        }
+                        if (first_valid.empty()) first_valid = std::move(candidate);
+                    }
+                }
+                CoTaskMemFree(mon_id);
+            }
+            if (!first_valid.empty()) return first_valid;
+        }
     }
     wchar_t spi_buf[MAX_PATH * 2]{};
     if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, ARRAYSIZE(spi_buf), spi_buf, 0) && spi_buf[0] != L'\0') {
@@ -941,7 +1004,39 @@ std::wstring WallpaperBackdrop::QueryCurrentWallpaperPath() {
             return spi_buf;
         }
     }
-    return {};
+    // Final fallback for Windows Spotlight / deleted source image: active TranscodedWallpaper.
+    return QueryTranscodedWallpaperPath();
+}
+
+std::wstring WallpaperBackdrop::QuerySystemWallpaperChangeToken() {
+    wchar_t spi_buf[MAX_PATH * 2]{};
+    std::wstring spi_path;
+    if (SystemParametersInfoW(SPI_GETDESKWALLPAPER, ARRAYSIZE(spi_buf), spi_buf, 0) && spi_buf[0] != L'\0') {
+        spi_path = spi_buf;
+    }
+    uint64_t spi_mtime = 0, spi_size = 0;
+    (void)QueryFileStamp(spi_path, spi_mtime, spi_size);
+
+    const std::wstring tc_path = QueryTranscodedWallpaperPath();
+    uint64_t tc_mtime = 0, tc_size = 0;
+    (void)QueryFileStamp(tc_path, tc_mtime, tc_size);
+
+    wchar_t style_buf[32]{};
+    wchar_t tile_buf[16]{};
+    DWORD cb_style = sizeof(style_buf);
+    DWORD cb_tile = sizeof(tile_buf);
+    RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"WallpaperStyle", RRF_RT_REG_SZ, nullptr, style_buf, &cb_style);
+    RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Desktop", L"TileWallpaper", RRF_RT_REG_SZ, nullptr, tile_buf, &cb_tile);
+
+    wchar_t stamp[160]{};
+    std::swprintf(stamp, ARRAYSIZE(stamp), L"|%llu|%llu|%llu|%llu|%ls|%ls",
+                  static_cast<unsigned long long>(spi_mtime),
+                  static_cast<unsigned long long>(spi_size),
+                  static_cast<unsigned long long>(tc_mtime),
+                  static_cast<unsigned long long>(tc_size),
+                  style_buf,
+                  tile_buf);
+    return spi_path + stamp;
 }
 
 DESKTOP_WALLPAPER_POSITION WallpaperBackdrop::QueryWallpaperPosition() {
@@ -1311,6 +1406,7 @@ ID2D1Bitmap1* WallpaperBackdrop::GlassSharpBitmap(ID2D1DeviceContext* dc,
                 job.key = L"__glass_wallpaper_sharp__";
                 job.path = wallpaper_path_;
                 job.is_wallpaper_sharp = true;
+                job.generation = glass_sharp_generation_;
                 job.max_w = gw;
                 job.max_h = gh;
                 if (pending_keys_.find(job.key) == pending_keys_.end()) {
@@ -1366,7 +1462,21 @@ void WallpaperBackdrop::ReleaseGlassSource() const noexcept {
     glass_frost_.Reset();
     glass_sharp_w_ = 0;
     glass_sharp_h_ = 0;
+    ++glass_sharp_generation_;
     glass_sharp_pending_ = false;
+    glass_sharp_updated_ = false;
+    {
+        std::lock_guard<std::mutex> lk(async_mtx_);
+        pending_keys_.erase(L"__glass_wallpaper_sharp__");
+        decode_queue_.erase(
+            std::remove_if(decode_queue_.begin(), decode_queue_.end(),
+                           [](const DecodeJob& j) { return j.is_wallpaper_sharp; }),
+            decode_queue_.end());
+        completed_uploads_.erase(
+            std::remove_if(completed_uploads_.begin(), completed_uploads_.end(),
+                           [](const DecodedUpload& u) { return u.key == L"__glass_wallpaper_sharp__"; }),
+            completed_uploads_.end());
+    }
 }
 
 namespace {
@@ -1485,10 +1595,24 @@ ID2D1ImageBrush* WallpaperBackdrop::SampledMicaBrush(ID2D1DeviceContext* dc, boo
 }
 
 void WallpaperBackdrop::ReleaseMenuMaterialCache() const noexcept {
-    menu_glass_pool_.Reset();
+    menu_tile_glass_.Reset();
+    menu_underlay_bake_state_.Reset();
+    menu_underlay_bake_context_.Reset();
+    menu_underlay_vertex_shader_.Reset();
+    menu_underlay_pixel_shader_.Reset();
+    menu_underlay_constants_.Reset();
+    for (auto& view : menu_underlay_scratch_rtv_) view.Reset();
+    for (auto& view : menu_underlay_scratch_srv_) view.Reset();
+    for (auto& texture : menu_underlay_scratch_texture_) texture.Reset();
+    for (auto& bitmap : menu_underlay_scratch_) bitmap.Reset();
     menu_underlay_frost_.Reset();
     menu_underlay_bitmap_.Reset();
-    std::vector<uint8_t>{}.swap(menu_underlay_pixels_);
+    menu_underlay_imported_.Reset();
+    menu_underlay_shared_.Reset();
+    menu_underlay_texture_.Reset();
+    menu_underlay_pending_ = false;
+    menu_underlay_failed_ = false;
+    menu_underlay_frost_error_logged_ = false;
     menu_underlay_w_ = 0;
     menu_underlay_h_ = 0;
     menu_underlay_screen_px_ = {};
@@ -1502,34 +1626,257 @@ void WallpaperBackdrop::ReleaseMenuMaterialCache() const noexcept {
     menu_failed_ = false;
 }
 
-void WallpaperBackdrop::SetMenuUnderlaySnapshot(std::vector<uint8_t> pbgra,
-                                                uint32_t width,
-                                                uint32_t height,
+void WallpaperBackdrop::SetMenuUnderlaySnapshot(ID3D11Texture2D* texture,
                                                 RECT screen_rect_px) const noexcept {
     menu_underlay_frost_.Reset();
     menu_underlay_bitmap_.Reset();
-    if (pbgra.empty() || width == 0 || height == 0 ||
-        pbgra.size() < static_cast<size_t>(width) * height * 4u ||
-        screen_rect_px.right <= screen_rect_px.left ||
-        screen_rect_px.bottom <= screen_rect_px.top) {
-        std::vector<uint8_t>{}.swap(menu_underlay_pixels_);
-        menu_underlay_w_ = 0;
-        menu_underlay_h_ = 0;
-        menu_underlay_screen_px_ = {};
-        return;
-    }
-    menu_underlay_pixels_ = std::move(pbgra);
-    menu_underlay_w_ = width;
-    menu_underlay_h_ = height;
+    menu_underlay_imported_.Reset();
+    menu_underlay_shared_.Reset();
+    menu_underlay_texture_.Reset();
+    menu_underlay_pending_ = false;
+    menu_underlay_failed_ = false;
+    menu_underlay_frost_error_logged_ = false;
+    menu_underlay_w_ = menu_underlay_h_ = 0;
+    menu_underlay_screen_px_ = {};
+    if (!texture || screen_rect_px.right <= screen_rect_px.left ||
+        screen_rect_px.bottom <= screen_rect_px.top) return;
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    if (!desc.Width || !desc.Height || desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+        desc.SampleDesc.Count != 1) return;
+    menu_underlay_texture_ = texture;
+    menu_underlay_w_ = desc.Width;
+    menu_underlay_h_ = desc.Height;
     menu_underlay_screen_px_ = screen_rect_px;
+}
+
+void WallpaperBackdrop::BindMenuDevice(ID2D1DeviceContext* dc) const {
+    if (menu_dc_.Get() == dc) return;
+    // D2D bitmap bindings belong to the old device context, but the native frost
+    // shaders/state can be reused by another D2D DC on the same D3D11 device.
+    ComPtr<ID3D11DeviceContext1> bake_context;
+    ComPtr<ID3DDeviceContextState> bake_state;
+    ComPtr<ID3D11VertexShader> vertex_shader;
+    ComPtr<ID3D11PixelShader> pixel_shader;
+    ComPtr<ID3D11Buffer> constants;
+    if (menu_underlay_bake_context_) {
+        ComPtr<ID2D1Device> d2d;
+        ComPtr<ID2D1Device2> d2d2;
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<ID3D11Device> incoming, previous;
+        dc->GetDevice(&d2d);
+        menu_underlay_bake_context_->GetDevice(&previous);
+        if (SUCCEEDED(d2d.As(&d2d2)) && SUCCEEDED(d2d2->GetDxgiDevice(&dxgi)) &&
+            SUCCEEDED(dxgi.As(&incoming)) && incoming.Get() == previous.Get()) {
+            bake_context = std::move(menu_underlay_bake_context_);
+            bake_state = std::move(menu_underlay_bake_state_);
+            vertex_shader = std::move(menu_underlay_vertex_shader_);
+            pixel_shader = std::move(menu_underlay_pixel_shader_);
+            constants = std::move(menu_underlay_constants_);
+        }
+    }
+    auto texture = menu_underlay_texture_;
+    auto shared = menu_underlay_shared_;
+    const RECT bounds = menu_underlay_screen_px_;
+    ReleaseMenuMaterialCache();
+    menu_dc_ = dc;
+    SetMenuUnderlaySnapshot(texture.Get(), bounds);
+    menu_underlay_shared_ = std::move(shared);
+    menu_underlay_bake_context_ = std::move(bake_context);
+    menu_underlay_bake_state_ = std::move(bake_state);
+    menu_underlay_vertex_shader_ = std::move(vertex_shader);
+    menu_underlay_pixel_shader_ = std::move(pixel_shader);
+    menu_underlay_constants_ = std::move(constants);
+}
+
+bool WallpaperBackdrop::EnsureMenuUnderlay(ID2D1DeviceContext* dc) const {
+    const auto finish_frost = [&] {
+        if (menu_underlay_frost_ || BakeMenuUnderlayFrost(dc)) {
+            menu_underlay_pending_ = false;
+            return true;
+        }
+        menu_underlay_pending_ = true;
+        if (!menu_underlay_frost_error_logged_) {
+            menu_underlay_frost_error_logged_ = true;
+            ui::LogWindowMaterial("desktop menu GPU frost bake failed; bounded material retry requested");
+        }
+        return false;
+    };
+    if (menu_underlay_bitmap_) return finish_frost();
+    if (!menu_underlay_texture_ || menu_underlay_failed_) return false;
+    const auto fail = [&](HRESULT hr) {
+        menu_underlay_pending_ = false;
+        menu_underlay_failed_ = true;
+        ui::LogWindowMaterial("desktop menu GPU underlay import failed hr=0x%08lX",
+                              static_cast<unsigned long>(hr));
+        return false;
+    };
+    ComPtr<ID2D1Device> device;
+    ComPtr<ID2D1Device2> device2;
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<ID3D11Device> destination;
+    dc->GetDevice(&device);
+    HRESULT hr = device.As(&device2);
+    if (SUCCEEDED(hr)) hr = device2->GetDxgiDevice(&dxgi);
+    if (SUCCEEDED(hr)) hr = dxgi.As(&destination);
+    if (FAILED(hr)) return fail(hr);
+    ComPtr<ID3D11Device> source;
+    menu_underlay_texture_->GetDevice(&source);
+    ComPtr<ID3D11Texture2D> texture = menu_underlay_texture_;
+    if (source.Get() != destination.Get()) {
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        if (!menu_underlay_shared_) {
+            desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+            ComPtr<ID3D11Texture2D> shared;
+            hr = source->CreateTexture2D(&desc, nullptr, &shared);
+            if (FAILED(hr)) return fail(hr);
+            ComPtr<IDXGIKeyedMutex> producer_lock;
+            hr = shared.As(&producer_lock);
+            if (FAILED(hr)) return fail(hr);
+            hr = producer_lock->AcquireSync(0, 0);
+            if (hr != S_OK) return fail(hr);
+            ComPtr<ID3D11DeviceContext> context;
+            source->GetImmediateContext(&context);
+            context->CopyResource(shared.Get(), texture.Get());
+            context->Flush();
+            hr = producer_lock->ReleaseSync(1);
+            if (FAILED(hr)) return fail(hr);
+            menu_underlay_shared_ = std::move(shared);
+        }
+        ComPtr<IDXGIResource> resource;
+        HANDLE handle = nullptr; // Legacy shared handle is owned by the texture, not CloseHandle.
+        hr = menu_underlay_shared_.As(&resource);
+        if (SUCCEEDED(hr)) hr = resource->GetSharedHandle(&handle);
+        ComPtr<ID3D11Texture2D> opened;
+        if (SUCCEEDED(hr)) hr = destination->OpenSharedResource(handle, IID_PPV_ARGS(&opened));
+        if (FAILED(hr)) return fail(hr);
+        ComPtr<IDXGIKeyedMutex> consumer_lock;
+        hr = opened.As(&consumer_lock);
+        if (FAILED(hr)) return fail(hr);
+        hr = consumer_lock->AcquireSync(1, 0);
+        if (hr == WAIT_TIMEOUT) {
+            menu_underlay_pending_ = true;
+            return false;
+        }
+        if (hr != S_OK) return fail(hr);
+        // Copy while owning the shared resource; the menu can then draw its private
+        // texture without holding a mutex across the caller's BeginDraw/EndDraw.
+        desc.MiscFlags = 0;
+        hr = destination->CreateTexture2D(&desc, nullptr, &texture);
+        ComPtr<ID3D11DeviceContext> context;
+        destination->GetImmediateContext(&context);
+        if (SUCCEEDED(hr)) {
+            context->CopyResource(texture.Get(), opened.Get());
+            context->Flush();
+        }
+        const HRESULT release_hr = consumer_lock->ReleaseSync(1);
+        if (FAILED(hr)) return fail(hr);
+        if (FAILED(release_hr)) return fail(release_hr);
+        menu_underlay_imported_ = texture;
+    }
+    ComPtr<IDXGISurface> surface;
+    hr = texture.As(&surface);
+    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+    if (SUCCEEDED(hr)) hr = dc->CreateBitmapFromDxgiSurface(surface.Get(), &properties, &menu_underlay_bitmap_);
+    if (FAILED(hr)) return fail(hr);
+    menu_underlay_pending_ = false;
+    ++menu_uploads_;
+    return finish_frost();
+}
+
+bool WallpaperBackdrop::BakeMenuUnderlayFrost(ID2D1DeviceContext* dc) const {
+    // Build-time compiled shaders avoid the first-menu cost of the generic D2D
+    // convolution effect. Seven bounded passes retain the original box/rounding recipe.
+    auto* texture = menu_underlay_imported_ ? menu_underlay_imported_.Get() : menu_underlay_texture_.Get();
+    if (!texture) return false;
+    ComPtr<ID3D11Device> device;
+    texture->GetDevice(&device);
+    ComPtr<ID3D11Device1> device1;
+    if (FAILED(device.As(&device1))) return false;
+    if (!menu_underlay_bake_context_) {
+        ComPtr<ID3D11DeviceContext> context;
+        device->GetImmediateContext(&context);
+        if (FAILED(context.As(&menu_underlay_bake_context_))) return false;
+    }
+    if (!menu_underlay_bake_state_) {
+        const auto level = device->GetFeatureLevel();
+        if (FAILED(device1->CreateDeviceContextState(0, &level, 1, D3D11_SDK_VERSION,
+            __uuidof(ID3D11Device), nullptr, &menu_underlay_bake_state_))) return false;
+    }
+    if (!menu_underlay_vertex_shader_ && FAILED(device->CreateVertexShader(
+        g_menu_underlay_frost_vs, sizeof(g_menu_underlay_frost_vs), nullptr, &menu_underlay_vertex_shader_))) return false;
+    if (!menu_underlay_pixel_shader_ && FAILED(device->CreatePixelShader(
+        g_menu_underlay_frost_ps, sizeof(g_menu_underlay_frost_ps), nullptr, &menu_underlay_pixel_shader_))) return false;
+    if (!menu_underlay_constants_) {
+        D3D11_BUFFER_DESC desc{};
+        desc.ByteWidth = 16;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(device->CreateBuffer(&desc, nullptr, &menu_underlay_constants_))) return false;
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        if (menu_underlay_scratch_[i]) {
+            const auto size = menu_underlay_scratch_[i]->GetPixelSize();
+            if (size.width == menu_underlay_w_ && size.height == menu_underlay_h_) continue;
+        }
+        menu_underlay_scratch_[i].Reset();
+        menu_underlay_scratch_srv_[i].Reset();
+        menu_underlay_scratch_rtv_[i].Reset();
+        menu_underlay_scratch_texture_[i].Reset();
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = menu_underlay_w_; desc.Height = menu_underlay_h_;
+        desc.MipLevels = desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = device->CreateTexture2D(&desc, nullptr, &menu_underlay_scratch_texture_[i]);
+        if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(menu_underlay_scratch_texture_[i].Get(), nullptr,
+            &menu_underlay_scratch_srv_[i]);
+        if (SUCCEEDED(hr)) hr = device->CreateRenderTargetView(menu_underlay_scratch_texture_[i].Get(), nullptr,
+            &menu_underlay_scratch_rtv_[i]);
+        ComPtr<IDXGISurface> surface;
+        if (SUCCEEDED(hr)) hr = menu_underlay_scratch_texture_[i].As(&surface);
+        const auto props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+        if (SUCCEEDED(hr)) hr = dc->CreateBitmapFromDxgiSurface(surface.Get(), &props, &menu_underlay_scratch_[i]);
+        if (FAILED(hr)) return false;
+    }
+    ComPtr<ID3D11ShaderResourceView> source;
+    if (FAILED(device->CreateShaderResourceView(texture, nullptr, &source))) return false;
+    auto* context = menu_underlay_bake_context_.Get();
+    ComPtr<ID3DDeviceContextState> previous;
+    context->SwapDeviceContextState(menu_underlay_bake_state_.Get(), &previous);
+    context->IASetInputLayout(nullptr);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->VSSetShader(menu_underlay_vertex_shader_.Get(), nullptr, 0);
+    context->PSSetShader(menu_underlay_pixel_shader_.Get(), nullptr, 0);
+    auto* constants = menu_underlay_constants_.Get();
+    context->PSSetConstantBuffers(0, 1, &constants);
+    const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(menu_underlay_w_), static_cast<float>(menu_underlay_h_), 0, 1};
+    context->RSSetViewports(1, &viewport);
+    for (unsigned pass = 0; pass < 7; ++pass) {
+        const UINT values[4]{menu_underlay_w_, menu_underlay_h_, pass == 6 ? 2u : pass % 2u, 0};
+        context->UpdateSubresource(constants, 0, nullptr, values, 0, 0);
+        auto* input = pass == 0 ? source.Get() : menu_underlay_scratch_srv_[(pass - 1) % 2].Get();
+        auto* output = menu_underlay_scratch_rtv_[pass % 2].Get();
+        context->OMSetRenderTargets(1, &output, nullptr);
+        context->PSSetShaderResources(0, 1, &input);
+        context->Draw(3, 0);
+        ID3D11ShaderResourceView* empty = nullptr;
+        context->PSSetShaderResources(0, 1, &empty);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+    // Restore every D3D stage before returning to the caller's active D2D batch.
+    context->SwapDeviceContextState(previous.Get(), nullptr);
+    menu_underlay_frost_ = menu_underlay_scratch_[0];
+    return true;
 }
 
 ID2D1BitmapBrush1* WallpaperBackdrop::MenuNoiseBrush(ID2D1DeviceContext* dc) const {
     if (!dc) return nullptr;
-    if (menu_dc_.Get() != dc) {
-        ReleaseMenuMaterialCache();
-        menu_dc_ = dc;
-    }
+    BindMenuDevice(dc);
     if (menu_noise_brush_ || menu_noise_failed_) return menu_noise_brush_.Get();
     CreateAcrylicNoiseBrush(dc, menu_noise_bitmap_, menu_noise_brush_);
     if (!menu_noise_brush_) {
@@ -1543,24 +1890,15 @@ ID2D1BitmapBrush1* WallpaperBackdrop::MenuNoiseBrush(ID2D1DeviceContext* dc) con
 bool WallpaperBackdrop::DrawMenuMaterial(ID2D1DeviceContext* dc, const D2D1_RECT_F& card_px,
     POINT popup_screen_px, float radius_px, model::CardMaterial material, bool dark,
     uint8_t opacity, uint8_t dispersion_level,
-    const model::BeautifySettings* glass_cfg) const {
+    const model::BeautifySettings* glass_cfg,
+    const ExternalLiveGlassSource* external_live) const {
     if (!dc || !screen_w_) return false;
     if (material != model::CardMaterial::Mica &&
         material != model::CardMaterial::MicaAlt &&
         material != model::CardMaterial::LiquidGlass) {
         return false;
     }
-    if (menu_dc_.Get() != dc) {
-        // Preserve freshly staged `menu_underlay_pixels_` across initial menu DC binding.
-        auto saved_px = std::move(menu_underlay_pixels_);
-        const uint32_t sw = menu_underlay_w_, sh = menu_underlay_h_;
-        const RECT sr = menu_underlay_screen_px_;
-        ReleaseMenuMaterialCache();
-        menu_dc_ = dc;
-        if (!saved_px.empty()) {
-            SetMenuUnderlaySnapshot(std::move(saved_px), sw, sh, sr);
-        }
-    }
+    BindMenuDevice(dc);
 
     if (material == model::CardMaterial::LiquidGlass) {
         ComPtr<ID2D1Factory> base_fac;
@@ -1575,6 +1913,24 @@ bool WallpaperBackdrop::DrawMenuMaterial(ID2D1DeviceContext* dc, const D2D1_RECT
         float orig_x = static_cast<float>(popup_screen_px.x - monitor_screen_origin_.x);
         float orig_y = static_cast<float>(popup_screen_px.y - monitor_screen_origin_.y);
 
+        // When a live video wallpaper source is provided, prefer it directly so BeautifyDrawer,
+        // Dock popups, and context menus refract live motion instead of any stale static underlay.
+        if (external_live && external_live->sharp_bmp &&
+            external_live->sharp_w > 0 && external_live->sharp_h > 0) {
+            sharp_bmp = external_live->sharp_bmp;
+            sharp_w = external_live->sharp_w;
+            sharp_h = external_live->sharp_h;
+            frost_bmp = (external_live->frost_bmp && external_live->frost_w > 0 && external_live->frost_h > 0)
+                            ? external_live->frost_bmp
+                            : sharp_bmp;
+            frost_w = (frost_bmp == external_live->frost_bmp) ? external_live->frost_w : sharp_w;
+            frost_h = (frost_bmp == external_live->frost_bmp) ? external_live->frost_h : sharp_h;
+            if (external_live->logical_w > 0 && external_live->logical_h > 0) {
+                logical_w = external_live->logical_w;
+                logical_h = external_live->logical_h;
+            }
+        }
+
         // Prefer the captured desktop underlay snapshot (refracts BOTH wallpaper AND underlying cards, G10)
         // when the popup card lies within the snapshot's screen bounds (submenus outside fall back to wallpaper).
         const RECT popup_card_scr{
@@ -1584,6 +1940,7 @@ bool WallpaperBackdrop::DrawMenuMaterial(ID2D1DeviceContext* dc, const D2D1_RECT
             popup_screen_px.y + static_cast<LONG>(std::ceil(card_px.bottom)),
         };
         const bool covered_by_underlay =
+            !sharp_bmp &&
             menu_underlay_w_ > 0 && menu_underlay_h_ > 0 &&
             popup_card_scr.left >= menu_underlay_screen_px_.left &&
             popup_card_scr.top >= menu_underlay_screen_px_.top &&
@@ -1591,21 +1948,10 @@ bool WallpaperBackdrop::DrawMenuMaterial(ID2D1DeviceContext* dc, const D2D1_RECT
             popup_card_scr.bottom <= menu_underlay_screen_px_.bottom;
 
         if (covered_by_underlay) {
-            if (!menu_underlay_bitmap_ && !menu_underlay_pixels_.empty()) {
-                menu_underlay_bitmap_ = UploadImmutablePbgraBitmap(
-                    dc, menu_underlay_pixels_.data(), menu_underlay_w_, menu_underlay_h_);
-                if (menu_underlay_bitmap_) {
-                    ++menu_uploads_;
-                    const size_t pc = static_cast<size_t>(menu_underlay_w_) * menu_underlay_h_;
-                    std::vector<uint8_t> sa(pc * 4u), sb(pc * 4u);
-                    SeparableBoxBlur3Pass(menu_underlay_pixels_.data(), sa, sb,
-                                          menu_underlay_w_, menu_underlay_h_, 8);
-                    BoostSaturationInPlace(sb.data(), pc, 1.18f);
-                    menu_underlay_frost_ = UploadImmutablePbgraBitmap(
-                        dc, sb.data(), menu_underlay_w_, menu_underlay_h_);
-                }
-            }
-            if (menu_underlay_bitmap_) {
+            const bool underlay_ready = EnsureMenuUnderlay(dc);
+            // Do not silently substitute a sharp bitmap for a failed frost bake.
+            if (!underlay_ready && menu_underlay_bitmap_) return false;
+            if (underlay_ready) {
                 sharp_bmp = menu_underlay_bitmap_.Get();
                 sharp_w = menu_underlay_w_;
                 sharp_h = menu_underlay_h_;
@@ -1642,45 +1988,75 @@ bool WallpaperBackdrop::DrawMenuMaterial(ID2D1DeviceContext* dc, const D2D1_RECT
             frost_h = quarter_h_;
         }
 
-        // Menus always keep enough readability frost (>= 26%) even if desktop cards are set to clear 0%.
-        GlassCardRequest req{};
-        req.left_dip = card_px.left;
-        req.top_dip = card_px.top;
-        req.right_dip = card_px.right;
-        req.bottom_dip = card_px.bottom;
-        req.radius_dip = radius_px;
+        // Unified WacOS / macOS Tahoe Liquid Glass for menus & Dock popups:
+        // exact circular rounded-rect SDF + superellipse Snell bezel + RGB prism dispersion +
+        // Gaussian frost + vibrancy + pixel-accurate SDF directional specular rim.
+        model::BeautifySettings gs{};
         if (glass_cfg) {
-            req.glass_options = glass_cfg->glass_options;
-            req.reference_mode = glass_cfg->glass_reference;
-            req.blur_radius = glass_cfg->glass_blur_radius;
-            req.blur_edge = glass_cfg->glass_blur_edge;
-            req.thickness_dip = std::clamp<uint8_t>(glass_cfg->glass_thickness, 1u, 80u);
-            req.ior = static_cast<float>(std::clamp<uint16_t>(glass_cfg->glass_ior_x100, 100u, 400u)) * 0.01f;
-            req.dispersion_gain = std::min<uint8_t>(glass_cfg->glass_dispersion, 50u);
-            req.glare_percent = std::min<uint8_t>(glass_cfg->glass_glare, 120u);
-            req.glare_angle_deg = std::clamp<int16_t>(glass_cfg->glass_glare_angle, -180, 180);
-            req.frost_percent = std::max<uint8_t>(glass_cfg->glass_frost, 26u);
+            gs = *glass_cfg;
         } else {
-            req.thickness_dip = 22u;
-            req.ior = 1.50f;
-            req.dispersion_gain = model::MapLegacyGlassDispersionToGain(dispersion_level);
-            req.glare_percent = 85u;
-            req.glare_angle_deg = -45;
-            req.frost_percent = std::max<uint8_t>(opacity / 2u, 26u);
+            gs.glass_preset = 5;
+            gs.card_opacity_percent = opacity;
+            gs.glass_dispersion = model::MapLegacyGlassDispersionToGain(dispersion_level);
         }
-        req.dark_mode = dark;
-        req.elevated_hover = true;
-        req.allow_clear_passthrough = false;
-        req.draw_rim_in_shader = false; // FluentMenu paints its own crisp 1px outer border.
+        gs.dark_mode = dark;
 
-        D2D1_MATRIX_3X2_F cur_xf{};
-        dc->GetTransform(&cur_xf);
-        const GlassDrawPlan plan = MakeGlassDrawPlan(req, 1.0f, cur_xf.dx, cur_xf.dy);
-        menu_glass_pool_.BeginFrame();
-        const bool ok = menu_glass_pool_.DrawCard(
-            fac1.Get(), dc, sharp_bmp, sharp_w, sharp_h, frost_bmp, frost_w, frost_h,
-            logical_w, logical_h, orig_x, orig_y, cur_xf.dx, cur_xf.dy, plan);
-        menu_glass_pool_.EndFrame();
+        const float dpi_s = std::max(1.0f, dip_scale_);
+        TileGlassConfig tcfg = MakeTileGlassConfig(gs, radius_px, /*elevated_hover=*/true, /*energy_saver=*/false);
+        tcfg.corner_radius_dip = radius_px;
+        tcfg.bezel_min_dip *= dpi_s;
+        tcfg.bezel_max_dip *= dpi_s;
+        tcfg.max_displacement_dip *= dpi_s;
+        // Clear menu glass (the WacOS "menus de vidro" recipe): what lies behind stays visible and
+        // refracted. A light blur (about 5 dip at the default frost, about 9 dip at full frost; the
+        // user's 界面透明度/frost slider drives it) softens text underneath into shapes, while the
+        // bezel refraction, dispersion, vibrancy and specular rim stay. Readability comes from an
+        // adaptive theme veil rather than a fixed heavy frost: light where the backdrop already
+        // suits the menu's ink, denser only where it fights it (WCAG 4.5:1 floor, plan goal G6).
+        const float user_frost = std::clamp(tcfg.frost_amount, 0.0f, 1.0f);
+        tcfg.frost_amount = user_frost;
+        tcfg.min_blur_dip = std::max(tcfg.min_blur_dip * dpi_s, (4.6f + 4.4f * user_frost) * dpi_s);
+        tcfg.vibrancy = std::min(tcfg.vibrancy, 1.80f);
+        tcfg.enable_drop_shadow = false; // Popup/menu window renders its own exterior drop shadow.
+        tcfg.enable_surface_rim = true;
+        tcfg.dark_appearance = dark;
+        if (dark) tcfg.white_veil_alpha = 0.0f; // A white lift would only fight the white ink.
+        const float op_k = std::clamp(static_cast<float>(opacity) / 100.0f, 0.0f, 1.0f);
+        text_contrast::Samples behind;
+        if (!wallpaper_pixels_.empty() && quarter_w_ > 0 && quarter_h_ > 0 && screen_w_ > 0 && screen_h_ > 0) {
+            const float kx = static_cast<float>(quarter_w_) / static_cast<float>(screen_w_);
+            const float ky = static_cast<float>(quarter_h_) / static_cast<float>(screen_h_);
+            const float mx = static_cast<float>(monitor_screen_origin_.x);
+            const float my = static_cast<float>(monitor_screen_origin_.y);
+            behind = text_contrast::SamplePbgra(wallpaper_pixels_, quarter_w_, quarter_h_,
+                (static_cast<float>(popup_card_scr.left) - mx) * kx, (static_cast<float>(popup_card_scr.top) - my) * ky,
+                (static_cast<float>(popup_card_scr.right) - mx) * kx, (static_cast<float>(popup_card_scr.bottom) - my) * ky);
+        }
+        // A moving wallpaper is only known by its still image here: keep a little more body.
+        const float floor_extra = (external_live && external_live->sharp_bmp) ? 0.10f : 0.0f;
+        const text_contrast::Srgb veil_rgb = dark ? text_contrast::Srgb{0.11f, 0.115f, 0.135f}
+                                                  : text_contrast::Srgb{0.975f, 0.98f, 0.99f};
+        // The inks FluentMenu uses on glass (white .94 / near-black .92).
+        const uint32_t ink = dark ? 0xF0FFFFFFu : 0xEB0F1217u;
+        const float floor_a = (dark ? 0.28f : 0.32f) + 0.08f * op_k + 0.04f * user_frost + floor_extra;
+        const float veil_a = text_contrast::SolveGlassVeilAlpha(behind, veil_rgb, ink, tcfg.vibrancy,
+            floor_a, 0.82f, dark ? 0.60f : 0.62f, 4.6f);
+        tcfg.tint = D2D1::ColorF(veil_rgb.r, veil_rgb.g, veil_rgb.b, std::max(tcfg.tint.a, veil_a));
+
+        menu_tile_glass_.BeginFrame();
+        const bool ok = menu_tile_glass_.DrawTile(
+            fac1.Get(), dc,
+            sharp_bmp, sharp_w, sharp_h,
+            logical_w, logical_h,
+            orig_x, orig_y,
+            /*dip_scale=*/1.0f,
+            card_px, tcfg,
+            /*overall_opacity=*/1.0f,
+            /*draw_rim=*/true,
+            /*light_norm_x=*/-1.0f,
+            /*light_norm_y=*/-1.0f,
+            frost_bmp, frost_w, frost_h);
+        menu_tile_glass_.EndFrame();
         return ok;
     }
 
@@ -1742,10 +2118,30 @@ bool WallpaperBackdrop::LoadForScreen(ID2D1DeviceContext* dc, uint32_t screen_wi
             ? (override_wallpaper_path.empty() ? QueryCurrentWallpaperPath() : override_wallpaper_path)
             : std::wstring{};
 
+    uint64_t cur_file_mtime = 0, cur_file_size = 0;
+    uint64_t cur_tc_mtime = 0, cur_tc_size = 0;
+    DESKTOP_WALLPAPER_POSITION cur_pos = DWPOS_FILL;
+    if (preset == model::WallpaperPreset::System) {
+        (void)QueryFileStamp(resolved_sys_path, cur_file_mtime, cur_file_size);
+        if (override_wallpaper_path.empty()) {
+            const std::wstring tc_path = QueryTranscodedWallpaperPath();
+            (void)QueryFileStamp(tc_path, cur_tc_mtime, cur_tc_size);
+        }
+        cur_pos = QueryWallpaperPosition();
+    }
+
+    const bool sys_unchanged =
+        (resolved_sys_path == wallpaper_path_) &&
+        (cur_file_mtime == wallpaper_file_mtime_) &&
+        (cur_file_size == wallpaper_file_size_) &&
+        (cur_tc_mtime == wallpaper_transcoded_mtime_) &&
+        (cur_tc_size == wallpaper_transcoded_size_) &&
+        (cur_pos == wallpaper_position_);
+
     if (owner_dc_.Get() == dc && screen_w_ == screen_width && screen_h_ == screen_height &&
         quarter_w_ == new_qw && quarter_h_ == new_qh && active_preset_ == preset &&
         !wallpaper_pixels_.empty() &&
-        (preset == model::WallpaperPreset::System ? (resolved_sys_path == wallpaper_path_)
+        (preset == model::WallpaperPreset::System ? sys_unchanged
                                                   : (dark_mode == preset_dark_mode_))) {
         preset_dark_mode_ = dark_mode;
         if (!noise_bitmap_ || !noise_brush_) {
@@ -1763,6 +2159,11 @@ bool WallpaperBackdrop::LoadForScreen(ID2D1DeviceContext* dc, uint32_t screen_wi
     ReleaseMenuMaterialCache();
     active_preset_ = preset;
     preset_dark_mode_ = dark_mode;
+    wallpaper_file_mtime_ = cur_file_mtime;
+    wallpaper_file_size_ = cur_file_size;
+    wallpaper_transcoded_mtime_ = cur_tc_mtime;
+    wallpaper_transcoded_size_ = cur_tc_size;
+    wallpaper_position_ = cur_pos;
 
     const size_t pixel_count = static_cast<size_t>(quarter_w_) * quarter_h_;
     const size_t byte_count = pixel_count * 4u;
@@ -1770,50 +2171,62 @@ bool WallpaperBackdrop::LoadForScreen(ID2D1DeviceContext* dc, uint32_t screen_wi
     bool have_pixels = false;
 
     if (preset == model::WallpaperPreset::System) {
-        wallpaper_path_ = resolved_sys_path;
-        if (!wallpaper_path_.empty()) {
-            if (IWICImagingFactory* wic = EnsureWicFactory()) {
-                ComPtr<IWICBitmapDecoder> decoder;
-                if (SUCCEEDED(wic->CreateDecoderFromFilename(wallpaper_path_.c_str(), nullptr, GENERIC_READ,
-                                                             WICDecodeMetadataCacheOnDemand, &decoder)) && decoder) {
-                    ComPtr<IWICBitmapFrameDecode> frame;
-                    if (SUCCEEDED(decoder->GetFrame(0, &frame)) && frame) {
-                        // Fill (Windows' default) and Span cover the screen and crop the overflow centred;
-                        // Stretch maps the whole image; the rare Centre/Tile/Fit fall back to Fill.
-                        ComPtr<IWICBitmapSource> source = frame;
-                        UINT iw = 0, ih = 0;
-                        frame->GetSize(&iw, &ih);
-                        if (iw && ih && QueryWallpaperPosition() != DWPOS_STRETCH) {
-                            const double screen_aspect = static_cast<double>(screen_w_) / screen_h_;
-                            WICRect crop{0, 0, static_cast<INT>(iw), static_cast<INT>(ih)};
-                            if (static_cast<double>(iw) / ih > screen_aspect) {
-                                crop.Width = std::max(1, static_cast<INT>(std::lround(ih * screen_aspect)));
-                                crop.X = (static_cast<INT>(iw) - crop.Width) / 2;
-                            } else {
-                                crop.Height = std::max(1, static_cast<INT>(std::lround(iw / screen_aspect)));
-                                crop.Y = (static_cast<INT>(ih) - crop.Height) / 2;
-                            }
-                            ComPtr<IWICBitmapClipper> clipper;
-                            if (SUCCEEDED(wic->CreateBitmapClipper(&clipper)) && clipper &&
-                                SUCCEEDED(clipper->Initialize(frame.Get(), &crop))) {
-                                source = clipper;
-                            }
-                        }
-                        ComPtr<IWICBitmapScaler> scaler;
-                        if (SUCCEEDED(wic->CreateBitmapScaler(&scaler)) && scaler &&
-                            SUCCEEDED(scaler->Initialize(source.Get(), quarter_w_, quarter_h_,
-                                                         WICBitmapInterpolationModeLinear))) {
-                            ComPtr<IWICFormatConverter> converter;
-                            if (SUCCEEDED(wic->CreateFormatConverter(&converter)) && converter &&
-                                SUCCEEDED(converter->Initialize(scaler.Get(), GUID_WICPixelFormat32bppPBGRA,
-                                                                WICBitmapDitherTypeNone, nullptr, 0.0,
-                                                                WICBitmapPaletteTypeCustom))) {
-                                have_pixels = SUCCEEDED(converter->CopyPixels(
-                                    nullptr, quarter_w_ * 4u, static_cast<UINT>(byte_count), base_pbgra.data()));
-                            }
-                        }
-                    }
+        auto decode_system_file = [&](const std::wstring& src_path) -> bool {
+            if (src_path.empty()) return false;
+            IWICImagingFactory* wic = EnsureWicFactory();
+            if (!wic) return false;
+            ComPtr<IWICBitmapDecoder> decoder;
+            if (FAILED(wic->CreateDecoderFromFilename(src_path.c_str(), nullptr, GENERIC_READ,
+                                                      WICDecodeMetadataCacheOnDemand, &decoder)) || !decoder) {
+                return false;
+            }
+            ComPtr<IWICBitmapFrameDecode> frame;
+            if (FAILED(decoder->GetFrame(0, &frame)) || !frame) return false;
+            // Fill (Windows' default) and Span cover the screen and crop the overflow centred;
+            // Stretch maps the whole image; the rare Centre/Tile/Fit fall back to Fill.
+            ComPtr<IWICBitmapSource> source = frame;
+            UINT iw = 0, ih = 0;
+            frame->GetSize(&iw, &ih);
+            if (iw && ih && cur_pos != DWPOS_STRETCH) {
+                const double screen_aspect = static_cast<double>(screen_w_) / screen_h_;
+                WICRect crop{0, 0, static_cast<INT>(iw), static_cast<INT>(ih)};
+                if (static_cast<double>(iw) / ih > screen_aspect) {
+                    crop.Width = std::max(1, static_cast<INT>(std::lround(ih * screen_aspect)));
+                    crop.X = (static_cast<INT>(iw) - crop.Width) / 2;
+                } else {
+                    crop.Height = std::max(1, static_cast<INT>(std::lround(iw / screen_aspect)));
+                    crop.Y = (static_cast<INT>(ih) - crop.Height) / 2;
                 }
+                ComPtr<IWICBitmapClipper> clipper;
+                if (SUCCEEDED(wic->CreateBitmapClipper(&clipper)) && clipper &&
+                    SUCCEEDED(clipper->Initialize(frame.Get(), &crop))) {
+                    source = clipper;
+                }
+            }
+            ComPtr<IWICBitmapScaler> scaler;
+            if (FAILED(wic->CreateBitmapScaler(&scaler)) || !scaler ||
+                FAILED(scaler->Initialize(source.Get(), quarter_w_, quarter_h_,
+                                          WICBitmapInterpolationModeLinear))) {
+                return false;
+            }
+            ComPtr<IWICFormatConverter> converter;
+            if (FAILED(wic->CreateFormatConverter(&converter)) || !converter ||
+                FAILED(converter->Initialize(scaler.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                             WICBitmapDitherTypeNone, nullptr, 0.0,
+                                             WICBitmapPaletteTypeCustom))) {
+                return false;
+            }
+            return SUCCEEDED(converter->CopyPixels(
+                nullptr, quarter_w_ * 4u, static_cast<UINT>(byte_count), base_pbgra.data()));
+        };
+
+        wallpaper_path_ = resolved_sys_path;
+        have_pixels = decode_system_file(wallpaper_path_);
+        if (!have_pixels && override_wallpaper_path.empty()) {
+            const std::wstring tc_path = QueryTranscodedWallpaperPath();
+            if (!tc_path.empty() && tc_path != wallpaper_path_ && decode_system_file(tc_path)) {
+                wallpaper_path_ = tc_path;
+                have_pixels = true;
             }
         }
         if (!have_pixels) {
@@ -1975,6 +2388,7 @@ void WallpaperBackdrop::AsyncWorkerLoop() {
 
         DecodedUpload upload{};
         upload.key = job.key;
+        upload.generation = job.generation;
         bool ok = false;
         if (job.is_wallpaper_sharp) {
             ok = DecodePositionedWallpaperPbgra(
@@ -2040,12 +2454,17 @@ void WallpaperBackdrop::DrainCompletedUploads(ID2D1DeviceContext* dc) {
 
     for (auto& u : batch) {
         if (u.key == L"__glass_wallpaper_sharp__") {
+            if (u.generation != glass_sharp_generation_) {
+                std::vector<uint8_t>{}.swap(u.pbgra);
+                continue;
+            }
             glass_sharp_pending_ = false;
             if (!u.failed && !u.pbgra.empty() && u.width > 0 && u.height > 0) {
                 glass_sharp_ = UploadImmutablePbgraBitmap(dc, u.pbgra.data(), u.width, u.height);
                 if (glass_sharp_) {
                     glass_sharp_w_ = u.width;
                     glass_sharp_h_ = u.height;
+                    glass_sharp_updated_ = true;
                     ++card_material_builds_;
                 } else {
                     glass_sharp_failed_ = true;

@@ -49,7 +49,7 @@ if(NOT PULSE_FXC_EXECUTABLE)
     endif()
 endif()
 if(NOT PULSE_FXC_EXECUTABLE)
-    message(FATAL_ERROR "fxc.exe was not found in Windows SDK; required to compile liquid_glass.hlsl")
+    message(FATAL_ERROR "fxc.exe was not found in Windows SDK; required to compile tile_liquid_glass.hlsl")
 endif()
 
 find_path(PULSE_D2D_SHADER_INCLUDE_DIR NAMES d2d1effecthelpers.hlsli)
@@ -70,46 +70,77 @@ if(NOT PULSE_D2D_SHADER_INCLUDE_DIR)
 endif()
 
 set(PULSE_GENERATED_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-set(PULSE_LIQUID_GLASS_SHADER_HEADER "${PULSE_GENERATED_SHADER_DIR}/liquid_glass_ps.h")
+set(PULSE_TILE_LIQUID_GLASS_SHADER_HEADER "${PULSE_GENERATED_SHADER_DIR}/tile_liquid_glass_ps.h")
 add_custom_command(
-    OUTPUT "${PULSE_LIQUID_GLASS_SHADER_HEADER}"
+    OUTPUT "${PULSE_TILE_LIQUID_GLASS_SHADER_HEADER}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${PULSE_GENERATED_SHADER_DIR}"
     COMMAND "${PULSE_FXC_EXECUTABLE}" /nologo /T ps_4_0 /E main /O3 /WX /Qstrip_debug
             /D D2D_FULL_SHADER /D D2D_ENTRY=main
             /I "${PULSE_D2D_SHADER_INCLUDE_DIR}"
             /I "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders"
-            /Fh "${PULSE_LIQUID_GLASS_SHADER_HEADER}"
-            /Vn g_liquid_glass_ps
-            "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/liquid_glass.hlsl"
+            /Fh "${PULSE_TILE_LIQUID_GLASS_SHADER_HEADER}"
+            /Vn g_tile_liquid_glass_ps
+            "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/tile_liquid_glass.hlsl"
     DEPENDS
-        "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/liquid_glass.hlsl"
-        "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/liquid_glass_optics.hlsli"
-        "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/liquid_glass_studio.hlsli"
-    COMMENT "Compiling liquid_glass.hlsl (ps_4_0) with fxc.exe"
+        "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/tile_liquid_glass.hlsl"
+    COMMENT "Compiling tile_liquid_glass.hlsl (ps_4_0) with fxc.exe"
     VERBATIM
 )
-add_custom_target(pulse_desktop_shaders DEPENDS "${PULSE_LIQUID_GLASS_SHADER_HEADER}")
+set(PULSE_MENU_FROST_SHADER_HEADERS)
+foreach(_stage IN ITEMS vs ps)
+    if(_stage STREQUAL "vs")
+        set(_entry VSMain)
+    else()
+        set(_entry PSMain)
+    endif()
+    set(_header "${PULSE_GENERATED_SHADER_DIR}/menu_underlay_frost_${_stage}.h")
+    add_custom_command(
+        OUTPUT "${_header}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PULSE_GENERATED_SHADER_DIR}"
+        COMMAND "${PULSE_FXC_EXECUTABLE}" /nologo /T ${_stage}_4_0 /E ${_entry} /O3 /WX /Gis /Qstrip_debug
+                /Fh "${_header}" /Vn g_menu_underlay_frost_${_stage}
+                "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/menu_underlay_frost.hlsl"
+        DEPENDS "${CMAKE_CURRENT_LIST_DIR}/host/render/shaders/menu_underlay_frost.hlsl"
+        VERBATIM
+    )
+    list(APPEND PULSE_MENU_FROST_SHADER_HEADERS "${_header}")
+endforeach()
+add_custom_target(pulse_desktop_shaders DEPENDS "${PULSE_TILE_LIQUID_GLASS_SHADER_HEADER}" ${PULSE_MENU_FROST_SHADER_HEADERS})
 
 # Desktop mount, lossless Shell COM snapshot/restore, 1/4-res wallpaper blur pyramid,
 # D3D11/D2D/DComp renderer, on-demand overlays, and OLE IDropTarget/IDropSource.
 add_library(pulse_desktop_mount_gfx STATIC
     host/desktop_mount.cpp
     host/live_wallpaper_detector.cpp
+    host/live/widget_live_extras.cpp
+    host/live/dock_system_provider.cpp
     host/render/wallpaper_backdrop.cpp
     host/render/desktop_renderer.cpp
     host/render/desktop_text_renderer.cpp
     host/render/host_backdrop_layer.cpp
-    host/render/liquid_glass_effect.cpp
+    host/render/tile_liquid_glass.cpp
     host/render/live_wallpaper_source.cpp
+    host/video/wallpaper_policy.cpp
+    host/video/video_prober.cpp
+    host/video/video_wallpaper_player.cpp
+    host/video/transcode_manager.cpp
+    host/video/video_wallpaper_controller.cpp
     host/render/vector_glyphs.cpp
+    host/render/widget_painters.cpp
+    host/render/widget_faces.cpp
+    host/render/dock_tile.cpp
+    host/render/liquid_dock_bar.cpp
+    host/render/dock_genie.cpp
     host/overlays/desktop_overlays.cpp
+    host/overlays/dock_stack_popup.cpp
+    host/overlays/dock_system_panel.cpp
     host/overlays/desktop_menu_policy.cpp
     host/overlays/widget_icons.cpp
     host/overlays/widget_detail.cpp
     host/overlays/lunar_calendar.cpp
     host/overlays/desktop_shared_menu.cpp
     host/overlays/ole_drag_drop.cpp
-    "${PULSE_LIQUID_GLASS_SHADER_HEADER}"
+    "${PULSE_TILE_LIQUID_GLASS_SHADER_HEADER}"
 )
 add_dependencies(pulse_desktop_mount_gfx pulse_desktop_shaders)
 target_sources(pulse_desktop_mount_gfx INTERFACE "${CMAKE_CURRENT_LIST_DIR}/host/desktop_strings.rc")
@@ -124,11 +155,16 @@ target_link_libraries(pulse_desktop_mount_gfx PUBLIC
     windowsapp
     runtimeobject
     d3d11
+    d3dcompiler
     dxgi
     dxguid
     d2d1
     dwrite
     dcomp
+    mfplat
+    mfuuid
+    mf
+    mfreadwrite
     windowscodecs
     dwmapi
     shlwapi
@@ -141,9 +177,12 @@ target_link_libraries(pulse_desktop_mount_gfx PUBLIC
     advapi32
     bcrypt
     psapi
+    version
     shcore
+    imm32
+    iphlpapi
+    ws2_32
 )
-
 
 # Reuse Pulse's actual menu implementation, not a desktop-specific imitation.
 set(PULSE_SHARED_SRC "${CMAKE_CURRENT_LIST_DIR}/../../src")
@@ -222,6 +261,52 @@ target_link_libraries(pulse_desktop_host PRIVATE
     pdh
 )
 add_dependencies(pulse_desktop pulse_desktop_host)
+
+# Standalone memory-capped background video wallpaper transcoder (Media Foundation only, zero FFmpeg).
+add_executable(pulse_wallpaper_transcoder
+    transcoder/transcoder_main.cpp
+)
+target_compile_features(pulse_wallpaper_transcoder PRIVATE cxx_std_20)
+target_compile_options(pulse_wallpaper_transcoder PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_wallpaper_transcoder PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulse_wallpaper_transcoder PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+target_link_options(pulse_wallpaper_transcoder PRIVATE /INCREMENTAL:NO /OPT:REF)
+target_link_libraries(pulse_wallpaper_transcoder PRIVATE
+    pulse_desktop_ipc
+    d3d11
+    dxgi
+    dxguid
+    mfplat
+    mfuuid
+    mf
+    mfreadwrite
+    ole32
+    oleaut32
+)
+add_dependencies(pulse_desktop pulse_wallpaper_transcoder)
+add_dependencies(pulse_desktop_host pulse_wallpaper_transcoder)
+
+# Unit + real D3D11/DComp/MF integration tests for video wallpaper policy, cache, pause, player & transcoder.
+add_executable(pulse_desktop_video_wallpaper_test
+    tests/video_wallpaper_test.cpp
+)
+target_compile_features(pulse_desktop_video_wallpaper_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_wallpaper_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_wallpaper_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulse_desktop_video_wallpaper_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
+target_link_libraries(pulse_desktop_video_wallpaper_test PRIVATE pulse_desktop_mount_gfx pulse_desktop_model pulse_desktop_ipc)
+add_dependencies(pulse_desktop_video_wallpaper_test pulse_wallpaper_transcoder)
+
+# Hardware benchmark & quality/coexistence verification suite (not shipped).
+add_executable(pulse_desktop_video_wallpaper_bench EXCLUDE_FROM_ALL
+    tests/video_wallpaper_bench.cpp
+)
+target_compile_features(pulse_desktop_video_wallpaper_bench PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_wallpaper_bench PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_wallpaper_bench PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulse_desktop_video_wallpaper_bench PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
+target_link_libraries(pulse_desktop_video_wallpaper_bench PRIVATE pulse_desktop_mount_gfx pulse_desktop_model pulse_desktop_ipc pdh psapi)
+add_dependencies(pulse_desktop_video_wallpaper_bench pulse_wallpaper_transcoder)
 if(EXISTS "${PULSE_LUMATEXT_ROOT}/bin/lumatext.dll")
     add_custom_command(TARGET pulse_desktop_host POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -255,7 +340,6 @@ if(PULSE_DESKTOP_TESTS)
     )
 endif()
 
-
 add_executable(pulse_desktop_tile_layout_test tests/tile_layout_regression_test.cpp)
 target_compile_features(pulse_desktop_tile_layout_test PRIVATE cxx_std_20)
 target_compile_options(pulse_desktop_tile_layout_test PRIVATE /W4 /permissive- /utf-8)
@@ -275,11 +359,56 @@ target_compile_options(pulse_desktop_mica_graph_test PRIVATE /W4 /permissive- /u
 target_link_libraries(pulse_desktop_mica_graph_test PRIVATE pulse_desktop_mount_gfx)
 
 add_executable(pulse_desktop_settings_test tests/settings_page_test.cpp plugin/settings_page.cpp)
-target_sources(pulse_desktop_settings_test PRIVATE "${PULSE_SHARED_SRC}/common/localization.cpp" host/desktop_strings.rc)
+target_sources(pulse_desktop_settings_test PRIVATE "${PULSE_SHARED_SRC}/common/localization.cpp" host/desktop_strings.rc
+    # Pulse's own validator: every tree the page submits must pass what the real settings host accepts.
+    "${PULSE_SHARED_SRC}/app/extensions/native/ui_model.cpp" "${PULSE_SHARED_SRC}/app/extensions/ui_tree.cpp"
+    "${PULSE_SHARED_SRC}/common/json_value.cpp")
 target_compile_features(pulse_desktop_settings_test PRIVATE cxx_std_20)
 target_compile_options(pulse_desktop_settings_test PRIVATE /W4 /permissive- /utf-8)
 target_include_directories(pulse_desktop_settings_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
 target_link_libraries(pulse_desktop_settings_test PRIVATE pulse_desktop_ipc)
+
+# The settings page painted by Pulse's own ExtensionTreeView (visual check; not part of the package).
+add_executable(pulse_desktop_settings_render_test EXCLUDE_FROM_ALL tests/settings_render_test.cpp plugin/settings_page.cpp
+    host/desktop_strings.rc "${PULSE_SHARED_SRC}/bench/child_edit_test.rc"
+    "${PULSE_SHARED_SRC}/common/localization.cpp" "${PULSE_SHARED_SRC}/common/zh_hant.cpp"
+    "${PULSE_SHARED_SRC}/common/service_text.cpp"
+    "${PULSE_SHARED_SRC}/app/extensions/native/ui_model.cpp" "${PULSE_SHARED_SRC}/app/extensions/ui_tree.cpp"
+    "${PULSE_SHARED_SRC}/app/frame_pump.cpp" "${PULSE_SHARED_SRC}/ui/extension_panel.cpp"
+    "${PULSE_SHARED_SRC}/ui/extension_tree.cpp" "${PULSE_SHARED_SRC}/ui/extension_tree_controls.cpp"
+    "${PULSE_SHARED_SRC}/ui/extension_tree_extra_controls.cpp" "${PULSE_SHARED_SRC}/ui/extension_tree_layout.cpp"
+    "${PULSE_SHARED_SRC}/ui/extension_data_view.cpp" "${PULSE_SHARED_SRC}/ui/extension_data_controller.cpp"
+    "${PULSE_SHARED_SRC}/ui/extension_data_accessibility.cpp" "${PULSE_SHARED_SRC}/ui/edit_host.cpp"
+    "${PULSE_SHARED_SRC}/ui/fluent_menu.cpp" "${PULSE_SHARED_SRC}/ui/native_menu_surface.cpp"
+    "${PULSE_SHARED_SRC}/ui/window_material.cpp" "${PULSE_SHARED_SRC}/ui/fluent_components.cpp"
+    "${PULSE_SHARED_SRC}/ui/tab_shape.cpp" "${PULSE_SHARED_SRC}/ui/typography.cpp"
+    "${PULSE_SHARED_SRC}/ui/ui_compositor.cpp" "${PULSE_SHARED_SRC}/ui/window_helpers.cpp"
+    "${PULSE_SHARED_SRC}/ui/lumatext_renderer.cpp" "${PULSE_SHARED_SRC}/ui/store_icons.cpp"
+    "${PULSE_SHARED_SRC}/ui/product_tiles.cpp")
+target_compile_features(pulse_desktop_settings_render_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_settings_render_test PRIVATE /W4 /permissive- /utf-8)
+target_include_directories(pulse_desktop_settings_render_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
+target_link_libraries(pulse_desktop_settings_render_test PRIVATE pulse_desktop_ipc d3d11 d2d1 dwrite dxgi dcomp dwmapi
+    shcore ole32 windowscodecs comctl32 uxtheme oleacc oleaut32 imm32 shell32 user32)
+target_link_options(pulse_desktop_settings_render_test PRIVATE /MANIFEST:NO)
+
+# Prototype: video wallpaper cost (Media Foundation hardware decode + DirectComposition), not shipped.
+add_executable(pulse_desktop_video_wallpaper_probe EXCLUDE_FROM_ALL tests/video_wallpaper_probe.cpp tests/hevc_dxva.cpp)
+target_compile_features(pulse_desktop_video_wallpaper_probe PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_wallpaper_probe PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_wallpaper_probe PRIVATE UNICODE _UNICODE _CRT_SECURE_NO_WARNINGS)
+target_link_libraries(pulse_desktop_video_wallpaper_probe PRIVATE d3d11 dxgi dcomp mfplat mfuuid mf mfreadwrite psapi windowscodecs pdh dxguid ole32
+    oleaut32 user32)
+
+# Diagnostic: what the Dock's tray scan sees (run at the user's integrity level).
+add_executable(pulse_desktop_tray_probe EXCLUDE_FROM_ALL tests/tray_probe.cpp host/live/widget_live_extras.cpp)
+target_compile_features(pulse_desktop_tray_probe PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_tray_probe PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_tray_probe PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulse_desktop_tray_probe PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
+target_link_libraries(pulse_desktop_tray_probe PRIVATE pulse_desktop_model pulse_desktop_ipc windowsapp runtimeobject
+    shlwapi shell32 ole32 oleaut32 uuid user32 gdi32 advapi32 psapi iphlpapi ws2_32 wlanapi powrprof imm32 comctl32
+    bthprops version)
 
 add_executable(pulse_desktop_edit_test tests/hosted_edit_test.cpp)
 target_compile_features(pulse_desktop_edit_test PRIVATE cxx_std_20)
@@ -297,6 +426,11 @@ add_executable(pulse_desktop_tile_hover_render_test tests/tile_hover_render_test
 target_compile_features(pulse_desktop_tile_hover_render_test PRIVATE cxx_std_20)
 target_compile_options(pulse_desktop_tile_hover_render_test PRIVATE /W4 /permissive- /utf-8)
 target_link_libraries(pulse_desktop_tile_hover_render_test PRIVATE pulse_desktop_mount_gfx)
+
+add_executable(pulse_desktop_widget_gallery_render_test tests/widget_gallery_render_test.cpp)
+target_compile_features(pulse_desktop_widget_gallery_render_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_widget_gallery_render_test PRIVATE /W4 /permissive- /utf-8)
+target_link_libraries(pulse_desktop_widget_gallery_render_test PRIVATE pulse_desktop_mount_gfx)
 
 add_executable(pulse_desktop_drag_damage_test tests/drag_damage_test.cpp)
 target_compile_features(pulse_desktop_drag_damage_test PRIVATE cxx_std_20)
@@ -360,11 +494,6 @@ target_compile_options(pulse_desktop_external_drag_test PRIVATE /W4 /permissive-
 target_compile_definitions(pulse_desktop_external_drag_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_include_directories(pulse_desktop_external_drag_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(pulse_desktop_external_drag_test PRIVATE shell32 ole32 user32 uuid)
-
-add_executable(pulse_desktop_liquid_glass_math_test tests/liquid_glass_math_test.cpp)
-target_compile_features(pulse_desktop_liquid_glass_math_test PRIVATE cxx_std_20)
-target_compile_options(pulse_desktop_liquid_glass_math_test PRIVATE /W4 /WX /permissive- /utf-8)
-target_include_directories(pulse_desktop_liquid_glass_math_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
 
 add_executable(pulse_desktop_tile_drag_session_test tests/tile_drag_session_test.cpp)
 target_compile_features(pulse_desktop_tile_drag_session_test PRIVATE cxx_std_20)
@@ -448,9 +577,55 @@ target_link_libraries(pulse_desktop_widget_text_route_test PRIVATE pulse_desktop
 set_source_files_properties("${CMAKE_CURRENT_LIST_DIR}/host/desktop_strings.rc" PROPERTIES
     OBJECT_DEPENDS "${PULSE_SHARED_SRC}/common/strings.rcinc;${PULSE_SHARED_SRC}/common/strings_zh_tw.rcinc;${PULSE_SHARED_SRC}/common/string_ids.h")
 
-# Targeted reference-default optics and continuous persistence contract.
-add_executable(pulse_desktop_glass_reference_test tests/liquid_glass_reference_test.cpp)
-target_compile_features(pulse_desktop_glass_reference_test PRIVATE cxx_std_20)
-target_compile_options(pulse_desktop_glass_reference_test PRIVATE /W4 /WX /permissive- /utf-8)
-target_include_directories(pulse_desktop_glass_reference_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(pulse_desktop_glass_reference_test PRIVATE pulse_desktop_model)
+add_executable(pulse_desktop_video_glass_latency_test tests/video_glass_latency_test.cpp)
+target_compile_features(pulse_desktop_video_glass_latency_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_glass_latency_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_glass_latency_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulse_desktop_video_glass_latency_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
+target_link_libraries(pulse_desktop_video_glass_latency_test PRIVATE pulse_desktop_mount_gfx pulse_desktop_model)
+
+add_executable(pulse_desktop_video_glass_mailbox_test tests/video_glass_mailbox_test.cpp)
+target_compile_features(pulse_desktop_video_glass_mailbox_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_glass_mailbox_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_include_directories(pulse_desktop_video_glass_mailbox_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+
+add_executable(pulse_desktop_video_probe_job_test tests/video_probe_job_test.cpp)
+target_compile_features(pulse_desktop_video_probe_job_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_probe_job_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_probe_job_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(pulse_desktop_video_probe_job_test PRIVATE pulse_desktop_mount_gfx)
+
+add_executable(pulse_desktop_video_glass_playback_test tests/video_glass_playback_test.cpp)
+target_compile_features(pulse_desktop_video_glass_playback_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_glass_playback_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_glass_playback_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(pulse_desktop_video_glass_playback_test PRIVATE pulse_desktop_mount_gfx)
+
+add_executable(pulse_desktop_video_glass_retry_test tests/video_glass_retry_test.cpp)
+target_compile_features(pulse_desktop_video_glass_retry_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_glass_retry_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_include_directories(pulse_desktop_video_glass_retry_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}")
+target_link_libraries(pulse_desktop_video_glass_retry_test PRIVATE user32)
+
+add_executable(pulse_desktop_video_visibility_test tests/video_visibility_test.cpp)
+target_compile_features(pulse_desktop_video_visibility_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_visibility_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_visibility_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(pulse_desktop_video_visibility_test PRIVATE pulse_desktop_mount_gfx pulse_desktop_ipc)
+
+add_executable(pulse_desktop_video_pause_host_test tests/video_pause_host_test.cpp host/live/widget_data.cpp)
+target_compile_features(pulse_desktop_video_pause_host_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_video_pause_host_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_compile_definitions(pulse_desktop_video_pause_host_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(pulse_desktop_video_pause_host_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}" "${PULSE_SDK_INCLUDE}")
+target_link_libraries(pulse_desktop_video_pause_host_test PRIVATE pulse_desktop_mount_gfx pulse_desktop_model pulse_desktop_ipc winhttp iphlpapi pdh)
+add_executable(pulse_desktop_menu_underlay_gpu_test tests/menu_underlay_gpu_test.cpp)
+target_compile_features(pulse_desktop_menu_underlay_gpu_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_menu_underlay_gpu_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_link_libraries(pulse_desktop_menu_underlay_gpu_test PRIVATE pulse_desktop_mount_gfx)
+
+add_executable(pulse_desktop_menu_material_retry_test tests/menu_material_retry_test.cpp)
+target_compile_features(pulse_desktop_menu_material_retry_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_menu_material_retry_test PRIVATE /W4 /WX /permissive- /utf-8)
+target_include_directories(pulse_desktop_menu_material_retry_test PRIVATE "${CMAKE_CURRENT_LIST_DIR}/../../src")
+target_link_libraries(pulse_desktop_menu_material_retry_test PRIVATE pulse_desktop_mount_gfx)

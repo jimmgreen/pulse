@@ -998,7 +998,37 @@ std::string SerializeModelStateJson(const DesktopModelState& state) {
     w.Key("glass_frost"); w.WriteUint64(std::min<uint8_t>(state.settings.glass_frost, 100));
     w.Key("glass_dispersion"); w.WriteUint64(MapGlassGainToLegacyTier(state.settings.glass_dispersion));
     w.Key("glass_live_rate"); w.WriteUint64(std::min<uint8_t>(state.settings.glass_live_rate, 2));
+    w.Key("dock_enabled"); w.WriteBool(state.settings.dock_enabled);
+    w.Key("dock_icon_size"); w.WriteUint64(std::clamp<uint8_t>(state.settings.dock_icon_size, 36, 68));
+    w.Key("dock_magnification"); w.WriteBool(state.settings.dock_magnification);
+    w.Key("dock_max_scale_x100"); w.WriteUint64(std::clamp<uint16_t>(state.settings.dock_max_scale_x100, 100, 195));
+    w.Key("dock_hide_mode"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_hide_mode, 2));
+    w.Key("dock_minimize_effect"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_minimize_effect, 2));
+    w.Key("dock_position"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_position, 2));
+    w.Key("dock_system_area"); w.WriteBool(state.settings.dock_system_area);
+    w.Key("dock_stack_view"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_stack_view, 3));
+    w.Key("dock_stack_sort"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_stack_sort, 3));
+    w.Key("dock_apps_stack"); w.WriteBool(state.settings.dock_apps_stack);
+    w.Key("dock_pinned_paths");
+    w.BeginArray();
+    for (const auto& dp : state.settings.dock_pinned_paths) {
+        if (!dp.empty()) {
+            w.Elem();
+            w.WriteWideStringLiteral(dp);
+        }
+    }
+    w.EndArray();
+    w.Key("dock_tray_pinned_keys");
+    w.BeginArray();
+    for (const auto& tk : state.settings.dock_tray_pinned_keys) {
+        if (!tk.empty()) {
+            w.Elem();
+            w.WriteWideStringLiteral(tk);
+        }
+    }
+    w.EndArray();
     w.Key("weather_city"); w.WriteWideStringLiteral(state.settings.weather_city);
+    w.Key("widgets"); w.WriteWideStringLiteral(EncodeWidgetPrefs(state.settings.widgets));
     w.EndObject();
 
     // monitors
@@ -1103,6 +1133,9 @@ std::string SerializeModelStateJson(const DesktopModelState& state) {
         w.Key("title"); w.WriteWideStringLiteral(t.title);
         w.Key("target_path"); w.WriteWideStringLiteral(t.target_path);
         w.Key("note_body"); w.WriteWideStringLiteral(t.note_body);
+        if (!t.countdown_date.empty()) {
+            w.Key("countdown_date"); w.WriteWideStringLiteral(t.countdown_date);
+        }
         w.Key("analog_clock"); w.WriteBool(t.analog_clock);
         w.Key("live_content"); w.WriteBool(t.live_content);
         w.Key("material"); w.WriteUint64(static_cast<uint8_t>(t.material));
@@ -1167,6 +1200,39 @@ std::string SerializeModelStateJson(const DesktopModelState& state) {
     }
     w.EndArray();
 
+    // video_wallpaper
+    {
+        const auto& vw = state.video_wallpaper;
+        w.Key("video_wallpaper");
+        w.BeginObject();
+        w.Key("active"); w.WriteBool(vw.active);
+        w.Key("source_path"); w.WriteWideStringLiteral(vw.source_path);
+        w.Key("fill_mode"); w.WriteUint64(static_cast<uint8_t>(vw.fill_mode));
+        w.Key("cache_key"); w.WriteWideStringLiteral(vw.cache_key);
+        w.Key("cached_video_path"); w.WriteWideStringLiteral(vw.cached_video_path);
+        w.Key("poster_path"); w.WriteWideStringLiteral(vw.poster_path);
+        w.Key("source_width"); w.WriteUint64(vw.source_width);
+        w.Key("source_height"); w.WriteUint64(vw.source_height);
+        w.Key("target_width"); w.WriteUint64(vw.target_width);
+        w.Key("target_height"); w.WriteUint64(vw.target_height);
+        w.Key("duration_ms"); w.WriteUint64(vw.duration_ms);
+        w.Key("optimized"); w.WriteBool(vw.optimized);
+        w.Key("recent");
+        w.BeginArray();
+        for (const auto& r : vw.recent) {
+            w.Elem();
+            w.BeginObject();
+            w.Key("path"); w.WriteWideStringLiteral(r.path);
+            w.Key("poster_path"); w.WriteWideStringLiteral(r.poster_path);
+            w.Key("width"); w.WriteUint64(r.width);
+            w.Key("height"); w.WriteUint64(r.height);
+            w.Key("duration_ms"); w.WriteUint64(r.duration_ms);
+            w.EndObject();
+        }
+        w.EndArray();
+        w.EndObject();
+    }
+
     w.EndObject();
     out.push_back('\n');
     return out;
@@ -1218,6 +1284,11 @@ bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_sta
         int32_t glare_angle_tmp = parsed.settings.glass_glare_angle;
         uint32_t frost_tmp = parsed.settings.glass_frost;
         uint32_t rate_tmp = parsed.settings.glass_live_rate;
+        uint32_t dock_sz_tmp = parsed.settings.dock_icon_size;
+        uint32_t dock_scale_tmp = parsed.settings.dock_max_scale_x100;
+        uint32_t dock_hide_tmp = parsed.settings.dock_hide_mode;
+        uint32_t dock_min_fx_tmp = parsed.settings.dock_minimize_effect;
+        uint32_t dock_pos_tmp = parsed.settings.dock_position;
         if (!ReadBoolField(*s, "dark_mode", parsed.settings.dark_mode) ||
             !ReadMaterialField(*s, "default_material", CardMaterial::Acrylic,
                                parsed.settings.default_material) ||
@@ -1257,8 +1328,60 @@ bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_sta
             !ReadInt32Field(*s, "glass_angle", glare_angle_tmp) ||
             !ReadUint32Field(*s, "glass_frost", frost_tmp) ||
             !ReadUint32Field(*s, "glass_live_rate", rate_tmp) ||
+            !ReadBoolField(*s, "dock_enabled", parsed.settings.dock_enabled) ||
+            !ReadUint32Field(*s, "dock_icon_size", dock_sz_tmp) ||
+            !ReadBoolField(*s, "dock_magnification", parsed.settings.dock_magnification) ||
+            !ReadUint32Field(*s, "dock_max_scale_x100", dock_scale_tmp) ||
+            !ReadUint32Field(*s, "dock_hide_mode", dock_hide_tmp) ||
+            !ReadUint32Field(*s, "dock_minimize_effect", dock_min_fx_tmp) ||
+            !ReadUint32Field(*s, "dock_position", dock_pos_tmp) ||
             !ReadWideField(*s, "weather_city", parsed.settings.weather_city)) {
             return false;
+        }
+        // 小组件 & Dock 系统状态区 options arrived later than the rest: optional, defaults when absent.
+        if (s->Find("dock_system_area")) {
+            if (!ReadBoolField(*s, "dock_system_area", parsed.settings.dock_system_area)) return false;
+        }
+        // Dock stacks (叠放) arrived later still: optional as well.
+        if (s->Find("dock_stack_view")) {
+            uint32_t v = 0;
+            if (!ReadUint32Field(*s, "dock_stack_view", v)) return false;
+            parsed.settings.dock_stack_view = static_cast<uint8_t>(std::min<uint32_t>(v, 3u));
+        }
+        if (s->Find("dock_stack_sort")) {
+            uint32_t v = 0;
+            if (!ReadUint32Field(*s, "dock_stack_sort", v)) return false;
+            parsed.settings.dock_stack_sort = static_cast<uint8_t>(std::min<uint32_t>(v, 3u));
+        }
+        if (s->Find("dock_apps_stack")) {
+            if (!ReadBoolField(*s, "dock_apps_stack", parsed.settings.dock_apps_stack)) return false;
+        }
+        if (const JsonValue* dtp = s->Find("dock_tray_pinned_keys")) {
+            if (dtp->kind != JsonValue::Kind::Array) return false;
+            parsed.settings.dock_tray_pinned_keys.clear();
+            parsed.settings.dock_tray_pinned_keys.reserve(dtp->array_vals.size());
+            for (const JsonValue& pv : dtp->array_vals) {
+                if (pv.kind != JsonValue::Kind::String) return false;
+                if (!pv.str_utf16.empty()) parsed.settings.dock_tray_pinned_keys.push_back(pv.str_utf16);
+            }
+        }
+        if (s->Find("widgets")) {
+            std::wstring enc;
+            if (ReadWideField(*s, "widgets", enc)) DecodeWidgetPrefs(enc, parsed.settings.widgets);
+        }
+        parsed.settings.dock_icon_size = static_cast<uint8_t>(std::clamp<uint32_t>(dock_sz_tmp, 36u, 68u));
+        parsed.settings.dock_max_scale_x100 = static_cast<uint16_t>(std::clamp<uint32_t>(dock_scale_tmp, 100u, 195u));
+        parsed.settings.dock_hide_mode = static_cast<uint8_t>(std::min<uint32_t>(dock_hide_tmp, 2u));
+        parsed.settings.dock_minimize_effect = static_cast<uint8_t>(std::min<uint32_t>(dock_min_fx_tmp, 2u));
+        parsed.settings.dock_position = static_cast<uint8_t>(std::min<uint32_t>(dock_pos_tmp, 2u));
+        if (const JsonValue* dp = s->Find("dock_pinned_paths")) {
+            if (dp->kind != JsonValue::Kind::Array) return false;
+            parsed.settings.dock_pinned_paths.clear();
+            parsed.settings.dock_pinned_paths.reserve(dp->array_vals.size());
+            for (const JsonValue& pv : dp->array_vals) {
+                if (pv.kind != JsonValue::Kind::String) return false;
+                if (!pv.str_utf16.empty()) parsed.settings.dock_pinned_paths.push_back(pv.str_utf16);
+            }
         }
         if (!s->Find("glass_disp_gain") && s->Find("glass_dispersion")) {
             disp_gain_tmp = MapLegacyGlassDispersionToGain(legacy_disp_tmp);
@@ -1420,6 +1543,7 @@ bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_sta
                 !ReadIntField(tv, "row", t.row)) {
                 return false;
             }
+            (void)ReadWideField(tv, "countdown_date", t.countdown_date);
             if (const JsonValue* sz = tv.Find("size")) {
                 if (sz->kind != JsonValue::Kind::Object ||
                     !ReadIntField(*sz, "cols", t.size.cols) ||
@@ -1497,6 +1621,44 @@ bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_sta
             if (tdv.kind != JsonValue::Kind::Object || !ReadWideField(tdv, "text", td.text) || !ReadBoolField(tdv, "done", td.done))
                 return false;
             parsed.todos.push_back(std::move(td));
+        }
+    }
+
+    if (const JsonValue* vw = root.Find("video_wallpaper")) {
+        if (vw->kind != JsonValue::Kind::Object) return false;
+        auto& dst = parsed.video_wallpaper;
+        if (!ReadBoolField(*vw, "active", dst.active) ||
+            !ReadWideField(*vw, "source_path", dst.source_path) ||
+            !ReadEnumField(*vw, "fill_mode", static_cast<uint8_t>(video::VideoFillMode::Fit), dst.fill_mode) ||
+            !ReadWideField(*vw, "cache_key", dst.cache_key) ||
+            !ReadWideField(*vw, "cached_video_path", dst.cached_video_path) ||
+            !ReadWideField(*vw, "poster_path", dst.poster_path) ||
+            !ReadUint32Field(*vw, "source_width", dst.source_width) ||
+            !ReadUint32Field(*vw, "source_height", dst.source_height) ||
+            !ReadUint32Field(*vw, "target_width", dst.target_width) ||
+            !ReadUint32Field(*vw, "target_height", dst.target_height) ||
+            !ReadUint32Field(*vw, "duration_ms", dst.duration_ms) ||
+            !ReadBoolField(*vw, "optimized", dst.optimized)) {
+            return false;
+        }
+        if (const JsonValue* rec = vw->Find("recent")) {
+            if (rec->kind != JsonValue::Kind::Array) return false;
+            dst.recent.reserve(std::min<size_t>(rec->array_vals.size(), 8u));
+            for (const JsonValue& rv : rec->array_vals) {
+                if (rv.kind != JsonValue::Kind::Object) return false;
+                video::VideoWallpaperRecentItem item{};
+                if (!ReadWideField(rv, "path", item.path) ||
+                    !ReadWideField(rv, "poster_path", item.poster_path) ||
+                    !ReadUint32Field(rv, "width", item.width) ||
+                    !ReadUint32Field(rv, "height", item.height) ||
+                    !ReadUint32Field(rv, "duration_ms", item.duration_ms)) {
+                    return false;
+                }
+                if (!item.path.empty()) {
+                    dst.recent.push_back(std::move(item));
+                    if (dst.recent.size() >= 8u) break;
+                }
+            }
         }
     }
 

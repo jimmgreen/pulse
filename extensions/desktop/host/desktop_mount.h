@@ -163,8 +163,14 @@ public:
     POINT ClientDipToScreenPx(POINT pt) const noexcept;
     POINT ScreenPxToClientDip(POINT pt) const noexcept;
     bool HidNativeIcons() const noexcept { return hid_icons_; }
+    // True when Explorer's native desktop SysListView32 is not visible (either hidden by this host
+    // or already hidden by the system/user), so Pulse's surface renders desktop icons above video.
+    bool NativeIconsHidden() const noexcept;
     // Turns Explorer's icons off once the layer shows something in their place.
     void HideNativeIconsNow();
+    // Enables desktop icon takeover on demand (e.g., from BeautifyDrawer's video wallpaper prompt).
+    bool EnableIconTakeover();
+    HWND LayerHostHwnd() const noexcept { return LayerHost(); }
     const DesktopHierarchyInfo& Hierarchy() const noexcept { return hierarchy_; }
     const NativeIconSnapshot& InitialSnapshot() const noexcept { return initial_snapshot_; }
 

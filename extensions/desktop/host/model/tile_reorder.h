@@ -23,6 +23,10 @@ struct TileReorderResult {
 };
 TileGridTarget ComputeTileReorderTarget(const DesktopTile& tile, PointI proposed,
                                     const RectI& work_area, const RectI& board_rect);
+// Reference-aligned nearest free grid cell search keeping all other tiles and groups stationary.
+TileGridTarget FindNearestFreeTileCell(const std::vector<DesktopTile>& tiles, size_t moving_index,
+                                       PointI proposed, const RectI& work_area, const RectI& board_rect,
+                                       std::span<const RectI> groups);
 TileReorderResult PreviewTileReorder(const std::vector<DesktopTile>& start, size_t moving_index,
                               PointI proposed, const RectI& work_area, const RectI& board_rect,
                               std::span<const RectI> groups, TileReorderBudget budget = {});

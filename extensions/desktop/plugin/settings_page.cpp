@@ -1,10 +1,12 @@
 #include "../glass_control_labels.h"
 #include "plugin/settings_page.h"
+#include "host/model/world_cities.h"
 
 #include "ipc/desktop_ipc.h"
 #include "../../../src/common/localization.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -78,6 +80,17 @@ bool ExpandPersistedJson(std::string_view json, std::string& expanded) {
     std::wstring city;
     if (ipc::JsonFindWide(json, "weather_city", city))
         expanded += ",\"weather_city\":" + ipc::JsonQuoteWide(city.substr(0, 40));
+    std::wstring widgets;
+    if (ipc::JsonFindWide(json, "widgets", widgets))
+        expanded += ",\"widgets\":" + ipc::JsonQuoteWide(widgets.substr(0, 180));
+    std::wstring dock;
+    if (ipc::JsonFindWide(json, "dock", dock))
+        expanded += ",\"dock\":" + ipc::JsonQuoteWide(dock.substr(0, 64));
+    uint64_t vw = 0;
+    if (ipc::JsonFindUint64(json, "vw", vw)) {
+        expanded += ",\"wallpaper_kind\":" + std::to_string((vw >> 1u) & 1u) +
+                    ",\"video_fill\":" + std::to_string(vw & 1u);
+    }
     expanded += "}";
     return true;
 }
@@ -89,6 +102,257 @@ PulseStringView Sv(std::string_view s) noexcept {
 std::string CopySv(PulseStringView v) {
     return (v.data && v.length > 0) ? std::string(v.data, v.length) : std::string{};
 }
+
+// ---- 小组件 settings: the UI states behind the 小组件 section, and their parsing ----
+constexpr std::string_view kWidgetTabs[] = {"weather", "clock", "calendar", "system", "photos", "pomodoro", "battery", "media"};
+constexpr uint32_t kTintColors[] = {0xFF0A84FFu, 0xFF5E5CE6u, 0xFFBF5AF2u, 0xFFFF375Fu, 0xFFFF9F0Au, 0xFF30B0C7u, 0xFF34C759u, 0xFF8E8E93u};
+constexpr uint8_t kFocusStops[] = {15, 20, 25, 30, 45, 60};
+constexpr uint16_t kPhotoIntervalStops[] = {0, 10, 30, 60, 300, 1800};
+constexpr std::string_view kSystemItemKeys[] = {"w_sys_cpu", "w_sys_mem", "w_sys_vram", "w_sys_disk", "w_sys_net"};
+
+std::vector<std::pair<std::string, std::string>> WidgetUiStates(const WidgetPrefs& w, int tab) {
+    auto tf = [](bool b) { return std::string(b ? "true" : "false"); };
+    std::vector<std::pair<std::string, std::string>> out;
+    for (uint8_t i = 0; i < 4; ++i) out.emplace_back("w_scheme_" + std::to_string(i), tf(std::min<uint8_t>(w.scheme, 3) == i));
+    out.emplace_back("w_is_tint", tf(w.scheme == 3));
+    out.emplace_back("w_sky", tf(w.sky));
+    out.emplace_back("w_rotate", tf(w.stack_rotate));
+    out.emplace_back("w_tab", std::to_string(std::clamp(tab, 0, static_cast<int>(std::size(kWidgetTabs)) - 1)));
+    switch (tab) {
+    case 0:
+        out.emplace_back("w_unit", w.fahrenheit ? "1" : "0");
+        out.emplace_back("w_refresh", w.weather_refresh_min <= 15 ? "0" : w.weather_refresh_min <= 30 ? "1" : "2");
+        break;
+    case 1:
+        out.emplace_back("w_h24", tf(w.clock_24h));
+        out.emplace_back("w_seconds", tf(w.clock_seconds));
+        out.emplace_back("w_night", tf(w.clock_night_face));
+        break;
+    case 2:
+        out.emplace_back("w_lunar", tf(w.lunar));
+        out.emplace_back("w_weekstart", w.week_start == 0 ? "1" : "0");
+        out.emplace_back("w_weekno", tf(w.week_number));
+        break;
+    case 3:
+        for (size_t i = 0; i < std::size(kSystemItemKeys); ++i)
+            out.emplace_back(std::string(kSystemItemKeys[i]), tf(((w.system_items >> i) & 1u) != 0));
+        out.emplace_back("w_sysrate", w.system_refresh_s <= 1 ? "0" : w.system_refresh_s <= 2 ? "1" : "2");
+        out.emplace_back("w_syswarn", tf(w.system_warn));
+        break;
+    case 4: {
+        int pi = 1;
+        for (size_t i = 0; i < std::size(kPhotoIntervalStops); ++i)
+            if (kPhotoIntervalStops[i] == w.photo_interval_s) pi = static_cast<int>(i);
+        if (w.photo_interval_s == 0) pi = 0;
+        else if (w.photo_interval_s <= 10) pi = 1;
+        else if (w.photo_interval_s <= 30) pi = 2;
+        else if (w.photo_interval_s <= 60) pi = 3;
+        else if (w.photo_interval_s <= 300) pi = 4;
+        else pi = 5;
+        out.emplace_back("w_photo_int", std::to_string(pi));
+        out.emplace_back("w_photo_shuf", tf(w.photo_shuffle));
+        out.emplace_back("w_photo_cap", tf(w.photo_caption));
+        break;
+    }
+    case 5: {
+        int focus = 2;
+        for (size_t i = 0; i < std::size(kFocusStops); ++i)
+            if (kFocusStops[i] == w.focus_min) focus = static_cast<int>(i);
+        out.emplace_back("w_focus", std::to_string(focus));
+        out.emplace_back("w_short", w.short_break_min >= 10 ? "1" : "0");
+        out.emplace_back("w_long", w.long_break_min >= 30 ? "2" : w.long_break_min >= 20 ? "1" : "0");
+        out.emplace_back("w_chime", tf(w.chime));
+        break;
+    }
+    case 6:
+        out.emplace_back("w_bt", tf(w.battery_bluetooth));
+        out.emplace_back("w_low", w.battery_low_pct <= 10 ? "0" : w.battery_low_pct <= 15 ? "1" : w.battery_low_pct <= 20 ? "2" : "3");
+        break;
+    default:
+        out.emplace_back("w_cover", tf(w.cover_background));
+        out.emplace_back("w_source", tf(w.show_source));
+        break;
+    }
+    return out;
+}
+
+// One 小组件 state change into `w` (or which widget's options show). True when the key is a 小组件 key.
+bool ApplyWidgetUiState(std::string_view k, std::string_view v, WidgetPrefs& w, int& tab) {
+    const bool is_bool = v == "true" || v == "false";
+    const bool on = v == "true";
+    int n = -1;
+    if (!v.empty() && v.size() <= 2 && std::all_of(v.begin(), v.end(), [](char c) { return c >= '0' && c <= '9'; }))
+        n = std::stoi(std::string(v));
+    if (k.starts_with("w_scheme_") && k.size() == 10 && k[9] >= '0' && k[9] <= '3' && is_bool) {
+        if (on) w.scheme = static_cast<uint8_t>(k[9] - '0');  // the option cards are radios: only "true" picks
+    } else if (k == "w_sky" && is_bool) {
+        w.sky = on;
+    } else if (k == "w_rotate" && is_bool) {
+        w.stack_rotate = on;
+    } else if (k == "w_tab" && n >= 0 && n < static_cast<int>(std::size(kWidgetTabs))) {
+        tab = n;
+    } else if (k == "w_unit" && n >= 0 && n <= 1) {
+        w.fahrenheit = n == 1;
+    } else if (k == "w_refresh" && n >= 0 && n <= 2) {
+        w.weather_refresh_min = static_cast<uint8_t>(n == 0 ? 15 : n == 1 ? 30 : 60);
+    } else if (k == "w_h24" && is_bool) {
+        w.clock_24h = on;
+    } else if (k == "w_seconds" && is_bool) {
+        w.clock_seconds = on;
+    } else if (k == "w_night" && is_bool) {
+        w.clock_night_face = on;
+    } else if (k == "w_lunar" && is_bool) {
+        w.lunar = on;
+    } else if (k == "w_weekstart" && n >= 0 && n <= 1) {
+        w.week_start = static_cast<uint8_t>(n == 0 ? 1 : 0);
+    } else if (k == "w_weekno" && is_bool) {
+        w.week_number = on;
+    } else if (k.starts_with("w_sys_") && is_bool) {
+        for (size_t i = 0; i < std::size(kSystemItemKeys); ++i) {
+            if (k != kSystemItemKeys[i]) continue;
+            const uint8_t bit = static_cast<uint8_t>(1u << i);
+            const uint8_t next = on ? static_cast<uint8_t>(w.system_items | bit) : static_cast<uint8_t>(w.system_items & ~bit);
+            if (next) w.system_items = next;  // keep at least one
+        }
+    } else if (k == "w_sysrate" && n >= 0 && n <= 2) {
+        w.system_refresh_s = static_cast<uint8_t>(n == 0 ? 1 : n == 1 ? 2 : 5);
+    } else if (k == "w_syswarn" && is_bool) {
+        w.system_warn = on;
+    } else if (k == "w_photo_int" && n >= 0 && n < static_cast<int>(std::size(kPhotoIntervalStops))) {
+        w.photo_interval_s = kPhotoIntervalStops[n];
+    } else if (k == "w_photo_shuf" && is_bool) {
+        w.photo_shuffle = on;
+    } else if (k == "w_photo_cap" && is_bool) {
+        w.photo_caption = on;
+    } else if (k == "w_focus" && n >= 0 && n < static_cast<int>(std::size(kFocusStops))) {
+        w.focus_min = kFocusStops[n];
+    } else if (k == "w_short" && n >= 0 && n <= 1) {
+        w.short_break_min = static_cast<uint8_t>(n == 0 ? 5 : 10);
+    } else if (k == "w_long" && n >= 0 && n <= 2) {
+        w.long_break_min = static_cast<uint8_t>(n == 0 ? 15 : n == 1 ? 20 : 30);
+    } else if (k == "w_chime" && is_bool) {
+        w.chime = on;
+    } else if (k == "w_bt" && is_bool) {
+        w.battery_bluetooth = on;
+    } else if (k == "w_low" && n >= 0 && n <= 3) {
+        w.battery_low_pct = static_cast<uint8_t>(n == 0 ? 10 : n == 1 ? 15 : n == 2 ? 20 : 30);
+    } else if (k == "w_cover" && is_bool) {
+        w.cover_background = on;
+    } else if (k == "w_source" && is_bool) {
+        w.show_source = on;
+    } else {
+        return k.starts_with("w_");
+    }
+    return true;
+}
+
+constexpr const char* kPanelCommands[] = {
+    "glass-commit", "glass-reference-reset",
+    "cmd.ai_organize",
+    "run-health",
+    "reorganize-desktop",
+    "pick-photo-folder",
+    "pick-video-wallpaper",
+};
+
+// 小组件 › 着色颜色 swatches (w-tint-0 is 取自壁纸) and 世界时钟城市 chips (remove a slot / add a city).
+const std::vector<std::string>& WidgetCommands() {
+    static const std::vector<std::string> cmds = [] {
+        std::vector<std::string> v;
+        for (size_t i = 0; i <= std::size(kTintColors); ++i) v.push_back("w-tint-" + std::to_string(i));
+        for (size_t i = 0; i < 4; ++i) v.push_back("w-city-del-" + std::to_string(i));
+        for (size_t i = 0; i < model::kWorldCities.size(); ++i) v.push_back("w-city-add-" + std::to_string(i));
+        return v;
+    }();
+    return cmds;
+}
+
+// The world clock's cities as the widget shows them (the defaults until the user picks).
+std::vector<std::wstring> ShownWorldCities(const WidgetPrefs& w) {
+    std::vector<std::wstring> out;
+    if (w.world_cities.empty())
+        for (const auto c : model::kDefaultWorldCities) out.emplace_back(c);
+    else
+        out = w.world_cities;
+    if (out.size() > 4) out.resize(4);
+    return out;
+}
+
+// "+1 小时" for a city's offset from this PC's clock right now (DST included), "" when unknown.
+std::string CityOffsetLabel(std::wstring_view tz_key) {
+    DYNAMIC_TIME_ZONE_INFORMATION d{};
+    bool found = false;
+    for (DWORD i = 0; EnumDynamicTimeZoneInformation(i, &d) == ERROR_SUCCESS; ++i)
+        if (_wcsicmp(d.TimeZoneKeyName, std::wstring(tz_key).c_str()) == 0) { found = true; break; }
+    if (!found) return {};
+    SYSTEMTIME utc{}, there{}, here{};
+    GetSystemTime(&utc);
+    if (!SystemTimeToTzSpecificLocalTimeEx(&d, &utc, &there) || !SystemTimeToTzSpecificLocalTime(nullptr, &utc, &here))
+        return {};
+    auto minutes = [](const SYSTEMTIME& t) {
+        FILETIME ft{};
+        SystemTimeToFileTime(&t, &ft);
+        return static_cast<int64_t>((static_cast<uint64_t>(ft.dwHighDateTime) << 32 | ft.dwLowDateTime) / 600000000ull);
+    };
+    const int64_t diff = minutes(there) - minutes(here);
+    char buf[32]{};
+    if (diff % 60 == 0)
+        std::snprintf(buf, sizeof(buf), "%s%lld 小时", diff < 0 ? "\xE2\x88\x92" : "+", static_cast<long long>(std::llabs(diff) / 60));
+    else
+        std::snprintf(buf, sizeof(buf), "%s%.1f 小时", diff < 0 ? "\xE2\x88\x92" : "+", std::llabs(diff) / 60.0);
+    return buf;
+}
+
+// Rough label width for a chip (the host sizes tags by their min/max width): CJK ~12.5 DIP, ASCII ~6.5.
+int ChipTextWidth(std::string_view utf8) {
+    float w = 0.0f;
+    for (size_t i = 0; i < utf8.size();) {
+        const unsigned char c = static_cast<unsigned char>(utf8[i]);
+        const size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        w += len >= 3 ? 12.5f : 6.5f;
+        i += len;
+    }
+    return static_cast<int>(std::ceil(w));
+}
+
+// 小组件配色 option card art: a calendar and a CPU widget over a wallpaper, drawn in that scheme's veil and
+// ink (the values DesktopRenderer uses). 自动 sits the two on a dark and a light half of the wallpaper.
+std::string SchemePreviewCanvas(int scheme, uint32_t tint_rgb) {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    static constexpr const char* kWeek[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    std::string s = "viewbox 120 60\n";
+    if (scheme == 0) {
+        s += "clear #2B3A4E\nrect 60 -40 120 140 fill=#DCE5EC\nellipse 18 66 46 22 fill=#3F5A78\nellipse 104 68 44 20 fill=#C3D2DE\n";
+    } else {
+        s += "clear #3B6FA0\nellipse 20 70 70 34 fill=#5E8FC2\nellipse 112 72 64 30 fill=#2A4F7A\n";
+    }
+    struct Look { const char* veil; const char* ink; const char* sub; const char* red; };
+    char tint_veil[16]{};
+    std::snprintf(tint_veil, sizeof(tint_veil), "#B3%06X", tint_rgb & 0xFFFFFFu);
+    const Look light{"#E6F5F5F3", "#1D1D1F", "#991D1D1F", "#FF3B30"};
+    const Look dark{"#B81C1C1E", "#FFFFFF", "#99FFFFFF", "#FF453A"};
+    const Look glass_dark{"#40FFFFFF", "#FFFFFF", "#B3FFFFFF", "#FF6961"};
+    const Look glass_light{"#73FFFFFF", "#1D1D1F", "#991D1D1F", "#FF3B30"};
+    const Look tint{tint_veil, "#FFFFFF", "#B3FFFFFF", "#FFFFFF"};
+    const Look left = scheme == 0 ? glass_dark : scheme == 1 ? light : scheme == 2 ? dark : tint;
+    const Look right = scheme == 0 ? glass_light : left;
+    char buf[640]{};
+    std::snprintf(buf, sizeof(buf),
+                  "rect 10 8 44 44 r=10 fill=%s\n"
+                  "text 16 11 \"%s\" size=6.5 weight=semibold color=%s h=9\n"
+                  "text 16 19 \"%d\" size=20 weight=semibold color=%s h=24\n"
+                  "rect 66 8 44 44 r=10 fill=%s\n"
+                  "text 72 11 CPU size=6.5 weight=semibold color=%s h=9\n"
+                  "text 72 20 23%% size=15 weight=semibold color=%s h=18\n"
+                  "rect 72 42 32 3 r=1.5 fill=%s\nrect 72 42 8 3 r=1.5 fill=%s\n",
+                  left.veil, kWeek[now.wDayOfWeek % 7], left.red, now.wDay, left.ink,
+                  right.veil, right.sub, right.ink, right.sub, right.ink);
+    s += buf;
+    return s;
+}
+
+} // namespace
 
 // Self-contained arena builder over C ABI PulseUiModelNode (zero dependency on client.hpp/model_builder.hpp).
 struct ModelArena {
@@ -125,6 +389,20 @@ struct ModelArena {
         return PulseUiModelStrings{1u, vec.data(), static_cast<uint32_t>(vec.size())};
     }
 
+    PulseUiModelStrings OptOptionsV(const std::vector<std::string>& items) {
+        string_slices.emplace_back();
+        auto& vec = string_slices.back();
+        vec.reserve(items.size());
+        for (const auto& it : items) vec.push_back(Intern(it));
+        return PulseUiModelStrings{1u, vec.data(), static_cast<uint32_t>(vec.size())};
+    }
+
+    PulseUiModelNodes MakeChildrenV(const std::vector<PulseUiModelNode>& kids) {
+        node_slices.emplace_back(kids);
+        auto& vec = node_slices.back();
+        return PulseUiModelNodes{1u, vec.data(), static_cast<uint32_t>(vec.size())};
+    }
+
     PulseUiModelNodes MakeChildren(std::initializer_list<PulseUiModelNode> kids) {
         node_slices.emplace_back(kids);
         auto& vec = node_slices.back();
@@ -146,7 +424,26 @@ struct ModelArena {
     void AddCommand(std::string_view cmd) {
         commands.push_back(Intern(cmd));
     }
+
+    std::list<std::vector<PulseUiModelMenuItem>> menu_slices;
+    // A flat command menu: (text, command) pairs.
+    PulseUiModelMenus MakeMenu(const std::vector<std::pair<std::string, std::string>>& items) {
+        menu_slices.emplace_back();
+        auto& vec = menu_slices.back();
+        vec.reserve(items.size());
+        for (const auto& [text, cmd] : items) {
+            PulseUiModelMenuItem m{};
+            m.size = sizeof(PulseUiModelMenuItem);
+            m.id = OptStr(cmd);
+            m.text = OptStr(text);
+            m.command = OptStr(cmd);
+            vec.push_back(m);
+        }
+        return PulseUiModelMenus{1u, vec.data(), static_cast<uint32_t>(vec.size())};
+    }
 };
+
+namespace {
 
 constexpr uint8_t kThickStops[5] = {1, 20, 40, 60, 80};
 constexpr uint8_t kFrostStops[5] = {0, 15, 35, 60, 90};
@@ -251,7 +548,11 @@ std::string DesktopPrefs::ToJson() const {
     }
     if (!out.empty() && out.back() == '}') {
         out.pop_back();
-        out += ",\"weather_city\":" + ipc::JsonQuoteWide(weather_city) + "}";
+        out += ",\"weather_city\":" + ipc::JsonQuoteWide(weather_city) +
+               ",\"widgets\":" + ipc::JsonQuoteWide(EncodeWidgetPrefs(widgets)) +
+               ",\"dock\":" + ipc::JsonQuoteWide(EncodeDockPrefs(dock)) +
+               ",\"wallpaper_kind\":" + std::to_string(std::min<uint8_t>(wallpaper_kind, 1)) +
+               ",\"video_fill\":" + std::to_string(std::min<uint8_t>(video_fill, 1)) + "}";
     }
     return out;
 }
@@ -284,7 +585,15 @@ std::string DesktopPrefs::ToPersistedJson() const {
     }
     // 31 bounded integral values + 17 doubles (at most 24 bytes each) + at
     // most 240 escaped city bytes keeps this schema below the SDK's 1024 bytes.
-    out += "],\"weather_city\":" + ipc::JsonQuoteWide(weather_city.substr(0, 40)) + "}";
+    // The 小组件 string is ASCII numbers plus at most four short city names, and dock is ~22 bytes.
+    out += "],\"weather_city\":" + ipc::JsonQuoteWide(weather_city.substr(0, 40)) +
+           ",\"widgets\":" + ipc::JsonQuoteWide(EncodeWidgetPrefs(widgets)) +
+           ",\"dock\":" + ipc::JsonQuoteWide(EncodeDockPrefs(dock));
+    const unsigned vw = ((wallpaper_kind ? 1u : 0u) << 1u) | (video_fill ? 1u : 0u);
+    if (vw != 0u) {
+        out += ",\"vw\":" + std::to_string(vw);
+    }
+    out += "}";
     return out;
 }
 
@@ -367,6 +676,12 @@ void DesktopPrefs::ApplyJson(std::string_view json) {
     if (ipc::JsonFindUint64(json, "glass_rate", u) || ipc::JsonFindUint64(json, "glass_live_rate", u)) {
         glass_live_rate = static_cast<uint8_t>(std::min<uint64_t>(u, 2));
     }
+    if (ipc::JsonFindUint64(json, "wallpaper_kind", u)) {
+        wallpaper_kind = static_cast<uint8_t>(std::min<uint64_t>(u, 1));
+    }
+    if (ipc::JsonFindUint64(json, "video_fill", u)) {
+        video_fill = static_cast<uint8_t>(std::min<uint64_t>(u, 1));
+    }
     if (ipc::JsonFindUint64(json, "icon_size", u)) {
         icon_size = static_cast<uint8_t>(std::min<uint64_t>(u, 2));
     }
@@ -388,6 +703,16 @@ void DesktopPrefs::ApplyJson(std::string_view json) {
     if (ipc::JsonFindBool(json, "icons_hidden", b)) {
         icons_hidden = b;
     }
+    if (std::wstring enc; ipc::JsonFindWide(json, "widgets", enc)) DecodeWidgetPrefs(enc, widgets);
+    if (std::wstring enc; ipc::JsonFindWide(json, "dock", enc)) DecodeDockPrefs(enc, dock);
+    if (ipc::JsonFindBool(json, "dock_enabled", b)) dock.enabled = b;
+    if (ipc::JsonFindUint64(json, "dock_position", u)) dock.position = static_cast<uint8_t>(std::min<uint64_t>(u, 2));
+    if (ipc::JsonFindUint64(json, "dock_hide_mode", u)) dock.hide_mode = static_cast<uint8_t>(std::min<uint64_t>(u, 2));
+    if (ipc::JsonFindUint64(json, "dock_minimize_effect", u)) dock.minimize_effect = static_cast<uint8_t>(std::min<uint64_t>(u, 2));
+    if (ipc::JsonFindUint64(json, "dock_icon_size", u)) dock.icon_size = static_cast<uint8_t>(std::clamp<uint64_t>(u, 36, 68));
+    if (ipc::JsonFindBool(json, "dock_magnification", b)) dock.magnification = b;
+    if (ipc::JsonFindUint64(json, "dock_max_scale_x100", u)) dock.max_scale_x100 = static_cast<uint16_t>(std::clamp<uint64_t>(u, 100, 195));
+    if (ipc::JsonFindBool(json, "dock_system_area", b)) dock.system_area = b;
     if (std::wstring city; ipc::JsonFindWide(json, "weather_city", city)) {
         weather_city = city.substr(0, 40);
     }
@@ -410,36 +735,7 @@ DesktopSettingsPage::~DesktopSettingsPage() {
     Close();
 }
 
-PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
-                                      ChangedCallback on_changed,
-                                      CommandCallback on_command,
-                                      bool ai_organize_enabled) {
-    Close();
-    if (!host || !host->query_interface) return PULSE_ERROR_ARGUMENT;
-    HMODULE strings_module = nullptr;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                      reinterpret_cast<LPCWSTR>(&Sv), &strings_module);
-    l10n::Initialize(strings_module, L"system");
-    on_changed_ = std::move(on_changed);
-    on_command_ = std::move(on_command);
-    ai_organize_enabled_ = ai_organize_enabled;
-
-    if (host->query_interface(host->context, Sv(PULSE_RESOURCES_INTERFACE_NAME),
-                              PULSE_RESOURCES_VERSION_1, &resources_, sizeof(resources_)) == PULSE_OK &&
-        resources_.settings_get && resources_.settings_set) {
-        has_resources_ = true;
-    }
-
-    if (host->query_interface(host->context, Sv(PULSE_SETTINGS_PAGES_INTERFACE_NAME),
-                              PULSE_SETTINGS_PAGES_VERSION_1, &pages_, sizeof(pages_)) != PULSE_OK ||
-        !pages_.create) {
-        // Headless host without settings UI: still load persisted settings via PulseResourcesV1.
-        if (has_resources_) LoadPersisted();
-        return PULSE_OK;
-    }
-    has_pages_ = true;
-
-    ModelArena a;
+void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     auto make_section = [&](std::string_view id, std::string_view text) {
         auto n = a.MakeNode(PULSE_UI_MODEL_TEXT, id);
         n.text = a.OptStr(text);
@@ -556,7 +852,6 @@ PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
                  make_action("btn-reorganize", "重新整理", "reorganize-desktop", "icon:refresh", false)),
     });
 
-    const auto tr = [](l10n::StringId id) { return ipc::WideToUtf8(l10n::Get(id)); };
     auto make_appearance_row = [&](std::string id, std::string_view title, std::string_view desc, PulseUiModelNode ctrl) {
         ctrl.min_width = {}; ctrl.max_width = {};
         auto label = a.MakeNode(PULSE_UI_MODEL_TEXT, id + "-title");
@@ -567,12 +862,50 @@ PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
         row.children = a.MakeChildren({label, hint, ctrl});
         return row;
     };
+    auto glass_mode_row = make_appearance_row(
+        "glass-mode", "液态玻璃风格",
+        "清透水滴通透明亮，标准液态兼顾文字可读，柔雾凝脂适合多彩壁纸，流光棱镜折射更浓烈",
+        make_segmented("glass-mode-seg", "glass_mode", {"清透水滴", "标准液态", "柔雾凝脂", "流光棱镜"}, 360));
+    glass_mode_row.visible_binding = a.OptStr("state.is_liquid_glass");
+    auto glass_rate_row = make_appearance_row(
+        "glass-rate", "动态折射帧率",
+        "动态壁纸下液态玻璃实时折射刷新率；静态最省电",
+        make_segmented("glass-rate-seg", "glass_rate", {"静态", "30Hz", "60Hz"}, 240));
+    glass_rate_row.visible_binding = a.OptStr("state.is_liquid_glass");
+
+    auto video_pick_btn = make_button("btn-video-pick", "选择视频…", "pick-video-wallpaper");
+    video_pick_btn.min_width = a.OptInt(112);
+    video_pick_btn.max_width = a.OptInt(112);
+    auto video_file_title = a.MakeNode(PULSE_UI_MODEL_TEXT, "video-file-title");
+    video_file_title.text = a.OptStr("视频文件");
+    auto video_file_status = a.MakeNode(PULSE_UI_MODEL_TEXT, "video-file-status");
+    video_file_status.binding = a.OptStr("state.video_status");
+    video_file_status.role = a.OptStr("caption");
+    auto video_file_left = a.MakeNode(PULSE_UI_MODEL_STACK, "video-file-left");
+    video_file_left.gap = a.OptInt(2);
+    video_file_left.flex = a.OptInt(1);
+    video_file_left.children = a.MakeChildren({video_file_title, video_file_status});
+    auto video_file_row = make_hstack("video-file-row", 16, {video_file_left, video_pick_btn});
+    video_file_row.visible_binding = a.OptStr("state.is_video_wallpaper");
+
+    auto video_fill_row = make_appearance_row(
+        "video-fill", "填充方式",
+        "铺满裁掉黑边，适应保留完整画面；高于屏幕分辨率的视频会在后台自动优化",
+        make_segmented("video-fill-seg", "video_fill", {"铺满", "适应"}, 180));
+    video_fill_row.visible_binding = a.OptStr("state.is_video_wallpaper");
+
     auto appearance_card = make_card("appearance-card", {
+        make_appearance_row("wallpaper", "壁纸", "支持系统壁纸，或选一个本地视频作为桌面动态壁纸（始终静音）",
+                 make_segmented("wp-kind-seg", "wp_kind", {"系统", "视频"}, 180)),
+        video_file_row,
+        video_fill_row,
         make_appearance_row("scene", "场景", "专注只展开「进行中」，其余淡下去；演示隐藏桌面图标和私人磁贴",
                  make_segmented("scene-seg", "scene", {"工作", "专注", "演示"}, 240)),
         make_appearance_row("material", "窗口效果", "分组、磁贴和菜单一起变；系统关闭透明效果时用纯色",
                  make_segmented("material-seg", "material",
                                 {"跟随 Pulse", "亚克力", "Mica", "Mica Alt", "无", "液态玻璃"}, 460)),
+        glass_mode_row,
+        glass_rate_row,
         make_appearance_row("opacity", "不透明度", "0% 时分组和磁贴只剩内容，壁纸完全露出来；菜单始终保留足够的对比度",
                  make_slider("opacity-slider", "opacity", {"0%", "20%", "40%", "60%", "80%", "100%"}, 300)),
         make_appearance_row("iconsize", "图标大小", "分组里和桌面上的图标一起变",
@@ -582,61 +915,285 @@ PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
                                 {"阴影", "底板", "悬停显示", ipc::WideToUtf8(l10n::Get(l10n::StringId::DesktopIconLabelNormal))}, 280)),
     });
 
-    auto optics_card = make_card("glass-optics-card", {});
-    a.node_slices.emplace_back();
-    auto& optics = a.node_slices.back();
-    optics.push_back(make_caption("glass-optics-help", tr(l10n::StringId::DesktopGlassOpticsHelp)));
-    optics.push_back(make_button("glass-reset", tr(l10n::StringId::DesktopGlassReset), "glass-reference-reset"));
-    size_t optical_index=0;
-    for(const auto& field:kGlassOpticalFields) {
-        auto slider=a.MakeNode(PULSE_UI_MODEL_SLIDER,field.key);
-        slider.kind=a.OptStr("continuous");slider.state=a.OptStr(field.key);
-        slider.text=a.OptStr(tr(kGlassControlLabels[optical_index]));
-        slider.command=a.OptStr("glass-commit");
-        slider.options=a.OptOptions({GlassNumber(field.min),GlassNumber(field.max)});
-        slider.helper=a.OptStr(ipc::WideToUtf8(kGlassControlUnits[optical_index]));
-        optics.push_back(slider);++optical_index;
-    }
-    auto edge_switch=make_switch("glass-edge-switch","glass2_blur_edge");
-    edge_switch.min_width={};edge_switch.max_width={};
-    edge_switch.text=a.OptStr(tr(l10n::StringId::DesktopGlassBlurEdge));
-    optics.push_back(edge_switch);
-    optics_card.children={1u,optics.data(),static_cast<uint32_t>(optics.size())};
+    auto make_select = [&](std::string_view id, std::string_view state_key, const std::vector<std::string>& opts, int width) {
+        auto sel = a.MakeNode(PULSE_UI_MODEL_SELECT, id);
+        sel.state = a.OptStr(state_key);
+        sel.options = a.OptOptionsV(opts);
+        sel.min_width = a.OptInt(width);
+        sel.max_width = a.OptInt(width);
+        return sel;
+    };
+    auto make_check = [&](std::string_view id, std::string_view text, std::string_view state_key) {
+        auto c = a.MakeNode(PULSE_UI_MODEL_CHECKBOX, id);
+        c.text = a.OptStr(text);
+        c.state = a.OptStr(state_key);
+        return c;
+    };
+    auto srow = [&](std::string_view id, std::string_view title, std::string_view desc, std::vector<PulseUiModelNode> controls) {
+        auto r = a.MakeNode(PULSE_UI_MODEL_SETTINGS_ROW, id);
+        r.text = a.OptStr(title);
+        if (!desc.empty()) r.detail = a.OptStr(desc);
+        r.gap = a.OptInt(8);
+        r.children = a.MakeChildrenV(controls);
+        return r;
+    };
+
+    auto dock_pos_row = srow("dock-pos", "停靠位置", "支持底部横排或左侧、右侧竖排停靠",
+                             {make_segmented("dock-pos-seg", "dock_pos", {"底部", "左侧", "右侧"}, 210)});
+    dock_pos_row.visible_binding = a.OptStr("state.dock_enabled");
+    auto dock_hide_row = srow("dock-hide", "隐藏方式", "智能隐藏仅在有窗口遮挡程序坞时收回；自动隐藏需鼠标贴边唤出",
+                              {make_segmented("dock-hide-seg", "dock_hide", {"常驻", "智能隐藏", "自动隐藏"}, 240)});
+    dock_hide_row.visible_binding = a.OptStr("state.dock_enabled");
+    auto dock_minfx_row = srow("dock-minfx", "窗口收回效果", "最小化或还原窗口时的液态玻璃动画",
+                               {make_segmented("dock-minfx-seg", "dock_minfx", {"神奇", "缩放", "关闭"}, 210)});
+    dock_minfx_row.visible_binding = a.OptStr("state.dock_enabled");
+    auto dock_size_row = srow("dock-size", "图标大小", "也可直接拖动程序坞分隔线连续调整尺寸",
+                              {make_segmented("dock-size-seg", "dock_size", {"小", "标准", "大"}, 210)});
+    dock_size_row.visible_binding = a.OptStr("state.dock_enabled");
+    auto dock_mag_row = srow("dock-mag", "鼠标悬停放大", "鼠标滑过图标时呈流线波形放大",
+                             {make_switch("dock-mag-sw", "dock_mag")});
+    dock_mag_row.visible_binding = a.OptStr("state.dock_enabled");
+    auto dock_sys_row = srow("dock-sys", "系统状态与托盘区", "右侧统一显示托盘图标、输入法、Wi-Fi、音量、蓝牙、电池与时间面板",
+                             {make_switch("dock-sys-sw", "dock_sys")});
+    dock_sys_row.visible_binding = a.OptStr("state.dock_enabled");
+    auto dock_card = make_card("dock-card", {
+        srow("dock-en", "显示液态玻璃程序坞", "在桌面边缘停靠常用应用、运行窗口、回收站与系统状态区",
+             {make_switch("dock-en-sw", "dock_enabled")}),
+        dock_pos_row,
+        dock_hide_row,
+        dock_minfx_row,
+        dock_size_row,
+        dock_mag_row,
+        dock_sys_row,
+    });
 
     auto organize_card = make_card("organize-card", {
-        make_row("organize", "按规则收进分组", "进行中、安装包、截图与图片、未归类；手动拖进去的不受规则影响",
-                 make_switch("organize-sw", "organize")),
-        make_row("tiles", "磁贴", "照片、下载、最近使用、回收站、磁盘和 Pulse",
-                 make_switch("tiles-sw", "tiles")),
-        make_row("live", "动态磁贴", "照片轮播，下载和最近使用实时更新",
-                 make_switch("live-sw", "live_tiles")),
-        make_row("sleep", "全屏或节能时暂停", "玩游戏、看视频或电池节能时，动态磁贴与动态折射自动暂停",
-                 make_switch("sleep-sw", "auto_sleep")),
-        make_row("dblhide", "双击空白处隐藏图标", "只留壁纸和磁贴，再双击恢复",
-                 make_switch("dblhide-sw", "dbl_hide")),
-        make_row("health", "桌面体检提示", "发现可以清理的文件时在桌面上提示一次",
-                 make_switch("health-sw", "health_check")),
+        srow("organize", "按规则收进分组", "进行中、安装包、截图与图片、未归类；手动拖进去的不受规则影响",
+             {make_switch("organize-sw", "organize")}),
+        srow("tiles", "磁贴", "照片、下载、最近使用、回收站、磁盘和 Pulse",
+             {make_switch("tiles-sw", "tiles")}),
+        srow("live", "动态磁贴", "照片轮播，下载和最近使用实时更新",
+             {make_switch("live-sw", "live_tiles")}),
+        srow("sleep", "全屏或节能时暂停", "玩游戏、看视频或电池节能时，动态磁贴与动态折射自动暂停",
+             {make_switch("sleep-sw", "auto_sleep")}),
+        srow("dblhide", "双击空白处隐藏图标", "只留壁纸和磁贴，再双击恢复",
+             {make_switch("dblhide-sw", "dbl_hide")}),
+        srow("health", "桌面体检提示", "发现可以清理的文件时在桌面上提示一次",
+             {make_switch("health-sw", "health_check")}),
     });
 
     auto pulse_card = make_card("pulse-card", {
-        make_row("menu", "右键使用 Pulse 菜单", "系统和其他软件的菜单项照常出现，标「系统」；关掉后是 Windows 原生菜单",
-                 make_switch("menu-sw", "hybrid_menu")),
-        make_row("search", "在桌面上打字直接搜索", "打开 Pulse 快速搜索并带上已输入的文字；Ctrl+F 也可以",
-                 make_switch("search-sw", "type_search")),
-        make_row("tray", "桌面上的暂存区", "和 Pulse 的暂存区是同一份，桌面和 Pulse 窗口之间拖进拖出",
-                 make_switch("tray-sw", "sync_tray")),
+        srow("menu", "右键使用 Pulse 菜单", "系统和其他软件的菜单项照常出现，标「系统」；关掉后是 Windows 原生菜单",
+             {make_switch("menu-sw", "hybrid_menu")}),
+        srow("search", "在桌面上打字直接搜索", "打开 Pulse 快速搜索并带上已输入的文字；Ctrl+F 也可以",
+             {make_switch("search-sw", "type_search")}),
+        srow("tray", "桌面上的暂存区", "和 Pulse 的暂存区是同一份，桌面和 Pulse 窗口之间拖进拖出",
+             {make_switch("tray-sw", "sync_tray")}),
     });
 
-    // 天气 needs a city: no location API, Open-Meteo's geocoder finds it by name.
-    auto city = a.MakeNode(PULSE_UI_MODEL_TEXT_INPUT, "weather-city");
-    city.text = a.OptStr("天气城市");   // the accessible label Pulse requires on a text input
-    city.state = a.OptStr("weather_city");
-    city.placeholder = a.OptStr("例如 北京、上海、Hangzhou");
-    city.min_width = a.OptInt(220);
-    city.max_width = a.OptInt(220);
-    auto widgets_card = make_card("widgets-card", {
-        make_row("weather", "天气城市", "天气小组件显示这个城市；数据来自 Open-Meteo，每 30 分钟更新一次", city),
+    // 小组件: one settingsRow per option (two nodes each), and only the chosen widget's options are in the
+    // tree — the SDK caps a page at 128 nodes. Choosing another widget rebuilds the page (RebuildTree).
+    // 小组件配色: four option cards, each showing two widgets in that scheme (as in the mockup).
+    const auto& wp = prefs_.widgets;
+    const uint32_t tint_rgb = wp.tint_auto ? prefs_.accent_argb : wp.tint_argb;
+    static constexpr const char* kSchemeNames[] = {"自动", "浅色", "深色", "着色"};
+    std::vector<PulseUiModelNode> scheme_cards;
+    for (int i = 0; i < 4; ++i) {
+        const std::string sid = "w-scheme-" + std::to_string(i);
+        auto art = a.MakeNode(PULSE_UI_MODEL_CANVAS, sid + "-art");
+        art.options = a.OptOptionsV({SchemePreviewCanvas(i, tint_rgb)});
+        art.min_height = a.OptInt(64);
+        art.max_height = a.OptInt(64);
+        auto card = a.MakeNode(PULSE_UI_MODEL_OPTION_CARD, sid);
+        card.kind = a.OptStr("radio");
+        card.state = a.OptStr("w_scheme_" + std::to_string(i));
+        card.text = a.OptStr(kSchemeNames[i]);
+        card.bordered = a.OptBool(true);
+        card.children = a.MakeChildren({art});
+        scheme_cards.push_back(card);
+    }
+    auto scheme_grid = a.MakeNode(PULSE_UI_MODEL_GRID, "w-scheme-grid");
+    scheme_grid.columns = a.OptInt(4);
+    scheme_grid.gap = a.OptInt(10);
+    scheme_grid.children = a.MakeChildrenV(scheme_cards);
+
+    // 着色颜色: 取自壁纸 plus round swatches; the picked one carries a ring and a white dot (macOS accent picker).
+    static constexpr const char* kTintNames[] = {"蓝", "靛蓝", "紫", "粉红", "橙", "青", "绿", "石墨"};
+    std::vector<PulseUiModelNode> swatches;
+    auto auto_tag = a.MakeNode(PULSE_UI_MODEL_TAG, "w-tint-auto");
+    auto_tag.text = a.OptStr("取自壁纸");
+    auto_tag.command = a.OptStr("w-tint-0");
+    auto_tag.selected = a.OptBool(wp.tint_auto);
+    auto_tag.bordered = a.OptBool(true);
+    auto_tag.min_width = a.OptInt(84);
+    auto_tag.max_width = a.OptInt(84);
+    auto_tag.min_height = a.OptInt(28);
+    auto_tag.max_height = a.OptInt(28);
+    swatches.push_back(auto_tag);
+    for (size_t i = 0; i < std::size(kTintColors); ++i) {
+        const uint32_t rgb = kTintColors[i] & 0xFFFFFFu;
+        const bool picked = !wp.tint_auto && (wp.tint_argb & 0xFFFFFFu) == rgb;
+        char ops[256]{};
+        if (picked)
+            std::snprintf(ops, sizeof(ops),
+                          "viewbox 28 28\ncircle 14 14 13 stroke=#%06X width=1.5\ncircle 14 14 10 fill=#%06X\n"
+                          "circle 14 14 3.5 fill=#FFFFFF\n", rgb, rgb);
+        else
+            std::snprintf(ops, sizeof(ops), "viewbox 28 28\ncircle 14 14 10 fill=#%06X\ncircle 14 14 10 stroke=#1F000000 width=1\n",
+                          rgb);
+        auto sw = a.MakeNode(PULSE_UI_MODEL_CANVAS, "w-tint-" + std::to_string(i + 1));
+        sw.text = a.OptStr(kTintNames[i]);
+        sw.command = a.OptStr("w-tint-" + std::to_string(i + 1));
+        sw.options = a.OptOptionsV({ops});
+        for (auto* f : {&sw.min_width, &sw.max_width, &sw.min_height, &sw.max_height}) *f = a.OptInt(28);
+        swatches.push_back(sw);
+    }
+    auto swatch_row = a.MakeNode(PULSE_UI_MODEL_STACK, "w-tint-swatches");
+    swatch_row.orientation = a.OptStr("horizontal");
+    swatch_row.alignment = a.OptStr("center");
+    swatch_row.gap = a.OptInt(8);
+    swatch_row.children = a.MakeChildrenV(swatches);
+    auto tint_row = make_appearance_row("w-tint", "着色颜色", "“取自壁纸”会在换壁纸后跟着变", swatch_row);
+    tint_row.visible_binding = a.OptStr("state.w_is_tint");
+    auto widget_look_card = make_card("widget-look-card", {
+        make_appearance_row("w-scheme", "小组件配色",
+                            "所有小组件一起变；材质跟着上面的“窗口效果”。自动：按背后壁纸的明暗选深色或浅色字", scheme_grid),
+        tint_row,
+        srow("w-sky", "天气用天空的颜色", "晴天蓝、阴天灰、夜里深蓝；关掉后和其他小组件同色", {make_switch("w-sky-sw", "w_sky")}),
+        srow("w-rotate", "叠放自动轮换", "把小组件叠在一起后，没在看时自动轮流切换", {make_switch("w-rotate-sw", "w_rotate")}),
     });
+
+    std::vector<PulseUiModelNode> per_widget{
+        make_segmented("w-tab-seg", "w_tab", {"天气", "时钟", "日历", "系统", "照片", "番茄钟", "电池", "正在播放"}, 560)};
+    switch (widget_tab_) {
+    case 0: {
+        // 天气 needs a city: no location API, Open-Meteo's geocoder finds it by name.
+        auto city = a.MakeNode(PULSE_UI_MODEL_TEXT_INPUT, "weather-city");
+        city.text = a.OptStr("天气城市");   // the accessible label Pulse requires on a text input
+        city.state = a.OptStr("weather_city");
+        city.placeholder = a.OptStr("例如 北京、上海、Hangzhou");
+        city.min_width = a.OptInt(220);
+        city.max_width = a.OptInt(220);
+        per_widget.push_back(srow("weather", "城市", "天气小组件显示这个城市；数据来自 Open-Meteo，不需要账号", {city}));
+        per_widget.push_back(srow("w-unit", "温度单位", "", {make_segmented("w-unit-seg", "w_unit", {"摄氏 °C", "华氏 °F"}, 180)}));
+        per_widget.push_back(srow("w-refresh", "更新间隔", "全屏或节能时暂停更新",
+                                  {make_segmented("w-refresh-seg", "w_refresh", {"15 分钟", "30 分钟", "1 小时"}, 240)}));
+        break;
+    }
+    case 1: {
+        // 世界时钟城市: one chip per city with its offset (click to remove), then 添加城市 with the rest.
+        const auto shown = ShownWorldCities(wp);
+        std::vector<PulseUiModelNode> chips;
+        for (size_t i = 0; i < shown.size(); ++i) {
+            std::string label = ipc::WideToUtf8(shown[i]);
+            const auto* city = model::FindWorldCity(shown[i]);
+            if (city)
+                if (const auto off = CityOffsetLabel(city->tz_key); !off.empty()) label += "  " + off;
+            auto chip = a.MakeNode(PULSE_UI_MODEL_TAG, "w-city-chip-" + std::to_string(i));
+            chip.text = a.OptStr(label);
+            chip.bordered = a.OptBool(true);
+            int w = ChipTextWidth(label) + 24;
+            if (shown.size() > 1) {  // the clock keeps at least one city
+                chip.command = a.OptStr("w-city-del-" + std::to_string(i));
+                chip.glyph = a.OptStr("icon:close");
+                w += 19;
+            }
+            chip.min_width = a.OptInt(w);
+            chip.max_width = a.OptInt(w);
+            chip.min_height = a.OptInt(30);
+            chip.max_height = a.OptInt(30);
+            chips.push_back(chip);
+        }
+        if (shown.size() < 4) {
+            std::vector<std::pair<std::string, std::string>> items;
+            for (size_t c = 0; c < model::kWorldCities.size(); ++c) {
+                const auto label = model::kWorldCities[c].label;
+                if (std::find(shown.begin(), shown.end(), label) != shown.end()) continue;
+                std::string text = ipc::WideToUtf8(std::wstring(label));
+                if (const auto off = CityOffsetLabel(model::kWorldCities[c].tz_key); !off.empty()) text += "  " + off;
+                items.emplace_back(std::move(text), "w-city-add-" + std::to_string(c));
+            }
+            auto add = a.MakeNode(PULSE_UI_MODEL_MENU_BUTTON, "w-city-add");
+            add.text = a.OptStr("添加城市");
+            add.glyph = a.OptStr("icon:plus");
+            add.menu = a.MakeMenu(items);
+            add.min_width = a.OptInt(132);
+            add.max_width = a.OptInt(132);
+            chips.push_back(add);
+        }
+        auto chip_row = a.MakeNode(PULSE_UI_MODEL_STACK, "w-city-chips");
+        chip_row.orientation = a.OptStr("horizontal");
+        chip_row.alignment = a.OptStr("center");
+        chip_row.gap = a.OptInt(8);
+        chip_row.children = a.MakeChildrenV(chips);
+        per_widget.push_back(srow("w-h24", "24 小时制", "关掉后显示“下午 3:05”", {make_switch("w-h24-sw", "w_h24")}));
+        per_widget.push_back(srow("w-seconds", "显示秒针", "表盘上的橙色秒针；关掉后表盘每分钟才重画一次，更省电",
+                                  {make_switch("w-seconds-sw", "w_seconds")}));
+        per_widget.push_back(srow("w-night", "夜里表盘变深", "当地 18:00 到 6:00 表盘换成深色，看世界时钟时一眼知道那边是晚上",
+                                  {make_switch("w-night-sw", "w_night")}));
+        per_widget.push_back(make_appearance_row("w-cities", "世界时钟城市",
+                                                 "4×1 和 4×2 的时钟显示这几个城市，最多 4 个，按这个顺序排", chip_row));
+        break;
+    }
+    case 2:
+        per_widget.push_back(srow("w-lunar", "显示农历", "日期下面显示农历和节日", {make_switch("w-lunar-sw", "w_lunar")}));
+        per_widget.push_back(srow("w-weekstart", "每周第一天", "", {make_segmented("w-weekstart-seg", "w_weekstart", {"周一", "周日"}, 160)}));
+        per_widget.push_back(srow("w-weekno", "显示周数", "在日期旁边显示“第 48 周”", {make_switch("w-weekno-sw", "w_weekno")}));
+        break;
+    case 3: {
+        // One line of checks at their label width (the host gives unsized children 160 DIP columns).
+        auto sized_check = [&](std::string_view id, std::string_view text, std::string_view key) {
+            auto c = make_check(id, text, key);
+            c.min_width = a.OptInt(84);
+            c.max_width = a.OptInt(84);
+            return c;
+        };
+        // Five checks: a settingsRow takes at most 4 inline controls, so they sit on their own line.
+        per_widget.push_back(make_appearance_row("w-sys", "显示哪些项目", "2×2 最多放 4 项，按这个顺序取",
+                                  make_hstack("w-sys-checks", 12,
+                                  {sized_check("w-sys-cpu", "CPU", "w_sys_cpu"), sized_check("w-sys-mem", "内存", "w_sys_mem"),
+                                   sized_check("w-sys-vram", "显存", "w_sys_vram"), sized_check("w-sys-disk", "C 盘", "w_sys_disk"),
+                                   sized_check("w-sys-net", "网络", "w_sys_net")})));
+        per_widget.push_back(srow("w-sysrate", "刷新间隔", "间隔越长越省电",
+                                  {make_segmented("w-sysrate-seg", "w_sysrate", {"1 秒", "2 秒", "5 秒"}, 180)}));
+        per_widget.push_back(srow("w-syswarn", "占用高时变色", "超过 80% 变橙，超过 90% 变红；关掉后一直是单色",
+                                  {make_switch("w-syswarn-sw", "w_syswarn")}));
+        break;
+    }
+    case 4: {
+        auto pick_btn = make_button("w-photo-pick", "更改文件夹…", "pick-photo-folder");
+        pick_btn.min_width = a.OptInt(118);
+        pick_btn.max_width = a.OptInt(118);
+        per_widget.push_back(srow("w-photo-dir", "照片文件夹", "不指定时默认读取系统「图片」文件夹", {pick_btn}));
+        per_widget.push_back(srow("w-photo-int", "换图间隔", "选「手动」时只在点击翻页后切换",
+                                  {make_slider("w-photo-int-slider", "w_photo_int", {"手动", "10秒", "30秒", "1分", "5分", "30分"}, 320)}));
+        per_widget.push_back(srow("w-photo-shuf", "随机顺序", "关掉后按文件顺序依次轮播", {make_switch("w-photo-shuf-sw", "w_photo_shuf")}));
+        per_widget.push_back(srow("w-photo-cap", "显示地点和日期", "在照片底部显示日期和柔和渐变底", {make_switch("w-photo-cap-sw", "w_photo_cap")}));
+        break;
+    }
+    case 5:
+        per_widget.push_back(srow("w-focus", "专注时长", "下一轮开始时生效",
+                                  {make_slider("w-focus-slider", "w_focus", {"15", "20", "25", "30", "45", "60 分钟"}, 300)}));
+        per_widget.push_back(srow("w-short", "短休息", "", {make_segmented("w-short-seg", "w_short", {"5 分钟", "10 分钟"}, 180)}));
+        per_widget.push_back(srow("w-long", "长休息", "每完成 4 个专注后",
+                                  {make_segmented("w-long-seg", "w_long", {"15 分钟", "20 分钟", "30 分钟"}, 240)}));
+        per_widget.push_back(srow("w-chime", "结束时提示音", "用系统的提示声音", {make_switch("w-chime-sw", "w_chime")}));
+        break;
+    case 6:
+        per_widget.push_back(srow("w-bt", "显示蓝牙设备", "耳机、鼠标、键盘等会报告电量的设备", {make_switch("w-bt-sw", "w_bt")}));
+        per_widget.push_back(srow("w-low", "低电量提醒线", "低于这个电量时圆环变红",
+                                  {make_slider("w-low-slider", "w_low", {"10%", "15%", "20%", "30%"}, 240)}));
+        break;
+    default:
+        per_widget.push_back(srow("w-cover", "用封面颜色做背景", "把专辑封面模糊后铺在底下；关掉后和其他小组件同色",
+                                  {make_switch("w-cover-sw", "w_cover")}));
+        per_widget.push_back(srow("w-source", "显示播放来源", "例如“网易云音乐”“Edge”", {make_switch("w-source-sw", "w_source")}));
+        break;
+    }
+    auto widgets_card = a.MakeNode(PULSE_UI_MODEL_GROUP, "widgets-card");
+    widgets_card.bordered = a.OptBool(true);
+    widgets_card.gap = a.OptInt(14);
+    widgets_card.children = a.MakeChildrenV(per_widget);
 
     auto content = a.MakeNode(PULSE_UI_MODEL_STACK, "settings-content");
     content.gap = a.OptInt(8);
@@ -644,12 +1201,14 @@ PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
         master_card,
         make_section("sec-actions", "整理"),
         actions_card,
+        make_section("sec-dock", "程序坞"),
+        dock_card,
         make_section("sec-appearance", "外观与场景"),
         appearance_card,
-        make_section("sec-glass-optics", tr(l10n::StringId::DesktopGlassOptics)), optics_card,
         make_section("sec-organize", "分组与磁贴"),
         organize_card,
         make_section("sec-widgets", "小组件"),
+        widget_look_card,
         widgets_card,
         make_section("sec-pulse", "与 Pulse 打通"),
         pulse_card,
@@ -669,33 +1228,125 @@ PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
     a.AddState("dbl_hide", "true");
     a.AddState("health_check", "true");
     a.AddState("material", "1");
-    for(const auto& field:kGlassOpticalFields)a.AddState(field.key,GlassNumber(prefs_.glass_options.*(field.member)));
-    a.AddState("glass2_blur_edge",prefs_.glass_options.blur_edge?"true":"false");
+    a.AddState("is_liquid_glass", "false");
+    a.AddState("wp_kind", prefs_.wallpaper_kind ? "1" : "0");
+    a.AddState("is_video_wallpaper", prefs_.wallpaper_kind ? "true" : "false");
+    a.AddState("video_fill", prefs_.video_fill ? "1" : "0");
+    a.AddState("video_status", video_status_text_);
+    a.AddState("glass_mode", "0");
+    a.AddState("glass_rate", "1");
     a.AddState("icon_size", "1");
     a.AddState("label_style", "0");
     a.AddState("scene", "0");
     a.AddState("opacity", "3");
     a.AddState("auto_sleep", "true");
     a.AddState("weather_city", "");
+    a.AddState("dock_enabled", prefs_.dock.enabled ? "true" : "false");
+    a.AddState("dock_pos", std::to_string(std::min<uint8_t>(prefs_.dock.position, 2)));
+    a.AddState("dock_hide", std::to_string(std::min<uint8_t>(prefs_.dock.hide_mode, 2)));
+    a.AddState("dock_minfx", prefs_.dock.minimize_effect == 1 ? "0" : (prefs_.dock.minimize_effect == 2 ? "1" : "2"));
+    a.AddState("dock_size", prefs_.dock.icon_size <= 44 ? "0" : (prefs_.dock.icon_size >= 53 ? "2" : "1"));
+    a.AddState("dock_mag", prefs_.dock.magnification ? "true" : "false");
+    a.AddState("dock_sys", prefs_.dock.system_area ? "true" : "false");
+    for (const auto& [key, value] : WidgetUiStates(prefs_.widgets, widget_tab_)) a.AddState(key, value);
     a.AddState("status", "正在运行 · 更改会立即应用到桌面");
 
-    static constexpr const char* kPanelCommands[] = {
-        "glass-commit", "glass-reference-reset",
-        "cmd.ai_organize",
-        "run-health",
-        "reorganize-desktop",
-    };
     for (const char* cmd : kPanelCommands) {
         a.AddCommand(cmd);
     }
+    for (const auto& cmd : WidgetCommands()) a.AddCommand(cmd);
 
-    PulseUiModelTree tree{};
+    a.node_slices.emplace_back(std::vector<PulseUiModelNode>{root});
     tree.size = sizeof(tree);
-    tree.root = &root;
+    tree.root = a.node_slices.back().data();
     tree.states = a.states.data();
     tree.state_count = static_cast<uint32_t>(a.states.size());
     tree.commands = a.commands.data();
     tree.command_count = static_cast<uint32_t>(a.commands.size());
+
+}
+
+// Another widget's options were chosen: swap the 小组件 rows (state keys and values are kept by the host).
+void DesktopSettingsPage::RebuildTree() {
+    if (page_id_ != 0 && ui_model_.update) {
+        ModelArena a;
+        PulseUiModelTree tree{};
+        BuildTree(a, tree);
+        if (ui_model_.update(ui_model_.context, page_id_, &tree) == PULSE_OK) {
+            PushStatesToUi();
+            return;
+        }
+    }
+    PushStatesToUi();
+}
+
+// 着色颜色 swatches and 世界时钟城市 chips: apply, save, and redraw them (their look comes from the prefs).
+bool DesktopSettingsPage::HandleWidgetCommand(std::string_view id) {
+    DesktopPrefs next = prefs_;
+    auto& w = next.widgets;
+    auto index = [&](std::string_view prefix, size_t limit) -> int {
+        if (!id.starts_with(prefix)) return -1;
+        const auto rest = id.substr(prefix.size());
+        int n = 0;
+        const auto r = std::from_chars(rest.data(), rest.data() + rest.size(), n);
+        return r.ec == std::errc{} && r.ptr == rest.data() + rest.size() && n >= 0 && static_cast<size_t>(n) < limit ? n : -1;
+    };
+    if (const int n = index("w-tint-", std::size(kTintColors) + 1); n >= 0) {
+        w.tint_auto = n == 0;
+        if (n > 0) w.tint_argb = kTintColors[n - 1];
+    } else if (const int del = index("w-city-del-", 4); del >= 0) {
+        auto cities = ShownWorldCities(w);
+        if (cities.size() > 1 && static_cast<size_t>(del) < cities.size()) cities.erase(cities.begin() + del);
+        w.world_cities = std::move(cities);
+    } else if (const int add = index("w-city-add-", model::kWorldCities.size()); add >= 0) {
+        auto cities = ShownWorldCities(w);
+        const std::wstring label(model::kWorldCities[static_cast<size_t>(add)].label);
+        if (cities.size() < 4 && std::find(cities.begin(), cities.end(), label) == cities.end()) cities.push_back(label);
+        w.world_cities = std::move(cities);
+    } else {
+        return false;
+    }
+    if (!(next == prefs_)) {
+        prefs_ = next;
+        SavePersisted();
+        if (on_changed_) on_changed_(prefs_, false);
+    }
+    RebuildTree();
+    return true;
+}
+
+PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
+                                      ChangedCallback on_changed,
+                                      CommandCallback on_command,
+                                      bool ai_organize_enabled) {
+    Close();
+    if (!host || !host->query_interface) return PULSE_ERROR_ARGUMENT;
+    HMODULE strings_module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                      reinterpret_cast<LPCWSTR>(&Sv), &strings_module);
+    l10n::Initialize(strings_module, L"system");
+    on_changed_ = std::move(on_changed);
+    on_command_ = std::move(on_command);
+    ai_organize_enabled_ = ai_organize_enabled;
+
+    if (host->query_interface(host->context, Sv(PULSE_RESOURCES_INTERFACE_NAME),
+                              PULSE_RESOURCES_VERSION_1, &resources_, sizeof(resources_)) == PULSE_OK &&
+        resources_.settings_get && resources_.settings_set) {
+        has_resources_ = true;
+    }
+
+    if (host->query_interface(host->context, Sv(PULSE_SETTINGS_PAGES_INTERFACE_NAME),
+                              PULSE_SETTINGS_PAGES_VERSION_1, &pages_, sizeof(pages_)) != PULSE_OK ||
+        !pages_.create) {
+        // Headless host without settings UI: still load persisted settings via PulseResourcesV1.
+        if (has_resources_) LoadPersisted();
+        return PULSE_OK;
+    }
+    has_pages_ = true;
+
+    ModelArena a;
+    PulseUiModelTree tree{};
+    BuildTree(a, tree);
 
     const PulseStatus st = pages_.create(pages_.context, Sv("桌面整理"), &tree, &page_id_);
     if (st != PULSE_OK) {
@@ -715,6 +1366,13 @@ PulseStatus DesktopSettingsPage::Open(const PulseHostV1* host,
     }
     if (ui_model_.subscribe_command) {
         for (const char* cmd : kPanelCommands) {
+            uint64_t tok = 0;
+            if (ui_model_.subscribe_command(ui_model_.context, page_id_, Sv(cmd),
+                                            &OnUiCommandClicked, this, &tok) == PULSE_OK && tok != 0) {
+                cmd_subs_.push_back(tok);
+            }
+        }
+        for (const auto& cmd : WidgetCommands()) {
             uint64_t tok = 0;
             if (ui_model_.subscribe_command(ui_model_.context, page_id_, Sv(cmd),
                                             &OnUiCommandClicked, this, &tok) == PULSE_OK && tok != 0) {
@@ -768,7 +1426,7 @@ void DesktopSettingsPage::Close() noexcept {
 void DesktopSettingsPage::UpdateFromHostProcess(const DesktopPrefs& updated) {
     const bool enabled_changed = (updated.enabled != prefs_.enabled);
     prefs_ = updated;
-    PushStatesToUi();
+    RebuildTree();
     SavePersisted();
     if (enabled_changed && on_changed_) {
         on_changed_(prefs_, true);
@@ -778,6 +1436,22 @@ void DesktopSettingsPage::UpdateFromHostProcess(const DesktopPrefs& updated) {
 void DesktopSettingsPage::SetStatusText(std::string_view utf8_status) {
     if (page_id_ == 0 || !ui_model_.set_states) return;
     const PulseUiState s{Sv("status"), Sv(utf8_status)};
+    ui_model_.set_states(ui_model_.context, page_id_, &s, 1);
+}
+
+void DesktopSettingsPage::SetVideoWallpaperStatus(std::string_view file_utf8, std::string_view status_utf8) {
+    video_file_name_.assign(file_utf8);
+    if (!file_utf8.empty() && !status_utf8.empty()) {
+        video_status_text_ = std::string(file_utf8) + " · " + std::string(status_utf8);
+    } else if (!status_utf8.empty()) {
+        video_status_text_.assign(status_utf8);
+    } else if (!file_utf8.empty()) {
+        video_status_text_.assign(file_utf8);
+    } else {
+        video_status_text_ = "未选择视频 · 支持 MP4、MOV、MKV";
+    }
+    if (page_id_ == 0 || !ui_model_.set_states) return;
+    const PulseUiState s{Sv("video_status"), Sv(video_status_text_)};
     ui_model_.set_states(ui_model_.context, page_id_, &s, 1);
 }
 
@@ -794,12 +1468,24 @@ bool DesktopSettingsPage::SetAiOrganizerEnabled(bool enabled) {
 void DesktopSettingsPage::PushStatesToUi() {
     if (page_id_ == 0 || !ui_model_.set_states) return;
     const std::string mat_str = std::to_string((prefs_.material <= 5) ? prefs_.material : 1u);
+    const std::string is_lg_str = (prefs_.material == 5) ? "true" : "false";
+    const uint8_t mode_idx = (prefs_.glass_preset == 1) ? 1u
+                           : (prefs_.glass_preset == 3) ? 2u
+                           : (prefs_.glass_preset == 2) ? 3u : 0u;
+    const std::string gmode_str = std::to_string(mode_idx);
+    const std::string grate_str = std::to_string(std::min<uint8_t>(prefs_.glass_live_rate, 2));
     const std::string isz_str = std::to_string(std::min<uint8_t>(prefs_.icon_size, 2));
     const std::string lbl_str = std::to_string(std::min<uint8_t>(prefs_.label_style, 3));
     const std::string scene_str = std::to_string(std::min<uint8_t>(prefs_.scene, 2));
     // The slider has stops 0 %, 20 % ... 100 %.
     const std::string opacity_str = std::to_string((std::min<uint8_t>(prefs_.opacity_percent, 100) + 10) / 20);
     const std::string city_utf8 = ipc::WideToUtf8(prefs_.weather_city);
+    const std::string dock_pos_str = std::to_string(std::min<uint8_t>(prefs_.dock.position, 2));
+    const std::string dock_hide_str = std::to_string(std::min<uint8_t>(prefs_.dock.hide_mode, 2));
+    const std::string dock_minfx_str =
+        prefs_.dock.minimize_effect == 1 ? "0" : (prefs_.dock.minimize_effect == 2 ? "1" : "2");
+    const std::string dock_size_str =
+        prefs_.dock.icon_size <= 44 ? "0" : (prefs_.dock.icon_size >= 53 ? "2" : "1");
 
     const PulseUiState updates[] = {
         {Sv("enabled"), Sv(prefs_.enabled ? "true" : "false")},
@@ -812,21 +1498,33 @@ void DesktopSettingsPage::PushStatesToUi() {
         {Sv("dbl_hide"), Sv(prefs_.double_click_hide ? "true" : "false")},
         {Sv("health_check"), Sv(prefs_.health_check ? "true" : "false")},
         {Sv("material"), Sv(mat_str)},
+        {Sv("is_liquid_glass"), Sv(is_lg_str)},
+        {Sv("wp_kind"), Sv(prefs_.wallpaper_kind ? "1" : "0")},
+        {Sv("is_video_wallpaper"), Sv(prefs_.wallpaper_kind ? "true" : "false")},
+        {Sv("video_fill"), Sv(prefs_.video_fill ? "1" : "0")},
+        {Sv("video_status"), Sv(video_status_text_)},
+        {Sv("glass_mode"), Sv(gmode_str)},
+        {Sv("glass_rate"), Sv(grate_str)},
         {Sv("icon_size"), Sv(isz_str)},
         {Sv("label_style"), Sv(lbl_str)},
         {Sv("scene"), Sv(scene_str)},
         {Sv("opacity"), Sv(opacity_str)},
         {Sv("auto_sleep"), Sv(prefs_.auto_sleep ? "true" : "false")},
         {Sv("weather_city"), Sv(city_utf8)},
+        {Sv("dock_enabled"), Sv(prefs_.dock.enabled ? "true" : "false")},
+        {Sv("dock_pos"), Sv(dock_pos_str)},
+        {Sv("dock_hide"), Sv(dock_hide_str)},
+        {Sv("dock_minfx"), Sv(dock_minfx_str)},
+        {Sv("dock_size"), Sv(dock_size_str)},
+        {Sv("dock_mag"), Sv(prefs_.dock.magnification ? "true" : "false")},
+        {Sv("dock_sys"), Sv(prefs_.dock.system_area ? "true" : "false")},
     };
     ui_model_.set_states(ui_model_.context, page_id_, updates, static_cast<uint32_t>(std::size(updates)));
-    std::vector<std::string> optical_values;
-    optical_values.reserve(kGlassOpticalFields.size());
-    for(const auto& field:kGlassOpticalFields)optical_values.push_back(GlassNumber(prefs_.glass_options.*(field.member)));
-    std::vector<PulseUiState> optical_states;
-    for(size_t i=0;i<kGlassOpticalFields.size();++i)optical_states.push_back({Sv(kGlassOpticalFields[i].key),Sv(optical_values[i])});
-    optical_states.push_back({Sv("glass2_blur_edge"),Sv(prefs_.glass_options.blur_edge?"true":"false")});
-    ui_model_.set_states(ui_model_.context,page_id_,optical_states.data(),static_cast<uint32_t>(optical_states.size()));
+    const auto widget_states = WidgetUiStates(prefs_.widgets, widget_tab_);
+    std::vector<PulseUiState> wupdates;
+    wupdates.reserve(widget_states.size());
+    for (const auto& [key, value] : widget_states) wupdates.push_back({Sv(key), Sv(value)});
+    ui_model_.set_states(ui_model_.context, page_id_, wupdates.data(), static_cast<uint32_t>(wupdates.size()));
 }
 
 void DesktopSettingsPage::LoadPersisted() {
@@ -909,7 +1607,7 @@ void DesktopSettingsPage::HandleResourcesReply(const PulseResourcesReply& reply)
                     break;
                 }
             }
-            PushStatesToUi();
+            RebuildTree();
             if (on_changed_) {
                 on_changed_(prefs_, prefs_.enabled != prev_enabled);
             }
@@ -942,9 +1640,22 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
     bool changed = false;
 
     bool sync_sliders = false;
+    bool rebuild = false;
     for (uint32_t i = 0; i < batch.count; ++i) {
         const std::string k = CopySv(batch.changes[i].key);
         const std::string v = CopySv(batch.changes[i].value);
+        if (k.starts_with("w_")) {
+            const int tab_before = widget_tab_;
+            const bool was_tint = next.widgets.scheme == 3;
+            if (ApplyWidgetUiState(k, v, next.widgets, widget_tab_)) {
+                changed = true;
+                if (widget_tab_ != tab_before) rebuild = true;
+                // Visibility, or a value the parse corrected, goes back to the page.
+                if (was_tint != (next.widgets.scheme == 3) || k.starts_with("w_scheme_") || k.starts_with("w_sys_"))
+                    sync_sliders = true;
+            }
+            continue;
+        }
         if(k.starts_with("glass2_")) {
             if(k=="glass2_blur_edge"&&(v=="true"||v=="false")) {
                 next.glass_options.blur_edge=v=="true";next.glass_reference=true;next.glass_preset=4;next.glass_preview=false;changed=true;
@@ -985,6 +1696,12 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
             changed = true;
         } else if (k == "material" && v.size() == 1 && v[0] >= '0' && v[0] <= '5') {
             next.material = static_cast<uint8_t>(v[0] - '0');
+            sync_sliders = true;
+            changed = true;
+        } else if (k == "glass_mode" && v.size() == 1 && v[0] >= '0' && v[0] <= '3') {
+            static constexpr uint8_t kModeToPreset[4] = {5, 1, 3, 2};
+            next.ApplyGlassPreset(kModeToPreset[v[0] - '0']);
+            sync_sliders = true;
             changed = true;
         } else if (k == "glass_preset" && v.size() == 1 && v[0] >= '0' && v[0] <= '5') {
             const uint8_t p = static_cast<uint8_t>(v[0] - '0');
@@ -1020,6 +1737,13 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
         } else if (k == "glass_rate" && v.size() == 1 && v[0] >= '0' && v[0] <= '2') {
             next.glass_live_rate = static_cast<uint8_t>(v[0] - '0');
             changed = true;
+        } else if (k == "wp_kind" && v.size() == 1 && (v[0] == '0' || v[0] == '1')) {
+            next.wallpaper_kind = static_cast<uint8_t>(v[0] - '0');
+            sync_sliders = true;
+            changed = true;
+        } else if (k == "video_fill" && v.size() == 1 && (v[0] == '0' || v[0] == '1')) {
+            next.video_fill = static_cast<uint8_t>(v[0] - '0');
+            changed = true;
         } else if (k == "icon_size" && v.size() == 1 && v[0] >= '0' && v[0] <= '2') {
             next.icon_size = static_cast<uint8_t>(v[0] - '0');
             changed = true;
@@ -1037,6 +1761,30 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
             while (!city.empty() && city.back() == L' ') city.pop_back();
             while (!city.empty() && city.front() == L' ') city.erase(city.begin());
             if (city != next.weather_city) { next.weather_city = city; changed = true; }
+        } else if (k == "dock_enabled" && (v == "true" || v == "false")) {
+            next.dock.enabled = (v == "true");
+            sync_sliders = true;
+            changed = true;
+        } else if (k == "dock_pos" && v.size() == 1 && v[0] >= '0' && v[0] <= '2') {
+            next.dock.position = static_cast<uint8_t>(v[0] - '0');
+            changed = true;
+        } else if (k == "dock_hide" && v.size() == 1 && v[0] >= '0' && v[0] <= '2') {
+            next.dock.hide_mode = static_cast<uint8_t>(v[0] - '0');
+            changed = true;
+        } else if (k == "dock_minfx" && v.size() == 1 && v[0] >= '0' && v[0] <= '2') {
+            static constexpr uint8_t kMinFxMap[3] = {1, 2, 0};
+            next.dock.minimize_effect = kMinFxMap[v[0] - '0'];
+            changed = true;
+        } else if (k == "dock_size" && v.size() == 1 && v[0] >= '0' && v[0] <= '2') {
+            static constexpr uint8_t kDockSizes[3] = {42, 48, 56};
+            next.dock.icon_size = kDockSizes[v[0] - '0'];
+            changed = true;
+        } else if (k == "dock_mag" && (v == "true" || v == "false")) {
+            next.dock.magnification = (v == "true");
+            changed = true;
+        } else if (k == "dock_sys" && (v == "true" || v == "false")) {
+            next.dock.system_area = (v == "true");
+            changed = true;
         } else if (k == "auto_sleep" && (v == "true" || v == "false")) {
             next.auto_sleep = (v == "true");
             changed = true;
@@ -1046,6 +1794,7 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
         }
     }
 
+    if (rebuild) RebuildTree();
     if (changed && !(next == prefs_)) {
         const bool enabled_toggled = (next.enabled != prefs_.enabled);
         if(next.glass_preview && !prefs_.glass_preview) { glass_edit_start_=prefs_;has_glass_edit_start_=true; }
@@ -1067,6 +1816,7 @@ void PULSE_CALL DesktopSettingsPage::OnUiCommandClicked(
         auto* self = static_cast<DesktopSettingsPage*>(user);
         const auto id=CopySv(command);
         if (id == "cmd.ai_organize" && !self->ai_organize_enabled_) return;
+        if (id.starts_with("w-") && self->HandleWidgetCommand(id)) return;
         if(id=="glass-reference-reset"||id=="glass-commit") {
             if(id=="glass-reference-reset")self->prefs_.ApplyGlassPreset(5);
             else if(!self->prefs_.glass_preview)return;

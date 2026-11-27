@@ -10,12 +10,13 @@
 #endif
 #include <windows.h>
 #include <d2d1_1.h>
+#include <d3d11_1.h>
 #include <shobjidl.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
 #include "host/model/desktop_model.h"
-#include "host/render/liquid_glass_effect.h"
+#include "host/render/tile_liquid_glass.h"
 #include "host/render/text_contrast.h"
 
 #include <condition_variable>
@@ -37,6 +38,7 @@ namespace pulse::desktop::render {
 uint32_t ExtractVibrantAccentArgb(const uint8_t* pbgra, uint32_t width, uint32_t height, uint32_t stride) noexcept;
 
 class WallpaperBackdrop {
+    friend struct WallpaperBackdropTestAccess;
 public:
     static constexpr size_t kMaxCacheBytes = 3u * 1024u * 1024u; // 3 MB hard LRU cap (holds 200+ right-sized icons)
 
@@ -47,6 +49,9 @@ public:
 
     static std::wstring QueryCurrentWallpaperPath();
     static DESKTOP_WALLPAPER_POSITION QueryWallpaperPosition();
+    // Lightweight change stamp (SPI path + file mtime/size + TranscodedWallpaper mtime/size)
+    // to detect wallpaper switches even when Windows omits or delays WM_SETTINGCHANGE.
+    static std::wstring QuerySystemWallpaperChangeToken();
     static uint32_t PresetAccentArgb(model::WallpaperPreset preset, bool dark_mode) noexcept;
 
     // Crisp vector/gradient renderers matching desktop_pack_mockup.html (zero persistent VRAM).
@@ -99,6 +104,11 @@ public:
     ID2D1Bitmap1* GlassSharpBitmap(ID2D1DeviceContext* dc, bool allow_sync_decode,
                                    uint32_t& out_w, uint32_t& out_h);
     ID2D1Bitmap1* GlassFrostBitmap(ID2D1DeviceContext* dc, uint32_t& out_w, uint32_t& out_h) const;
+    bool ConsumeGlassSharpUpdated() noexcept {
+        const bool was = glass_sharp_updated_;
+        glass_sharp_updated_ = false;
+        return was;
+    }
     void ReleaseGlassSource() const noexcept;
     float OriginX() const noexcept { return origin_x_px_; }
     float OriginY() const noexcept { return origin_y_px_; }
@@ -111,12 +121,24 @@ public:
     void SetMonitorScreenOrigin(POINT origin) noexcept { monitor_screen_origin_ = origin; }
     // Optional 1/2-res composite snapshot of the desktop scene (wallpaper + underlying cards)
     // directly behind an opening popup menu so Liquid Glass menus refract underlying cards too (G10).
-    void SetMenuUnderlaySnapshot(std::vector<uint8_t> pbgra, uint32_t width, uint32_t height,
-                                 RECT screen_rect_px) const noexcept;
+    void SetMenuUnderlaySnapshot(ID3D11Texture2D* texture, RECT screen_rect_px) const noexcept;
+    // A zero-time keyed-mutex acquisition can defer the first cross-device import.
+    bool MenuUnderlayPending() const noexcept { return menu_underlay_pending_; }
+    struct ExternalLiveGlassSource {
+        ID2D1Bitmap1* sharp_bmp = nullptr;
+        uint32_t sharp_w = 0;
+        uint32_t sharp_h = 0;
+        ID2D1Bitmap1* frost_bmp = nullptr;
+        uint32_t frost_w = 0;
+        uint32_t frost_h = 0;
+        uint32_t logical_w = 0;
+        uint32_t logical_h = 0;
+    };
     bool DrawMenuMaterial(ID2D1DeviceContext* dc, const D2D1_RECT_F& card_px,
                           POINT popup_screen_px, float radius_px, model::CardMaterial material,
                           bool dark, uint8_t opacity, uint8_t dispersion_level = 1,
-                          const model::BeautifySettings* glass_cfg = nullptr) const;
+                          const model::BeautifySettings* glass_cfg = nullptr,
+                          const ExternalLiveGlassSource* external_live = nullptr) const;
     void ReleaseMenuMaterialCache() const noexcept;
     ID2D1BitmapBrush1* MenuNoiseBrush(ID2D1DeviceContext* dc) const;
     uint64_t MenuUploadCount() const noexcept { return menu_uploads_; }
@@ -124,10 +146,18 @@ public:
     size_t MenuCacheBytes() const noexcept {
         const size_t bytes = static_cast<size_t>(quarter_w_) * quarter_h_ * 4u;
         const size_t snap_bytes = static_cast<size_t>(menu_underlay_w_) * menu_underlay_h_ * 4u;
+        size_t bake_bytes = 0;
+        for (const auto& bitmap : menu_underlay_scratch_) {
+            if (!bitmap) continue;
+            const auto size = bitmap->GetPixelSize();
+            bake_bytes += static_cast<size_t>(size.width) * size.height * 4u;
+        }
         return (menu_wallpaper_ ? bytes : 0) + (menu_material_brush_ ? bytes : 0) +
                (menu_frost_bitmap_ ? bytes : 0) +
-               (menu_underlay_bitmap_ ? snap_bytes : 0) +
-               (menu_underlay_frost_ ? snap_bytes / 4u : 0) +
+               (menu_underlay_texture_ ? snap_bytes : 0) +
+               (menu_underlay_shared_ ? snap_bytes : 0) +
+               (menu_underlay_imported_ ? snap_bytes : 0) +
+               bake_bytes +
                (menu_noise_bitmap_ ? 128u * 128u * 4u : 0u);
     }
     struct MaterialCacheStats {
@@ -171,6 +201,9 @@ public:
 
 private:
     void ApplyBrushTransforms() const noexcept;
+    void BindMenuDevice(ID2D1DeviceContext* dc) const;
+    bool EnsureMenuUnderlay(ID2D1DeviceContext* dc) const;
+    bool BakeMenuUnderlayFrost(ID2D1DeviceContext* dc) const;
     bool EnsureAcrylicBlur() const;
     bool EnsureMicaBlur() const;
     struct DecodeJob {
@@ -182,6 +215,7 @@ private:
         uint32_t max_w = 64;
         uint32_t max_h = 64;
         bool is_wallpaper_sharp = false;
+        uint64_t generation = 0;
     };
 
     struct DecodedUpload {
@@ -190,6 +224,7 @@ private:
         uint32_t height = 0;
         std::vector<uint8_t> pbgra;
         bool failed = false;
+        uint64_t generation = 0;
     };
 
     IWICImagingFactory* EnsureWicFactory();
@@ -203,6 +238,11 @@ private:
     Microsoft::WRL::ComPtr<IWICImagingFactory> wic_factory_;
     mutable Microsoft::WRL::ComPtr<ID2D1DeviceContext> owner_dc_;
     std::wstring wallpaper_path_;
+    uint64_t wallpaper_file_mtime_ = 0;
+    uint64_t wallpaper_file_size_ = 0;
+    uint64_t wallpaper_transcoded_mtime_ = 0;
+    uint64_t wallpaper_transcoded_size_ = 0;
+    DESKTOP_WALLPAPER_POSITION wallpaper_position_ = DWPOS_FILL;
     model::WallpaperPreset active_preset_ = model::WallpaperPreset::System;
     bool preset_dark_mode_ = true;
     bool vector_icons_only_ = false;
@@ -222,8 +262,10 @@ private:
     mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> glass_frost_;
     mutable uint32_t glass_sharp_w_ = 0;
     mutable uint32_t glass_sharp_h_ = 0;
+    mutable uint64_t glass_sharp_generation_ = 0;
     mutable bool glass_sharp_pending_ = false;
     mutable bool glass_sharp_failed_ = false;
+    mutable bool glass_sharp_updated_ = false;
     Microsoft::WRL::ComPtr<ID2D1Bitmap1> noise_bitmap_;
 
     mutable Microsoft::WRL::ComPtr<ID2D1BitmapBrush1> acrylic_brush_;
@@ -236,12 +278,26 @@ private:
     mutable Microsoft::WRL::ComPtr<ID2D1DeviceContext> menu_dc_;
     mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> menu_wallpaper_;
     mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> menu_frost_bitmap_;
-    mutable std::vector<uint8_t> menu_underlay_pixels_;
+    mutable Microsoft::WRL::ComPtr<ID3D11Texture2D> menu_underlay_texture_;
+    mutable Microsoft::WRL::ComPtr<ID3D11Texture2D> menu_underlay_shared_;
+    mutable Microsoft::WRL::ComPtr<ID3D11Texture2D> menu_underlay_imported_;
+    mutable bool menu_underlay_pending_ = false;
+    mutable bool menu_underlay_failed_ = false;
+    mutable bool menu_underlay_frost_error_logged_ = false;
     mutable uint32_t menu_underlay_w_ = 0, menu_underlay_h_ = 0;
     mutable RECT menu_underlay_screen_px_{};
     mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> menu_underlay_bitmap_;
     mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> menu_underlay_frost_;
-    mutable LiquidGlassPassPool menu_glass_pool_;
+    mutable Microsoft::WRL::ComPtr<ID3D11DeviceContext1> menu_underlay_bake_context_;
+    mutable Microsoft::WRL::ComPtr<ID3DDeviceContextState> menu_underlay_bake_state_;
+    mutable Microsoft::WRL::ComPtr<ID3D11VertexShader> menu_underlay_vertex_shader_;
+    mutable Microsoft::WRL::ComPtr<ID3D11PixelShader> menu_underlay_pixel_shader_;
+    mutable Microsoft::WRL::ComPtr<ID3D11Buffer> menu_underlay_constants_;
+    mutable Microsoft::WRL::ComPtr<ID3D11Texture2D> menu_underlay_scratch_texture_[2];
+    mutable Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> menu_underlay_scratch_srv_[2];
+    mutable Microsoft::WRL::ComPtr<ID3D11RenderTargetView> menu_underlay_scratch_rtv_[2];
+    mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> menu_underlay_scratch_[2];
+    mutable TileLiquidGlassRenderer menu_tile_glass_;
     mutable Microsoft::WRL::ComPtr<ID2D1Bitmap1> menu_noise_bitmap_;
     mutable Microsoft::WRL::ComPtr<ID2D1BitmapBrush1> menu_noise_brush_;
     mutable bool menu_noise_failed_ = false;
@@ -263,14 +319,14 @@ private:
     std::unordered_set<std::wstring> failed_keys_;
     size_t cached_bytes_ = 0;
 
-    std::mutex async_mtx_;
+    mutable std::mutex async_mtx_;
     std::condition_variable async_cv_;
     bool worker_running_ = false;
     bool worker_stop_ = false;
     std::thread worker_thread_;
-    std::unordered_set<std::wstring> pending_keys_;
-    std::deque<DecodeJob> decode_queue_;
-    std::deque<DecodedUpload> completed_uploads_;
+    mutable std::unordered_set<std::wstring> pending_keys_;
+    mutable std::deque<DecodeJob> decode_queue_;
+    mutable std::deque<DecodedUpload> completed_uploads_;
     std::function<void()> on_async_ready_;
 };
 

@@ -77,6 +77,181 @@ TileGridTarget ComputeTileReorderTarget(const DesktopTile& tile, PointI proposed
     return result;
 }
 
+TileGridTarget FindNearestFreeTileCell(const std::vector<DesktopTile>& tiles, size_t moving_index,
+                                       PointI proposed, const RectI& work_area, const RectI& board_rect,
+                                       std::span<const RectI> groups) {
+    TileGridTarget result;
+    if (moving_index >= tiles.size() || work_area.empty()) return result;
+    const RectI origin = ResolveTileRect(tiles[moving_index], board_rect);
+    if (origin.empty() || origin.w > work_area.w || origin.h > work_area.h) return result;
+
+    std::vector<RectI> obstacles;
+    obstacles.reserve(tiles.size() + groups.size());
+    for (const RectI& g : groups) {
+        if (!g.empty()) obstacles.push_back(g);
+    }
+    for (size_t i = 0; i < tiles.size(); ++i) {
+        if (i == moving_index) continue;
+        const RectI r = ResolveTileRect(tiles[i], board_rect);
+        if (!r.empty()) obstacles.push_back(r);
+    }
+
+    const int max_x = work_area.right() - origin.w;
+    const int max_y = work_area.bottom() - origin.h;
+
+    int ax = work_area.x + 24;
+    int ay = work_area.y + kTileBoardTopMargin;
+    int step_x = kStep;
+    int step_y = kStep;
+    int gap_x = kTileGapPx;
+    int gap_y = kTileGapPx;
+
+    // When a right-aligned (or DPI-scaled) tile board exists, anchor the grid pitch & exact
+    // ComputeTilePixelRect columns/rows to the board so every slot aligns pixel-for-pixel with
+    // starter tiles (matching reference widget_demo.cpp's right-anchored grid) without 1-2px
+    // integer-division rounding false conflicts.
+    std::vector<int> xs;
+    std::vector<int> ys;
+    int clear_x = gap_x;
+    int clear_y = gap_y;
+    if (!board_rect.empty()) {
+        constexpr int kStdW = kTileCols * kTileUnitPx + (kTileCols - 1) * kTileGapPx;
+        constexpr int kStdH = kTileRows * kTileUnitPx + (kTileRows - 1) * kTileGapPx;
+        gap_x = std::clamp((board_rect.w * kTileGapPx + kStdW / 2) / kStdW, 0, board_rect.w / kTileCols);
+        gap_y = std::clamp((board_rect.h * kTileGapPx + kStdH / 2) / kStdH, 0, board_rect.h / kTileRows);
+        const int usable_w = std::max(kTileCols, board_rect.w - (kTileCols - 1) * gap_x);
+        const int usable_h = std::max(kTileRows, board_rect.h - (kTileRows - 1) * gap_y);
+        step_x = std::max(16, (usable_w + kTileCols / 2) / kTileCols + gap_x);
+        step_y = std::max(16, (usable_h + kTileRows / 2) / kTileRows + gap_y);
+        ax = board_rect.x;
+        ay = board_rect.y;
+        // Allow up to 2px integer-division slack across DPI-scaled board columns so a tile
+        // originating from a +1px remainder column never false-conflicts with an adjacent slot.
+        clear_x = std::max(0, gap_x - 2);
+        clear_y = std::max(0, gap_y - 2);
+
+        for (int c = 0; c < kTileCols; ++c) {
+            const int cx = board_rect.x + (c * usable_w) / kTileCols + c * gap_x;
+            if (cx >= work_area.x && cx <= max_x) xs.push_back(cx);
+        }
+        for (int r = 0; r < kTileRows; ++r) {
+            const int ry = board_rect.y + (r * usable_h) / kTileRows + r * gap_y;
+            if (ry >= work_area.y && ry <= max_y) ys.push_back(ry);
+        }
+    }
+
+    auto conflicts_board = [&](RectI rect) noexcept {
+        rect.w += clear_x;
+        rect.h += clear_y;
+        for (const RectI& other : obstacles) {
+            RectI padded = other;
+            padded.w += clear_x;
+            padded.h += clear_y;
+            if (rect.intersects(padded)) return true;
+        }
+        return false;
+    };
+
+    xs.push_back(work_area.x);
+    xs.push_back(max_x);
+    if (origin.x >= work_area.x && origin.x <= max_x) xs.push_back(origin.x);
+    if (board_rect.empty()) {
+        for (int x = ax; x <= max_x; x += step_x) {
+            if (x >= work_area.x) xs.push_back(x);
+        }
+        for (int x = ax - step_x; x >= work_area.x; x -= step_x) {
+            if (x <= max_x) xs.push_back(x);
+        }
+    } else {
+        for (int x = ax - step_x; x >= work_area.x; x -= step_x) {
+            if (x <= max_x) xs.push_back(x);
+        }
+        const int right_anchor = board_rect.right() + gap_x;
+        for (int x = right_anchor; x <= max_x; x += step_x) {
+            if (x >= work_area.x) xs.push_back(x);
+        }
+    }
+
+    ys.push_back(work_area.y);
+    ys.push_back(max_y);
+    if (origin.y >= work_area.y && origin.y <= max_y) ys.push_back(origin.y);
+    if (board_rect.empty()) {
+        for (int y = ay; y <= max_y; y += step_y) {
+            if (y >= work_area.y) ys.push_back(y);
+        }
+        for (int y = ay - step_y; y >= work_area.y; y -= step_y) {
+            if (y <= max_y) ys.push_back(y);
+        }
+    } else {
+        for (int y = ay - step_y; y >= work_area.y; y -= step_y) {
+            if (y <= max_y) ys.push_back(y);
+        }
+        const int bottom_anchor = board_rect.bottom() + gap_y;
+        for (int y = bottom_anchor; y <= max_y; y += step_y) {
+            if (y >= work_area.y) ys.push_back(y);
+        }
+    }
+
+    // Add flush-adjacent and edge-aligned snap lines relative to every existing tile & group.
+    // Without these, a tile previously docked to work_area.right() / work_area.x (off-phase from
+    // board_rect by kTileBoardRightMargin) leaves an unfillable 30-60px dead gap beside it.
+    for (const RectI& o : obstacles) {
+        const int oxs[4] = {o.x - origin.w - gap_x, o.right() + gap_x, o.x, o.right() - origin.w};
+        for (int cx : oxs) {
+            if (cx >= work_area.x && cx <= max_x) xs.push_back(cx);
+        }
+        const int oys[4] = {o.y - origin.h - gap_y, o.bottom() + gap_y, o.y, o.bottom() - origin.h};
+        for (int cy : oys) {
+            if (cy >= work_area.y && cy <= max_y) ys.push_back(cy);
+        }
+    }
+
+    auto dedup = [](std::vector<int>& v) {
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+    };
+    dedup(xs);
+    dedup(ys);
+
+    bool found = false;
+    int64_t best_dist_sq = 0;
+    RectI best_rect{};
+
+    for (int y : ys) {
+        for (int x : xs) {
+            const RectI cand{x, y, origin.w, origin.h};
+            if (!Contains(work_area, cand) || conflicts_board(cand)) continue;
+            const int64_t dx = static_cast<int64_t>(x) - proposed.x;
+            const int64_t dy = static_cast<int64_t>(y) - proposed.y;
+            const int64_t d2 = dx * dx + dy * dy;
+            const bool better = !found || d2 < best_dist_sq ||
+                                (d2 == best_dist_sq && (cand == origin || (best_rect != origin && Before(cand, best_rect))));
+            if (better) {
+                found = true;
+                best_dist_sq = d2;
+                best_rect = cand;
+            }
+        }
+    }
+
+    if (!found) {
+        result.rect = origin;
+        result.valid = false;
+        return result;
+    }
+
+    auto axis_cell = [&](int pos, int anchor, int step, int lo) noexcept -> int {
+        if (pos >= anchor && (pos - anchor) % step == 0) return (pos - anchor) / step;
+        return pos == lo ? -1 : -2;
+    };
+    result.valid = true;
+    result.rect = best_rect;
+    result.cell = {axis_cell(best_rect.x, ax, step_x, work_area.x),
+                   axis_cell(best_rect.y, ay, step_y, work_area.y)};
+    result.reservation = WorkFootprint(best_rect, work_area);
+    return result;
+}
+
 TileReorderResult PreviewTileReorder(const std::vector<DesktopTile>& start, size_t moving_index,
                               PointI proposed, const RectI& work_area, const RectI& board_rect,
                               std::span<const RectI> groups, TileReorderBudget budget) {

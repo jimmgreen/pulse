@@ -1488,8 +1488,33 @@ void TestWidgetsStacksAndAppsTile() {
     st3.tiles[0].look.show_title = false;
     st3.todos = MakeDefaultTodos();
     st3.settings.weather_city = L"杭州";
+    st3.settings.widgets.scheme = 3;
+    st3.settings.widgets.tint_auto = false;
+    st3.settings.widgets.tint_argb = 0xFFBF5AF2u;
+    st3.settings.widgets.clock_seconds = false;
+    st3.settings.widgets.world_cities = {L"上海", L"悉尼"};
+    st3.settings.widgets.system_items = 0x0B;
+    st3.settings.widgets.short_break_min = 10;
     DesktopModelState round{};
     CHECK(DeserializeModelStateJson(SerializeModelStateJson(st3), round));
+    CHECK(round.settings.widgets == st3.settings.widgets);
+    // A state file from before the 小组件 options loads with their defaults.
+    {
+        std::string legacy = SerializeModelStateJson(st3);
+        // Drop the "widgets": "..." member (and the comma before it), whatever the whitespace.
+        const size_t key = legacy.find("\"widgets\"");
+        CHECK(key != std::string::npos);
+        if (key != std::string::npos) {
+            const size_t open = legacy.find('"', legacy.find(':', key) + 1);
+            const size_t close = open == std::string::npos ? std::string::npos : legacy.find('"', open + 1);
+            const size_t comma = legacy.rfind(',', key);
+            CHECK(open != std::string::npos && close != std::string::npos && comma != std::string::npos);
+            if (close != std::string::npos && comma != std::string::npos) legacy.erase(comma, close + 1 - comma);
+            DesktopModelState old{};
+            CHECK(DeserializeModelStateJson(legacy, old));
+            CHECK(old.settings.widgets == pulse::desktop::WidgetPrefs{});
+        }
+    }
     CHECK(round.tiles.size() == st3.tiles.size());
     CHECK(round.tiles[0].look == st3.tiles[0].look);
     const auto rs = std::find_if(round.tiles.begin(), round.tiles.end(), [](const DesktopTile& t) { return t.id == "recent"; });

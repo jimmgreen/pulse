@@ -45,6 +45,8 @@ struct DesktopGroupHostTestPeer {
 
     static void Prepare(DesktopHostSession& host) {
         host.CancelGroupDrag(false);
+        host.group_springs_.Clear();
+        host.group_ghost_.Hide();
         host.group_hover_.Reset();
         host.state_ = {};
         host.state_.settings.organize_enabled = true;
@@ -325,6 +327,32 @@ struct DesktopGroupHostTestPeer {
         host.pending_tile_idx_ = 9;
         send(WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(300,300));
         check(!host.pending_tile_idx_ && !host.tile_drag_session_.Active(), "stale pending tile index is cancelled before drag access");
+
+        // Reference-aligned group drag ghost preview, calm non-pushing nearest free spot, and spring snap-back.
+        Prepare(host);
+        host.BeginGroupDrag(0, 60, 95, false);
+        send(WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(207, 307));
+        check(host.interaction_.dragging_group && host.interaction_.dragging_group_id == "group-0" &&
+              !host.interaction_.drag_group_preview_rect.empty(),
+              "group drag activates smooth translucent target ghost preview");
+        const model::RectI predicted_ghost = host.interaction_.drag_group_preview_rect;
+        const int release_x = host.state_.groups[0].x;
+        const int release_y = host.state_.groups[0].y;
+        send(WM_LBUTTONUP, 0, MAKELPARAM(207, 307));
+        check(!host.interaction_.dragging_group &&
+              host.state_.groups[0].x == predicted_ghost.x && host.state_.groups[0].y == predicted_ghost.y &&
+              host.state_.groups[1].x == 384 && host.state_.groups[2].x == 744,
+              "group release commits exact ghost target while keeping sibling groups stationary");
+        check((release_x != predicted_ghost.x || release_y != predicted_ghost.y) &&
+              !host.group_springs_.Empty() && host.interaction_.group_anim_positions.contains("group-0"),
+              "off-grid group release launches SwiftUI spring snap-back animation");
+        host.TickMotionAnimations(NowAnimMs() + 200.0);
+        check(host.interaction_.group_anim_positions.contains("group-0"),
+              "group spring snap-back animates smoothly mid-flight");
+        host.TickMotionAnimations(NowAnimMs() + 800.0);
+        check(host.group_springs_.Empty() && host.interaction_.group_anim_positions.empty(),
+              "group spring snap-back settles cleanly to committed slot");
+
         std::printf("Group host interaction: %d cases, %d failures\n", count, failed);
         return failed ? 1 : 0;
     }

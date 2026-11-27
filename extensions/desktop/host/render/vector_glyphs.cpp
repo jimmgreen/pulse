@@ -112,7 +112,7 @@ const char* FindPath(wchar_t glyph) {
 // ---- SVG path data -> Direct2D geometry (M L H V C S Q A Z, absolute and relative) ----
 class PathParser {
 public:
-    explicit PathParser(const char* s) : p_(s) {}
+    explicit PathParser(const char* s, bool filled = false) : p_(s), filled_(filled) {}
 
     bool Build(ID2D1GeometrySink* sink) {
         char cmd = 0;
@@ -135,7 +135,7 @@ public:
                 if (!Num(x) || !Num(y)) return false;
                 close_open(D2D1_FIGURE_END_OPEN);
                 cur = start = {ox + x, oy + y};
-                sink->BeginFigure(cur, D2D1_FIGURE_BEGIN_HOLLOW);
+                sink->BeginFigure(cur, filled_ ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
                 open = true;
                 cmd = rel ? 'l' : 'L';  // further pairs are lines
                 have_ctrl = false;
@@ -242,12 +242,14 @@ private:
         return true;
     }
     const char* p_;
+    bool filled_ = false;
 };
 
 struct FactoryCache {
     ComPtr<ID2D1Factory> factory;
     ComPtr<ID2D1StrokeStyle> stroke;
     std::unordered_map<wchar_t, ComPtr<ID2D1PathGeometry>> geometries;
+    std::unordered_map<const char*, ComPtr<ID2D1PathGeometry>> svg_hollow, svg_filled;
 };
 
 std::mutex g_cache_mutex;
@@ -281,7 +283,48 @@ ID2D1PathGeometry* GeometryFor(FactoryCache& cache, wchar_t glyph) {
     return geo.Get();
 }
 
+ID2D1PathGeometry* SvgGeometryFor(FactoryCache& cache, const char* path, bool filled) {
+    auto& map = filled ? cache.svg_filled : cache.svg_hollow;
+    auto it = map.find(path);
+    if (it != map.end()) return it->second.Get();
+    ComPtr<ID2D1PathGeometry> geo;
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(cache.factory->CreatePathGeometry(&geo)) || FAILED(geo->Open(&sink))) return nullptr;
+    if (filled) sink->SetFillMode(D2D1_FILL_MODE_WINDING);
+    PathParser parser(path, filled);
+    const bool ok = parser.Build(sink.Get());
+    if (FAILED(sink->Close()) || !ok) return nullptr;
+    map.emplace(path, geo);
+    return geo.Get();
+}
+
 } // namespace
+
+void DrawSvgPath(ID2D1DeviceContext* dc, const char* path, const D2D1_RECT_F& box, float view, ID2D1Brush* brush,
+                 bool fill, float stroke_view) {
+    if (!dc || !path || !brush || view <= 0.0f || box.right <= box.left) return;
+    ComPtr<ID2D1Factory> factory;
+    dc->GetFactory(&factory);
+    if (!factory) return;
+    ID2D1PathGeometry* geo = nullptr;
+    ID2D1StrokeStyle* stroke = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_cache_mutex);
+        FactoryCache* cache = CacheFor(factory.Get());
+        geo = SvgGeometryFor(*cache, path, fill);
+        stroke = cache->stroke.Get();
+    }
+    if (!geo) return;
+    const float k = std::min(box.right - box.left, box.bottom - box.top) / view;
+    const float ox = (box.left + box.right) * 0.5f - view * k * 0.5f;
+    const float oy = (box.top + box.bottom) * 0.5f - view * k * 0.5f;
+    D2D1_MATRIX_3X2_F outer{};
+    dc->GetTransform(&outer);
+    dc->SetTransform(D2D1::Matrix3x2F::Scale(k, k) * D2D1::Matrix3x2F::Translation(ox, oy) * outer);
+    if (fill) dc->FillGeometry(geo, brush);
+    else dc->DrawGeometry(geo, brush, stroke_view, stroke);
+    dc->SetTransform(outer);
+}
 
 bool DrawVectorGlyph(ID2D1DeviceContext* dc, wchar_t glyph, const D2D1_RECT_F& box, float size, ID2D1Brush* brush) {
     if (!dc || !brush || size <= 0.0f) return false;

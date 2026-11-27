@@ -536,8 +536,9 @@ int wmain(int argc, wchar_t** argv) {
             const auto uploads_before = wallpaper.MenuUploadCount();
             bool bounded = true;
             for (int repeat = 0; repeat < 104; ++repeat) {
+                // The two native-backdrop menus (Acrylic now opens as liquid glass, like the widgets).
                 settings.default_material = repeat % 2 == 0 ? pulse::desktop::model::CardMaterial::MicaAlt :
-                    pulse::desktop::model::CardMaterial::Acrylic;
+                    pulse::desktop::model::CardMaterial::Mica;
                 overlays.OpenContextMenu(group, settings);
                 const auto repeat_timer = SetTimer(nullptr, 0, 120, ChooseFirst);
                 while (overlays.IsOpen() && GetMessageW(&tracking, nullptr, 0, 0) > 0) DispatchMessageW(&tracking);
@@ -564,7 +565,7 @@ int wmain(int argc, wchar_t** argv) {
             const bool plateau = bounded && uploads_after == uploads_before &&
                 last.private_bytes <= warm.private_bytes + 16u * 1024u * 1024u &&
                 last.handles <= warm.handles + 4 && last.gdi <= warm.gdi + 2 && last.user <= warm.user + 2;
-            std::printf("[%s] 32 alternating MicaAlt/Acrylic cycles after warmup private=%zu->%zu handles=%lu->%lu GDI=%lu->%lu USER=%lu->%lu uploads=%llu->%llu idle_cache=%zu\n",
+            std::printf("[%s] 32 alternating MicaAlt/Mica cycles after warmup private=%zu->%zu handles=%lu->%lu GDI=%lu->%lu USER=%lu->%lu uploads=%llu->%llu idle_cache=%zu\n",
                 plateau ? "PASS" : "FAIL", warm.private_bytes, last.private_bytes, warm.handles, last.handles,
                 warm.gdi, last.gdi, warm.user, last.user,
                 static_cast<unsigned long long>(uploads_before), static_cast<unsigned long long>(uploads_after), wallpaper.MenuCacheBytes());

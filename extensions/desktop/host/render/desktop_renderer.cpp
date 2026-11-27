@@ -1,6 +1,8 @@
 #include "host/render/desktop_renderer.h"
 #include "host/render/vector_glyphs.h"
 #include "host/render/desktop_appearance.h"
+#include "host/render/widget_painters.h"
+#include "host/render/dock_tile.h"
 #include "../../../../src/common/os_version.h"
 #include "../../../../src/common/localization.h"
 #include "../../../../src/ui/ui_compositor.h"
@@ -9,6 +11,7 @@
 #include <wincodec.h>
 
 #include <algorithm>
+#include <cstring>
 #include <array>
 #include <functional>
 #include <initializer_list>
@@ -292,6 +295,10 @@ uint32_t TileHueArgb(model::TileKind kind, bool dark_mode) noexcept {
     case model::TileKind::Calendar:      return dark_mode ? 0xFFFF6B6Bu : 0xFFC4312Cu;
     case model::TileKind::Todo:          return dark_mode ? 0xFF4CC38Au : 0xFF1E7F45u;
     case model::TileKind::System:        return dark_mode ? 0xFF8FA8FFu : 0xFF3A55C4u;
+    case model::TileKind::Pomodoro:      return dark_mode ? 0xFFFF6B5Fu : 0xFFD93832u;
+    case model::TileKind::MediaPlayer:   return dark_mode ? 0xFFFF6BA8u : 0xFFC62870u;
+    case model::TileKind::Countdown:     return dark_mode ? 0xFF8191FFu : 0xFF463CD4u;
+    case model::TileKind::Battery:       return dark_mode ? 0xFF38DB70u : 0xFF18984Au;
     case model::TileKind::Photos:
     default:                             return 0xFFFFFFFFu;
     }
@@ -322,6 +329,10 @@ wchar_t TileFluentGlyph(const model::DesktopTile& tile) noexcept {
     case model::TileKind::Calendar:     return L'\xE787';
     case model::TileKind::Todo:         return L'\xE73A';
     case model::TileKind::System:       return L'\xE9D9';
+    case model::TileKind::Pomodoro:     return L'\xE916';
+    case model::TileKind::MediaPlayer:  return L'\xE8D6';
+    case model::TileKind::Countdown:    return L'\xE787';
+    case model::TileKind::Battery:      return L'\xE83F';
     case model::TileKind::PulseLauncher:
     default:                            return L'\xE945';
     }
@@ -770,6 +781,7 @@ DesktopRenderer::~DesktopRenderer() {
 }
 
 void DesktopRenderer::Shutdown() noexcept {
+    dock_icon_cache_.Clear();
     widget_text_.Reset();
     host_backdrop_.Reset();
     backdrop_.ShutdownAsyncWorker();
@@ -778,6 +790,8 @@ void DesktopRenderer::Shutdown() noexcept {
     dashed_stroke_.Reset();
     border_grad_brush_.Reset();
     border_grad_key_ = 0;
+    media_cover_bmp_.Reset();
+    media_cover_hash_ = 0;
     card_shadow_bitmap_.Reset();
     solid_brush_.Reset();
 
@@ -787,6 +801,8 @@ void DesktopRenderer::Shutdown() noexcept {
     fmt_banner_text_.Reset();
     fmt_empty_hint_.Reset();
     fmt_note_body_.Reset();
+    fmt_hero_num_.Reset();
+    fmt_clock_num_.Reset();
     fmt_clock_big_.Reset();
     fmt_disk_pct_.Reset();
     fmt_tile_small_title_.Reset();
@@ -804,8 +820,22 @@ void DesktopRenderer::Shutdown() noexcept {
     if (d2d_dc_) {
         d2d_dc_->SetTarget(nullptr);
     }
-    glass_pool_.Reset();
+    tile_glass_.Reset();
+    tile_hover_id_.clear();
+    tile_hover_rect_ = {};
+    tile_hover_spring_.Reset();
+    tile_hover_animating_ = false;
+    last_hover_qpc_ = 0;
     live_wallpaper_.ReleaseDeviceResources();
+    DestroySecondaryVideoMonitors();
+    bound_video_swap_chain_.Reset();
+    video_static_surface_.Reset();
+    video_black_surface_.Reset();
+    video_visual_.Reset();
+    video_bg_visual_.Reset();
+    video_wallpaper_active_ = false;
+    video_source_w_ = 0;
+    video_source_h_ = 0;
     target_bitmap_.Reset();
     glass_vsurf_.Reset();
     glass_visual_.Reset();
@@ -976,6 +1006,10 @@ bool DesktopRenderer::CreateTextFormats() {
                  DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false, fmt_disk_pct_) &&
         make_fmt(42.0f, DWRITE_FONT_WEIGHT_LIGHT, DWRITE_TEXT_ALIGNMENT_LEADING,
                  DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false, fmt_clock_big_) &&
+        make_fmt(9.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER,
+                 DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false, fmt_clock_num_) &&
+        make_fmt(54.0f, DWRITE_FONT_WEIGHT_LIGHT, DWRITE_TEXT_ALIGNMENT_LEADING,
+                 DWRITE_PARAGRAPH_ALIGNMENT_CENTER, false, false, fmt_hero_num_) &&
         make_fmt(12.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING,
                  DWRITE_PARAGRAPH_ALIGNMENT_NEAR, true, true, fmt_note_body_) &&
         make_fmt(12.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER,
@@ -1043,13 +1077,22 @@ bool DesktopRenderer::CreateSwapChainResources(HWND hwnd, uint32_t width, uint32
                 }
                 if (SUCCEEDED(dc_hr) && dcomp_device_ &&
                     SUCCEEDED(dcomp_device_->CreateTargetForHwnd(hwnd, TRUE, &dcomp_target_)) &&
+                    SUCCEEDED(dcomp_device_->CreateVisual(&dcomp_root_visual_)) &&
+                    SUCCEEDED(dcomp_device_->CreateVisual(&video_bg_visual_)) &&
+                    SUCCEEDED(dcomp_device_->CreateVisual(&video_visual_)) &&
                     SUCCEEDED(dcomp_device_->CreateVisual(&dcomp_visual_)) &&
                     SUCCEEDED(dcomp_visual_->SetContent(swap_chain_.Get())) &&
-                    SUCCEEDED(dcomp_target_->SetRoot(dcomp_visual_.Get())) &&
+                    SUCCEEDED(dcomp_root_visual_->AddVisual(video_bg_visual_.Get(), FALSE, nullptr)) &&
+                    SUCCEEDED(dcomp_root_visual_->AddVisual(video_visual_.Get(), TRUE, video_bg_visual_.Get())) &&
+                    SUCCEEDED(dcomp_root_visual_->AddVisual(dcomp_visual_.Get(), TRUE, video_visual_.Get())) &&
+                    SUCCEEDED(dcomp_target_->SetRoot(dcomp_root_visual_.Get())) &&
                     SUCCEEDED(dcomp_device_->Commit())) {
                     using_dcomp_ = true;
                 } else {
                     dcomp_visual_.Reset();
+                    video_visual_.Reset();
+                    video_bg_visual_.Reset();
+                    dcomp_root_visual_.Reset();
                     dcomp_target_.Reset();
                     dcomp_device_.Reset();
                     swap_chain_.Reset();
@@ -1156,6 +1199,7 @@ bool DesktopRenderer::Resize(uint32_t width, uint32_t height) {
         backdrop_.LoadForScreen(d2d_dc_.Get(), BackdropWidth(), BackdropHeight(), backdrop_.ActivePreset(),
                                 backdrop_.PresetDarkMode());
         ApplyBackdropMapping();
+        if (video_wallpaper_active_) ApplyVideoVisualTransform();
         TrimDxgiMemory();
         InvalidateAll();
         return true;
@@ -1173,6 +1217,7 @@ bool DesktopRenderer::Resize(uint32_t width, uint32_t height) {
     height_ = height;
     has_presented_full_frame_ = false;
     if (!BindSwapChainTargetBitmap()) return false;
+    if (video_wallpaper_active_) ApplyVideoVisualTransform();
     if (dcomp_device_) {
         dcomp_device_->Commit();
     }
@@ -1185,6 +1230,7 @@ bool DesktopRenderer::Resize(uint32_t width, uint32_t height) {
 }
 
 void DesktopRenderer::TrimDxgiMemory() noexcept {
+    tile_glass_.TrimCaches();
     if (d2d_device_) {
         d2d_device_->ClearResources(0);
     }
@@ -1200,7 +1246,12 @@ bool DesktopRenderer::ReloadWallpaper(model::WallpaperPreset preset, bool dark_m
     const bool ok = backdrop_.LoadForScreen(d2d_dc_.Get(), BackdropWidth(), BackdropHeight(), preset, dark_mode,
                                             override_path);
     ApplyBackdropMapping();
+    if (preset == model::WallpaperPreset::System) {
+        live_wallpaper_.ResetDesktopBlackFallback();
+    }
     TrimDxgiMemory();
+    committed_glass_cards_.clear();
+    glass_only_dirty_ = true;
     InvalidateAll();
     return ok;
 }
@@ -1226,24 +1277,33 @@ void DesktopRenderer::InvalidateRect(const model::RectI& rc) noexcept {
     dirty_rects_.push_back(clamped);
 }
 
-bool DesktopRenderer::ShouldPauseLiveActivity(bool enabled) noexcept {
-    if (!enabled) return false;
+video::VideoPauseReason DesktopRenderer::QuerySystemPauseReason(bool enabled,
+                                                                bool /*foreground_is_desktop*/) noexcept {
+    if (!enabled) return video::VideoPauseReason::None;
     QUERY_USER_NOTIFICATION_STATE quns = QUNS_ACCEPTS_NOTIFICATIONS;
     if (SUCCEEDED(SHQueryUserNotificationState(&quns))) {
-        if (quns == QUNS_BUSY ||
-            quns == QUNS_RUNNING_D3D_FULL_SCREEN ||
+        // Only treat true exclusive Direct3D fullscreen and Windows Presentation Mode as
+        // system-level fullscreen pauses. Generic QUNS_BUSY fires falsely for transparent
+        // full-screen screen-recording borders / HUDs (e.g. QQScreenshot, WeChat, Snipaste)
+        // and secondary-monitor windows; real borderless fullscreen and maximized apps on the
+        // desktop monitor are detected accurately by video::IsWindowCoveringDesktop().
+        if (quns == QUNS_RUNNING_D3D_FULL_SCREEN ||
             quns == QUNS_PRESENTATION_MODE) {
-            return true;
+            return video::VideoPauseReason::Fullscreen;
         }
     }
     SYSTEM_POWER_STATUS sps{};
     if (GetSystemPowerStatus(&sps)) {
         if (sps.SystemStatusFlag == 1 ||
             (sps.ACLineStatus == 0 && sps.BatteryLifePercent <= 20 && sps.BatteryLifePercent != 255)) {
-            return true;
+            return video::VideoPauseReason::BatterySaver;
         }
     }
-    return false;
+    return video::VideoPauseReason::None;
+}
+
+bool DesktopRenderer::ShouldPauseLiveActivity(bool enabled, bool foreground_is_desktop) noexcept {
+    return QuerySystemPauseReason(enabled, foreground_is_desktop) != video::VideoPauseReason::None;
 }
 
 model::RectI DesktopRenderer::ComputeBoardRectFallback(const model::RectI& work_area, bool tiles_enabled) noexcept {
@@ -1482,12 +1542,23 @@ TileResizeZone DesktopRenderer::HitTestTileResize(const model::DesktopTile& tile
     return TileResizeZone::None;
 }
 
+void DesktopRenderer::SetActivitySuspended(bool suspended) noexcept {
+    if (activity_suspended_ == suspended) return;
+    activity_suspended_ = suspended;
+    if (suspended) {
+        // Stop external capture too; skipping paints alone leaves WGC producing frames.
+        (void)OnLiveWallpaperFrameNotification(true);
+    } else {
+        InvalidateAll();
+    }
+}
+
 bool DesktopRenderer::Tick(const model::DesktopModelState& state,
                            std::span<const model::GroupComputedView> group_views,
                            const model::RectI& tile_board_rect,
                            const LiveTileRuntimeData& live_data,
                            const DesktopInteractionState& interaction) {
-    if (!d2d_dc_ || (!swap_chain_ && !vsurf_)) return false;
+    if (activity_suspended_ || !d2d_dc_ || (!swap_chain_ && !vsurf_)) return false;
 
     current_glass_settings_ = state.settings;
     current_glass_live_rate_ = state.settings.glass_live_rate;
@@ -1512,9 +1583,10 @@ bool DesktopRenderer::Tick(const model::DesktopModelState& state,
     if (vsurf_) return TickVirtual(state, group_views, tile_board_rect, live_data, interaction);
 
     UpdateHoverLight(state, group_views, tile_board_rect, interaction);
-    if (hover_light_.animating || glass_only_dirty_) {
+    if (!glass_dirty_rects_.empty() || glass_only_dirty_) {
         full_dirty_ = true;
         glass_only_dirty_ = false;
+        glass_dirty_rects_.clear();
     }
 
     // Strict 0-Present Idle Sleep: zero BeginDraw and zero Present1 when nothing changed!
@@ -1523,7 +1595,7 @@ bool DesktopRenderer::Tick(const model::DesktopModelState& state,
         return false;
     }
 
-    glass_pool_.BeginFrame();
+    tile_glass_.BeginFrame();
 
     LARGE_INTEGER t0{}, t1{};
     QueryPerformanceCounter(&t0);
@@ -1562,7 +1634,7 @@ bool DesktopRenderer::Tick(const model::DesktopModelState& state,
         d2d_dc_->PopAxisAlignedClip();
     }
     const HRESULT end_hr = d2d_dc_->EndDraw();
-    glass_pool_.EndFrame();
+    tile_glass_.EndFrame();
 
     HRESULT present_hr = S_OK;
     if (SUCCEEDED(end_hr)) {
@@ -1639,6 +1711,7 @@ void DesktopRenderer::SetSurfaceGeometry(uint32_t dpi, const model::RectI& monit
         BindSwapChainTargetBitmap();
     }
     ApplyBackdropMapping();
+    if (video_wallpaper_active_) ApplyVideoVisualTransform();
     InvalidateAll();
 }
 
@@ -1658,6 +1731,11 @@ void DesktopRenderer::ApplyBackdropMapping() noexcept {
 
 bool DesktopRenderer::CreateVirtualSurfaceResources(HWND hwnd, uint32_t width, uint32_t height) {
     auto cleanup = [&]() noexcept {
+        bound_video_swap_chain_.Reset();
+        video_static_surface_.Reset();
+        video_black_surface_.Reset();
+        video_visual_.Reset();
+        video_bg_visual_.Reset();
         glass_vsurf_.Reset();
         glass_visual_.Reset();
         vsurf_.Reset();
@@ -1674,6 +1752,8 @@ bool DesktopRenderer::CreateVirtualSurfaceResources(HWND hwnd, uint32_t width, u
     }
     if (FAILED(dcomp_device_->CreateTargetForHwnd(hwnd, TRUE, &dcomp_target_)) ||
         FAILED(dcomp_device_->CreateVisual(&dcomp_root_visual_)) ||
+        FAILED(dcomp_device_->CreateVisual(&video_bg_visual_)) ||
+        FAILED(dcomp_device_->CreateVisual(&video_visual_)) ||
         FAILED(dcomp_device_->CreateVisual(&glass_visual_)) ||
         FAILED(dcomp_device_->CreateVisual(&dcomp_visual_)) ||
         FAILED(dcomp_device_->CreateVirtualSurface(width, height, DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -1683,8 +1763,12 @@ bool DesktopRenderer::CreateVirtualSurfaceResources(HWND hwnd, uint32_t width, u
         return false;
     }
     dcomp_visual_->SetContent(vsurf_.Get());
-    // Visual order: glass_visual_ (bottom, lazy virtual surface) -> dcomp_visual_ (top, icons & text).
-    if (FAILED(dcomp_root_visual_->AddVisual(glass_visual_.Get(), FALSE, nullptr)) ||
+    // Visual order (bottom -> top):
+    //   video_bg_visual_ (letterbox black when Fit) -> video_visual_ (video swap chain / poster)
+    //   -> glass_visual_ (lazy Liquid Glass) -> dcomp_visual_ (icons, groups, tiles, dock).
+    if (FAILED(dcomp_root_visual_->AddVisual(video_bg_visual_.Get(), FALSE, nullptr)) ||
+        FAILED(dcomp_root_visual_->AddVisual(video_visual_.Get(), TRUE, video_bg_visual_.Get())) ||
+        FAILED(dcomp_root_visual_->AddVisual(glass_visual_.Get(), TRUE, video_visual_.Get())) ||
         FAILED(dcomp_root_visual_->AddVisual(dcomp_visual_.Get(), TRUE, glass_visual_.Get())) ||
         FAILED(dcomp_target_->SetRoot(dcomp_root_visual_.Get()))) {
         cleanup();
@@ -1731,62 +1815,581 @@ void DesktopRenderer::SetLiveWallpaperDecision(const host::LiveWallpaperDecision
 }
 
 bool DesktopRenderer::OnLiveWallpaperFrameNotification(bool paused) noexcept {
+    paused = paused || activity_suspended_;
     if (!d3d_device_ || !d2d_dc_) return false;
+    const auto& active_cards = !pending_glass_cards_.empty() ? pending_glass_cards_ : committed_glass_cards_;
     std::vector<RECT> card_rects_px;
-    card_rects_px.reserve(committed_glass_cards_.size());
+    card_rects_px.reserve(active_cards.size());
     bool any_frost = false;
-    for (const auto& c : committed_glass_cards_) {
-        if (c.req.frost_percent > 6 || c.req.energy_saver) any_frost = true;
-        const int pad_dip = std::max<int>(36, static_cast<int>(c.req.thickness_dip) + 12);
+    for (const auto& c : active_cards) {
+        if (c.tile_cfg.frost_amount > 0.18f || c.tile_cfg.min_blur_dip > 1.5f) any_frost = true;
         card_rects_px.push_back(DipRectToPx(model::RectI{
-            static_cast<int>(std::floor(c.req.left_dip)),
-            static_cast<int>(std::floor(c.req.top_dip)),
-            static_cast<int>(std::ceil(c.req.right_dip - c.req.left_dip)),
-            static_cast<int>(std::ceil(c.req.bottom_dip - c.req.top_dip))}, pad_dip));
+            static_cast<int>(std::floor(c.tile_rect_dip.left)),
+            static_cast<int>(std::floor(c.tile_rect_dip.top)),
+            static_cast<int>(std::ceil(c.tile_rect_dip.right - c.tile_rect_dip.left)),
+            static_cast<int>(std::ceil(c.tile_rect_dip.bottom - c.tile_rect_dip.top))}, 64));
+    }
+    if (!dock_inline_glass_rect_dip_.empty()) {
+        if (dock_inline_needs_frost_) any_frost = true;
+        card_rects_px.push_back(DipRectToPx(dock_inline_glass_rect_dip_, 32));
     }
     const RECT surf_scr{
         surface_px_.x, surface_px_.y,
         surface_px_.x + (surface_px_.w > 0 ? surface_px_.w : static_cast<int>(width_)),
         surface_px_.y + (surface_px_.h > 0 ? surface_px_.h : static_cast<int>(height_))};
+    const bool any_glass_visible = has_any_glass_card_ || !active_cards.empty();
     live_wallpaper_.SyncState(d3d_device_.Get(), d2d_dc_.Get(), live_decision_, surf_scr,
-                              current_glass_live_rate_, !committed_glass_cards_.empty(), paused);
-    if (live_wallpaper_.ConsumePendingFrame(d3d_device_.Get(), d2d_dc_.Get(), any_frost, card_rects_px)) {
+                              current_glass_live_rate_, any_glass_visible, paused);
+    // While inline (dragged/springing/jiggling) glass cards are active, skip dirty-region culling
+    // so live video frames continue updating underneath moving cards.
+    const std::span<const RECT> dirty_check_rects = has_inline_glass_card_
+        ? std::span<const RECT>{}
+        : std::span<const RECT>(card_rects_px);
+    if (live_wallpaper_.ConsumePendingFrame(d3d_device_.Get(), d2d_dc_.Get(), any_frost || has_inline_glass_card_,
+                                            dirty_check_rects)) {
         glass_only_dirty_ = true;
+        if (has_inline_glass_card_) {
+            if (inline_glass_rects_dip_.empty()) {
+                full_dirty_ = true;
+            } else {
+                for (const auto& rc : inline_glass_rects_dip_) {
+                    InvalidateRect(rc);
+                }
+            }
+        }
+        if (!dock_inline_glass_rect_dip_.empty()) {
+            // Surgical dirty rect: only redraw the small bottom Dock pill when inline, never the whole desktop.
+            InvalidateRect(dock_inline_glass_rect_dip_);
+        }
         return true;
     }
     return false;
+}
+
+namespace {
+
+void ApplyVideoVisualTransformForBounds(IDCompositionVisual* bg_visual,
+                                        IDCompositionVisual* video_visual,
+                                        IDCompositionSurface* black_surface,
+                                        uint32_t src_w,
+                                        uint32_t src_h,
+                                        const model::RectI& monitor_px,
+                                        const model::RectI& surface_px,
+                                        uint32_t fallback_w,
+                                        uint32_t fallback_h,
+                                        video::VideoFillMode fill) noexcept {
+    if (!video_visual || src_w == 0 || src_h == 0) return;
+
+    const float surf_w = static_cast<float>(surface_px.w > 0 ? surface_px.w : static_cast<int>(fallback_w));
+    const float surf_h = static_cast<float>(surface_px.h > 0 ? surface_px.h : static_cast<int>(fallback_h));
+    const float mon_w = static_cast<float>(monitor_px.w > 0 ? monitor_px.w : static_cast<int>(surf_w));
+    const float mon_h = static_cast<float>(monitor_px.h > 0 ? monitor_px.h : static_cast<int>(surf_h));
+    const float off_x = (monitor_px.w > 0 && surface_px.w > 0)
+                            ? static_cast<float>(surface_px.x - monitor_px.x)
+                            : 0.0f;
+    const float off_y = (monitor_px.h > 0 && surface_px.h > 0)
+                            ? static_cast<float>(surface_px.y - monitor_px.y)
+                            : 0.0f;
+
+    const float sx = mon_w / static_cast<float>(src_w);
+    const float sy = mon_h / static_cast<float>(src_h);
+    const float scale = (fill == video::VideoFillMode::Fill) ? std::max(sx, sy) : std::min(sx, sy);
+    const float draw_w = static_cast<float>(src_w) * scale;
+    const float draw_h = static_cast<float>(src_h) * scale;
+    const float tx = (mon_w - draw_w) * 0.5f - off_x;
+    const float ty = (mon_h - draw_h) * 0.5f - off_y;
+
+    D2D_MATRIX_3X2_F mat{};
+    mat._11 = scale;
+    mat._22 = scale;
+    mat._31 = tx;
+    mat._32 = ty;
+    video_visual->SetTransform(mat);
+    video_visual->SetBitmapInterpolationMode(DCOMPOSITION_BITMAP_INTERPOLATION_MODE_LINEAR);
+
+    // Clip to surface bounds in visual-local coordinates so Fill never bleeds past the window.
+    if (scale > 1e-4f) {
+        const D2D_RECT_F clip{
+            -tx / scale,
+            -ty / scale,
+            (surf_w - tx) / scale,
+            (surf_h - ty) / scale,
+        };
+        video_visual->SetClip(clip);
+    }
+
+    if (bg_visual) {
+        if (fill == video::VideoFillMode::Fit && black_surface) {
+            bg_visual->SetContent(black_surface);
+            D2D_MATRIX_3X2_F bmat{};
+            bmat._11 = std::max(1.0f, surf_w) / 16.0f;
+            bmat._22 = std::max(1.0f, surf_h) / 16.0f;
+            bg_visual->SetTransform(bmat);
+        } else {
+            bg_visual->SetContent(nullptr);
+        }
+    }
+}
+
+LRESULT CALLBACK SecondaryVideoWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) noexcept {
+    if (msg == WM_NCHITTEST) return HTTRANSPARENT;
+    if (msg == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+} // namespace
+
+LUID DesktopRenderer::AdapterLuid() const noexcept {
+    LUID luid{};
+    if (!dxgi_device_) return luid;
+    ComPtr<IDXGIAdapter> adapter;
+    if (SUCCEEDED(dxgi_device_->GetAdapter(&adapter)) && adapter) {
+        DXGI_ADAPTER_DESC desc{};
+        if (SUCCEEDED(adapter->GetDesc(&desc))) {
+            luid = desc.AdapterLuid;
+        }
+    }
+    return luid;
+}
+
+bool DesktopRenderer::EnsureVideoBlackSurface() noexcept {
+    if (video_black_surface_) return true;
+    if (!dcomp_device_ || !d2d_dc_) return false;
+    ComPtr<IDCompositionSurface> surf;
+    if (FAILED(dcomp_device_->CreateSurface(16, 16, DXGI_FORMAT_B8G8R8A8_UNORM,
+                                            DXGI_ALPHA_MODE_PREMULTIPLIED, &surf)) || !surf) {
+        return false;
+    }
+    POINT off{};
+    ComPtr<IDXGISurface> dxgi_surf;
+    if (FAILED(surf->BeginDraw(nullptr, IID_PPV_ARGS(&dxgi_surf), &off)) || !dxgi_surf) {
+        return false;
+    }
+    const D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap1> target;
+    const bool ok = SUCCEEDED(d2d_dc_->CreateBitmapFromDxgiSurface(dxgi_surf.Get(), &bp, &target)) && target;
+    if (ok) {
+        ComPtr<ID2D1Image> prev_target;
+        d2d_dc_->GetTarget(&prev_target);
+        const D2D1_UNIT_MODE prev_unit = d2d_dc_->GetUnitMode();
+        float prev_dx = 96.0f, prev_dy = 96.0f;
+        d2d_dc_->GetDpi(&prev_dx, &prev_dy);
+
+        d2d_dc_->SetUnitMode(D2D1_UNIT_MODE_PIXELS);
+        d2d_dc_->SetDpi(96.0f, 96.0f);
+        d2d_dc_->SetTarget(target.Get());
+        d2d_dc_->BeginDraw();
+        d2d_dc_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f));
+        d2d_dc_->EndDraw();
+
+        d2d_dc_->SetTarget(prev_target.Get());
+        d2d_dc_->SetUnitMode(prev_unit);
+        d2d_dc_->SetDpi(prev_dx, prev_dy);
+    }
+    surf->EndDraw();
+    if (!ok) return false;
+    video_black_surface_ = surf;
+    return true;
+}
+
+bool DesktopRenderer::UploadStaticVideoSurface(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t stride) noexcept {
+    if (!dcomp_device_ || !d2d_dc_ || !bgra || w == 0 || h == 0) return false;
+
+    // Cap static frozen/poster DComp surface to the renderer's output size so a 4K frozen frame
+    // on a 1080p desktop occupies 8 MB instead of 33 MB (and stays well within §8 <= 40 MB budget).
+    const uint32_t cap_w = surface_px_.w > 0 ? static_cast<uint32_t>(surface_px_.w) : (width_ ? width_ : w);
+    const uint32_t cap_h = surface_px_.h > 0 ? static_cast<uint32_t>(surface_px_.h) : (height_ ? height_ : h);
+    uint32_t sw = w;
+    uint32_t sh = h;
+    if (sw > cap_w || sh > cap_h) {
+        const double sc = std::min(static_cast<double>(cap_w) / static_cast<double>(sw),
+                                   static_cast<double>(cap_h) / static_cast<double>(sh));
+        sw = std::max(16u, static_cast<uint32_t>(std::lround(static_cast<double>(sw) * sc)));
+        sh = std::max(16u, static_cast<uint32_t>(std::lround(static_cast<double>(sh) * sc)));
+    }
+
+    ComPtr<IDCompositionSurface> surf;
+    if (FAILED(dcomp_device_->CreateSurface(sw, sh, DXGI_FORMAT_B8G8R8A8_UNORM,
+                                            DXGI_ALPHA_MODE_PREMULTIPLIED, &surf)) || !surf) {
+        return false;
+    }
+    POINT off{};
+    ComPtr<IDXGISurface> dxgi_surf;
+    if (FAILED(surf->BeginDraw(nullptr, IID_PPV_ARGS(&dxgi_surf), &off)) || !dxgi_surf) {
+        return false;
+    }
+
+    const D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap1> target;
+    bool ok = false;
+    if (SUCCEEDED(d2d_dc_->CreateBitmapFromDxgiSurface(dxgi_surf.Get(), &bp, &target)) && target) {
+        const D2D1_BITMAP_PROPERTIES1 src_bp = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            96.0f, 96.0f);
+        ComPtr<ID2D1Bitmap1> src_bmp;
+        const UINT pitch = stride ? stride : (w * 4u);
+        if (SUCCEEDED(d2d_dc_->CreateBitmap(D2D1::SizeU(w, h), bgra, pitch, &src_bp, &src_bmp)) && src_bmp) {
+            ComPtr<ID2D1Image> prev_target;
+            d2d_dc_->GetTarget(&prev_target);
+            const D2D1_UNIT_MODE prev_unit = d2d_dc_->GetUnitMode();
+            float prev_dx = 96.0f, prev_dy = 96.0f;
+            d2d_dc_->GetDpi(&prev_dx, &prev_dy);
+
+            d2d_dc_->SetUnitMode(D2D1_UNIT_MODE_PIXELS);
+            d2d_dc_->SetDpi(96.0f, 96.0f);
+            d2d_dc_->SetTarget(target.Get());
+            d2d_dc_->BeginDraw();
+            d2d_dc_->SetTransform(D2D1::IdentityMatrix());
+            d2d_dc_->DrawBitmap(src_bmp.Get(),
+                                D2D1::RectF(static_cast<float>(off.x), static_cast<float>(off.y),
+                                            static_cast<float>(off.x + static_cast<LONG>(sw)),
+                                            static_cast<float>(off.y + static_cast<LONG>(sh))),
+                                1.0f, D2D1_INTERPOLATION_MODE_LINEAR);
+            ok = SUCCEEDED(d2d_dc_->EndDraw());
+
+            d2d_dc_->SetTarget(prev_target.Get());
+            d2d_dc_->SetUnitMode(prev_unit);
+            d2d_dc_->SetDpi(prev_dx, prev_dy);
+        }
+    }
+    surf->EndDraw();
+    if (!ok) return false;
+    video_static_surface_ = surf;
+    video_source_w_ = sw;
+    video_source_h_ = sh;
+    return true;
+}
+
+void DesktopRenderer::ApplyVideoVisualTransform() noexcept {
+    if (!video_wallpaper_active_ || video_source_w_ == 0 || video_source_h_ == 0) return;
+    if (video_fill_mode_ == video::VideoFillMode::Fit) {
+        EnsureVideoBlackSurface();
+    }
+    ApplyVideoVisualTransformForBounds(
+        video_bg_visual_.Get(), video_visual_.Get(), video_black_surface_.Get(),
+        video_source_w_, video_source_h_, monitor_px_, surface_px_, width_, height_, video_fill_mode_);
+
+    for (auto& sec : secondary_video_monitors_) {
+        ApplyVideoVisualTransformForBounds(
+            sec.bg_visual.Get(), sec.video_visual.Get(), video_black_surface_.Get(),
+            video_source_w_, video_source_h_, sec.monitor_px, sec.work_px,
+            static_cast<uint32_t>(std::max(1, sec.work_px.w)),
+            static_cast<uint32_t>(std::max(1, sec.work_px.h)), video_fill_mode_);
+    }
+}
+
+bool DesktopRenderer::SetVideoWallpaperSwapChain(IDXGISwapChain1* swap_chain,
+                                                 uint32_t source_w,
+                                                 uint32_t source_h,
+                                                 video::VideoFillMode fill) noexcept {
+    if (!dcomp_device_ || !video_visual_ || !swap_chain || source_w == 0 || source_h == 0) return false;
+    bound_video_swap_chain_ = swap_chain;
+    video_static_surface_.Reset();
+    video_source_w_ = source_w;
+    video_source_h_ = source_h;
+    video_fill_mode_ = fill;
+    video_wallpaper_active_ = true;
+
+    if (FAILED(video_visual_->SetContent(swap_chain))) return false;
+    for (auto& sec : secondary_video_monitors_) {
+        if (sec.video_visual) sec.video_visual->SetContent(swap_chain);
+    }
+    ApplyVideoVisualTransform();
+    live_wallpaper_.SetInternalVideoMode(true);
+    const HRESULT hr = dcomp_device_->Commit();
+    glass_only_dirty_ = true;
+    return SUCCEEDED(hr);
+}
+
+bool DesktopRenderer::SetVideoWallpaperFrozenBgra(const uint8_t* bgra,
+                                                  uint32_t w,
+                                                  uint32_t h,
+                                                  uint32_t stride,
+                                                  video::VideoFillMode fill) noexcept {
+    if (!dcomp_device_ || !video_visual_ || !bgra || w == 0 || h == 0) return false;
+    if (!UploadStaticVideoSurface(bgra, w, h, stride)) return false;
+
+    bound_video_swap_chain_.Reset();
+    video_fill_mode_ = fill;
+    video_wallpaper_active_ = true;
+
+    if (FAILED(video_visual_->SetContent(video_static_surface_.Get()))) return false;
+    for (auto& sec : secondary_video_monitors_) {
+        if (sec.video_visual) sec.video_visual->SetContent(video_static_surface_.Get());
+    }
+    ApplyVideoVisualTransform();
+    const HRESULT hr = dcomp_device_->Commit();
+
+    if (d3d_device_ && d2d_dc_) {
+        const uint32_t log_w = monitor_px_.w > 0 ? static_cast<uint32_t>(monitor_px_.w)
+                             : (surface_px_.w > 0 ? static_cast<uint32_t>(surface_px_.w) : width_);
+        const uint32_t log_h = monitor_px_.h > 0 ? static_cast<uint32_t>(monitor_px_.h)
+                             : (surface_px_.h > 0 ? static_cast<uint32_t>(surface_px_.h) : height_);
+        live_wallpaper_.ImportBgraSnapshot(d3d_device_.Get(), d2d_dc_.Get(), bgra, w, h, stride, log_w, log_h, true);
+        glass_only_dirty_ = true;
+        if (!dock_inline_glass_rect_dip_.empty()) {
+            InvalidateRect(dock_inline_glass_rect_dip_);
+        }
+    }
+    return SUCCEEDED(hr);
+}
+
+bool DesktopRenderer::SetVideoWallpaperPosterFile(const std::wstring& poster_path,
+                                                  video::VideoFillMode fill,
+                                                  uint32_t* out_accent_argb) noexcept {
+    if (poster_path.empty() || !dcomp_device_ || !video_visual_) return false;
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) || !wic) {
+        return false;
+    }
+    ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(wic->CreateDecoderFromFilename(poster_path.c_str(), nullptr, GENERIC_READ,
+                                              WICDecodeMetadataCacheOnLoad, &decoder)) || !decoder) {
+        return false;
+    }
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, &frame)) || !frame) return false;
+
+    UINT pw = 0, ph = 0;
+    if (FAILED(frame->GetSize(&pw, &ph)) || pw == 0 || ph == 0) return false;
+
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(wic->CreateFormatConverter(&conv)) || !conv) return false;
+    if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+        return false;
+    }
+
+    const uint32_t stride = pw * 4u;
+    std::vector<uint8_t> pixels(static_cast<size_t>(stride) * ph);
+    if (FAILED(conv->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data()))) {
+        return false;
+    }
+    if (out_accent_argb) {
+        *out_accent_argb = ExtractVibrantAccentArgb(pixels.data(), pw, ph, stride);
+    }
+    return SetVideoWallpaperFrozenBgra(pixels.data(), pw, ph, stride, fill);
+}
+
+void DesktopRenderer::UpdateVideoWallpaperFillMode(video::VideoFillMode fill) noexcept {
+    video_fill_mode_ = fill;
+    if (!video_wallpaper_active_ || !dcomp_device_) return;
+    ApplyVideoVisualTransform();
+    dcomp_device_->Commit();
+}
+
+void DesktopRenderer::ClearVideoWallpaper() noexcept {
+    video_wallpaper_active_ = false;
+    video_source_w_ = 0;
+    video_source_h_ = 0;
+    bound_video_swap_chain_.Reset();
+    video_static_surface_.Reset();
+    video_black_surface_.Reset();
+    if (video_visual_) video_visual_->SetContent(nullptr);
+    if (video_bg_visual_) video_bg_visual_->SetContent(nullptr);
+    DestroySecondaryVideoMonitors();
+    live_wallpaper_.SetInternalVideoMode(false);
+    if (dcomp_device_) {
+        dcomp_device_->Commit();
+    }
+    committed_glass_cards_.clear();
+    glass_only_dirty_ = true;
+    full_dirty_ = true;
+}
+
+bool DesktopRenderer::OnInternalVideoGlassFrame(HANDLE shared_nt_handle, uint32_t w, uint32_t h,
+                                                bool force_frost) noexcept {
+    if (activity_suspended_ || !d3d_device_ || !d2d_dc_ || !shared_nt_handle || w == 0 || h == 0) return false;
+    const auto& active_cards = !pending_glass_cards_.empty() ? pending_glass_cards_ : committed_glass_cards_;
+    bool any_frost = has_inline_glass_card_ || dock_inline_needs_frost_ || force_frost;
+    for (const auto& c : active_cards) {
+        if (c.tile_cfg.frost_amount > 0.18f || c.tile_cfg.min_blur_dip > 1.5f) {
+            any_frost = true;
+            break;
+        }
+    }
+    const uint32_t log_w = monitor_px_.w > 0 ? static_cast<uint32_t>(monitor_px_.w)
+                         : (surface_px_.w > 0 ? static_cast<uint32_t>(surface_px_.w) : width_);
+    const uint32_t log_h = monitor_px_.h > 0 ? static_cast<uint32_t>(monitor_px_.h)
+                         : (surface_px_.h > 0 ? static_cast<uint32_t>(surface_px_.h) : height_);
+    if (live_wallpaper_.ImportSharedVideoTexture(d3d_device_.Get(), d2d_dc_.Get(),
+                                                 shared_nt_handle, w, h, log_w, log_h, any_frost)) {
+        glass_only_dirty_ = true;
+        if (has_inline_glass_card_) {
+            if (inline_glass_rects_dip_.empty()) {
+                full_dirty_ = true;
+            } else {
+                for (const auto& rc : inline_glass_rects_dip_) {
+                    InvalidateRect(rc);
+                }
+            }
+        }
+        if (!dock_inline_glass_rect_dip_.empty()) {
+            // Surgical dirty rect: only redraw the bottom Dock pill when inline, never the full 4K desktop.
+            InvalidateRect(dock_inline_glass_rect_dip_);
+        }
+        return true;
+    }
+    return false;
+}
+
+void DesktopRenderer::DestroySecondaryVideoMonitors() noexcept {
+    for (auto& sec : secondary_video_monitors_) {
+        if (sec.video_visual) sec.video_visual->SetContent(nullptr);
+        if (sec.bg_visual) sec.bg_visual->SetContent(nullptr);
+        sec.video_visual.Reset();
+        sec.bg_visual.Reset();
+        sec.root_visual.Reset();
+        sec.target.Reset();
+        if (sec.hwnd && IsWindow(sec.hwnd)) {
+            DestroyWindow(sec.hwnd);
+        }
+        sec.hwnd = nullptr;
+    }
+    secondary_video_monitors_.clear();
+}
+
+void DesktopRenderer::SyncSecondaryVideoMonitors(std::span<const model::MonitorWorkArea> monitors_px,
+                                                 HWND explorer_layer_host) noexcept {
+    if (!video_wallpaper_active_ || !dcomp_device_ || monitors_px.size() <= 1) {
+        if (!secondary_video_monitors_.empty()) {
+            DestroySecondaryVideoMonitors();
+            if (dcomp_device_) dcomp_device_->Commit();
+        }
+        return;
+    }
+
+    std::vector<model::MonitorWorkArea> extras;
+    for (const auto& m : monitors_px) {
+        if (!m.primary && !m.work_area.empty()) {
+            extras.push_back(m);
+        }
+    }
+    if (extras.empty()) {
+        DestroySecondaryVideoMonitors();
+        dcomp_device_->Commit();
+        return;
+    }
+
+    bool layout_matches = (extras.size() == secondary_video_monitors_.size());
+    for (size_t i = 0; layout_matches && i < extras.size(); ++i) {
+        if (!(secondary_video_monitors_[i].monitor_px == extras[i].bounds) ||
+            !(secondary_video_monitors_[i].work_px == extras[i].work_area) ||
+            !secondary_video_monitors_[i].hwnd || !IsWindow(secondary_video_monitors_[i].hwnd)) {
+            layout_matches = false;
+        }
+    }
+    if (layout_matches) {
+        for (auto& sec : secondary_video_monitors_) {
+            if (explorer_layer_host && IsWindow(explorer_layer_host)) {
+                HWND above = GetWindow(explorer_layer_host, GW_HWNDPREV);
+                if (above != sec.hwnd) {
+                    SetWindowPos(sec.hwnd, above ? above : HWND_BOTTOM, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                }
+            }
+        }
+        return;
+    }
+
+    DestroySecondaryVideoMonitors();
+
+    static bool cls_registered = false;
+    if (!cls_registered) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = &SecondaryVideoWndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"PulseDesktopSecondaryVideoLayer";
+        RegisterClassExW(&wc);
+        cls_registered = true;
+    }
+
+    IUnknown* content = bound_video_swap_chain_
+                            ? static_cast<IUnknown*>(bound_video_swap_chain_.Get())
+                            : static_cast<IUnknown*>(video_static_surface_.Get());
+
+    for (const auto& m : extras) {
+        const model::RectI wrc = m.work_area;
+        HWND hw = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP,
+            L"PulseDesktopSecondaryVideoLayer", L"", WS_POPUP,
+            wrc.x, wrc.y, wrc.w, wrc.h,
+            nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (!hw) continue;
+
+        SecondaryVideoMonitor sec{};
+        sec.hwnd = hw;
+        sec.monitor_px = m.bounds;
+        sec.work_px = wrc;
+
+        if (SUCCEEDED(dcomp_device_->CreateTargetForHwnd(hw, TRUE, &sec.target)) &&
+            SUCCEEDED(dcomp_device_->CreateVisual(&sec.root_visual)) &&
+            SUCCEEDED(dcomp_device_->CreateVisual(&sec.bg_visual)) &&
+            SUCCEEDED(dcomp_device_->CreateVisual(&sec.video_visual)) &&
+            SUCCEEDED(sec.root_visual->AddVisual(sec.bg_visual.Get(), FALSE, nullptr)) &&
+            SUCCEEDED(sec.root_visual->AddVisual(sec.video_visual.Get(), TRUE, sec.bg_visual.Get())) &&
+            SUCCEEDED(sec.target->SetRoot(sec.root_visual.Get()))) {
+            if (content) sec.video_visual->SetContent(content);
+            ShowWindow(hw, SW_SHOWNOACTIVATE);
+            HWND insert_after = HWND_BOTTOM;
+            if (explorer_layer_host && IsWindow(explorer_layer_host)) {
+                HWND above = GetWindow(explorer_layer_host, GW_HWNDPREV);
+                if (above && above != hw) insert_after = above;
+            }
+            SetWindowPos(hw, insert_after, wrc.x, wrc.y, wrc.w, wrc.h,
+                         SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            secondary_video_monitors_.push_back(std::move(sec));
+        } else {
+            DestroyWindow(hw);
+        }
+    }
+    ApplyVideoVisualTransform();
+    dcomp_device_->Commit();
 }
 
 void DesktopRenderer::UpdateHoverLight(const model::DesktopModelState& state,
                                        std::span<const model::GroupComputedView> group_views,
                                        const model::RectI& tile_board_rect,
                                        const DesktopInteractionState& interaction) noexcept {
-    std::string active_id;
-    D2D1_RECT_F active_rc{};
+    std::string active_card_id;
+    D2D1_RECT_F active_card_rc{};
     if (interaction.cursor_inside && interaction.transparency_enabled && !energy_saver_cached_) {
-        if (!interaction.hovered_group_id.empty()) {
+        if (!interaction.hovered_group_id.empty() && !interaction.dragging_group) {
             for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
                 if (state.groups[i].id == interaction.hovered_group_id) {
                     if (ResolveMaterial(state.groups[i].material, state.settings, interaction) ==
                         model::CardMaterial::LiquidGlass) {
                         model::RectI f = group_views[i].frame;
                         if (!group_views[i].expanded) f.h = model::kGroupHeaderHeight;
-                        active_id = "grp:" + state.groups[i].id;
-                        active_rc = D2D1::RectF(static_cast<float>(f.x), static_cast<float>(f.y),
-                                                static_cast<float>(f.right()), static_cast<float>(f.bottom()));
+                        active_card_id = "grp:" + state.groups[i].id;
+                        active_card_rc = D2D1::RectF(static_cast<float>(f.x), static_cast<float>(f.y),
+                                                     static_cast<float>(f.right()), static_cast<float>(f.bottom()));
                     }
                     break;
                 }
             }
-        } else if (!interaction.hovered_tile_id.empty()) {
+        } else if (!interaction.hovered_tile_id.empty() && !interaction.dragging_tile) {
             for (const auto& t : state.tiles) {
                 if (t.id == interaction.hovered_tile_id) {
-                    if (ResolveMaterial(t.material, state.settings, interaction) ==
+                    if (ResolveTileMaterial(t.material, state.settings, interaction) ==
                         model::CardMaterial::LiquidGlass) {
-                        const model::RectI tr = ComputeTileRectInline(tile_board_rect, t);
-                        active_id = "tile:" + t.id;
-                        active_rc = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
-                                                static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
+                        model::RectI tr = ComputeTileRectInline(tile_board_rect, t);
+                        if (auto it = interaction.tile_anim_positions.find(t.id);
+                            it != interaction.tile_anim_positions.end()) {
+                            tr.x = it->second.x;
+                            tr.y = it->second.y;
+                        }
+                        active_card_id = "tile:" + t.id;
+                        active_card_rc = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
+                                                     static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
                     }
                     break;
                 }
@@ -1794,43 +2397,64 @@ void DesktopRenderer::UpdateHoverLight(const model::DesktopModelState& state,
         }
     }
 
-    if (!active_id.empty()) {
-        if (hover_light_card_id_ != active_id) {
-            // Dirty previous hovered glass card so it returns to default -45 deg light.
-            if (!hover_light_card_id_.empty()) {
-                glass_dirty_rects_.push_back(RECT{
-                    static_cast<LONG>(std::floor(hover_light_card_rect_.left)) - 24,
-                    static_cast<LONG>(std::floor(hover_light_card_rect_.top)) - 24,
-                    static_cast<LONG>(std::ceil(hover_light_card_rect_.right)) + 24,
-                    static_cast<LONG>(std::ceil(hover_light_card_rect_.bottom)) + 24});
-            }
-            hover_light_card_id_ = active_id;
-        }
-        hover_light_card_rect_ = active_rc;
-        hover_light_.SetCursorOnCard(
-            static_cast<float>(interaction.cursor_pos.x),
-            static_cast<float>(interaction.cursor_pos.y),
-            active_rc.left, active_rc.top, active_rc.right, active_rc.bottom);
-    } else if (!hover_light_card_id_.empty()) {
-        hover_light_.SetDefaultTarget();
-    }
+    LARGE_INTEGER qpc_now{}, qpc_freq{};
+    QueryPerformanceCounter(&qpc_now);
+    QueryPerformanceFrequency(&qpc_freq);
+    const double elapsed_ms = (last_hover_qpc_ == 0 || qpc_freq.QuadPart <= 0)
+        ? 16.0
+        : static_cast<double>(qpc_now.QuadPart - last_hover_qpc_) * 1000.0 / static_cast<double>(qpc_freq.QuadPart);
 
-    const uint64_t now = GetTickCount64();
-    const float dt = (last_hover_step_ms_ == 0)
-                         ? 16.0f
-                         : static_cast<float>(std::min<uint64_t>(now - last_hover_step_ms_, 100ull));
-    last_hover_step_ms_ = now;
-    if (hover_light_.Step(dt)) {
-        if (!hover_light_card_id_.empty()) {
-            glass_dirty_rects_.push_back(RECT{
-                static_cast<LONG>(std::floor(hover_light_card_rect_.left)) - 24,
-                static_cast<LONG>(std::floor(hover_light_card_rect_.top)) - 24,
-                static_cast<LONG>(std::ceil(hover_light_card_rect_.right)) + 24,
-                static_cast<LONG>(std::ceil(hover_light_card_rect_.bottom)) + 24});
-            if (active_id.empty() && !hover_light_.animating) {
-                hover_light_card_id_.clear();
+    // Unified cursor-tracking HighlightSpring (critically damped response 0.30s) for both groups & tiles.
+    // Paced with QPC (>= 8 ms between spring steps) so 1000Hz mice or bursty Tick() calls never spin
+    // redundant DComp commits with dt=0 while keeping hover specular motion crisp at 60-120Hz.
+    auto dirty_tile_glass = [&](const D2D1_RECT_F& r) {
+        glass_dirty_rects_.push_back(RECT{
+            static_cast<LONG>(std::floor(r.left)) - 56,
+            static_cast<LONG>(std::floor(r.top)) - 48,
+            static_cast<LONG>(std::ceil(r.right)) + 56,
+            static_cast<LONG>(std::ceil(r.bottom)) + 70});
+    };
+    if (!active_card_id.empty()) {
+        const bool card_changed = (tile_hover_id_ != active_card_id);
+        if (card_changed) {
+            if (!tile_hover_id_.empty()) {
+                dirty_tile_glass(tile_hover_rect_);
             }
+            tile_hover_id_ = active_card_id;
+            tile_hover_spring_.Reset();
         }
+        tile_hover_rect_ = active_card_rc;
+        const float tw = std::max(1.0f, active_card_rc.right - active_card_rc.left);
+        const float th = std::max(1.0f, active_card_rc.bottom - active_card_rc.top);
+        const float tx = std::clamp((static_cast<float>(interaction.cursor_pos.x) - active_card_rc.left) / tw, 0.0f, 1.0f);
+        const float ty = std::clamp((static_cast<float>(interaction.cursor_pos.y) - active_card_rc.top) / th, 0.0f, 1.0f);
+        if (!card_changed && elapsed_ms < 8.0) {
+            if (std::fabs(tx - tile_hover_spring_.x) > 0.004f || std::fabs(ty - tile_hover_spring_.y) > 0.004f) {
+                tile_hover_animating_ = true;
+            }
+            return;
+        }
+        const float prev_x = tile_hover_spring_.x;
+        const float prev_y = tile_hover_spring_.y;
+        last_hover_qpc_ = qpc_now.QuadPart;
+        const float dt_sec = card_changed
+            ? 0.016f
+            : static_cast<float>(std::clamp(elapsed_ms, 1.0, 100.0) / 1000.0);
+        const bool moving = tile_hover_spring_.Step(tx, ty, dt_sec);
+        tile_hover_animating_ = moving;
+        if (card_changed ||
+            std::fabs(tile_hover_spring_.x - prev_x) > 0.002f ||
+            std::fabs(tile_hover_spring_.y - prev_y) > 0.002f) {
+            dirty_tile_glass(active_card_rc);
+        }
+    } else {
+        if (!tile_hover_id_.empty()) {
+            dirty_tile_glass(tile_hover_rect_);
+            tile_hover_id_.clear();
+            tile_hover_spring_.Reset();
+        }
+        last_hover_qpc_ = 0;
+        tile_hover_animating_ = false;
     }
 }
 
@@ -1890,6 +2514,7 @@ bool DesktopRenderer::IntersectsActiveClip(const model::RectI& rc, int margin_di
 std::vector<RECT> DesktopRenderer::CollectOccupiedRects(const model::DesktopModelState& state,
                                                         std::span<const model::GroupComputedView> group_views,
                                                         const model::RectI& tile_board_rect,
+                                                        const LiveTileRuntimeData& live_data,
                                                         const DesktopInteractionState& interaction) const {
     std::vector<RECT> out;
     constexpr int kShadow = 16;
@@ -1926,8 +2551,16 @@ std::vector<RECT> DesktopRenderer::CollectOccupiedRects(const model::DesktopMode
             for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
                 model::RectI f = group_views[i].frame;
                 if (f.empty()) continue;
+                if (auto it = interaction.group_anim_positions.find(state.groups[i].id);
+                    it != interaction.group_anim_positions.end()) {
+                    f.x = it->second.x;
+                    f.y = it->second.y;
+                }
                 if (!group_views[i].expanded) f.h = model::kGroupHeaderHeight;
                 out.push_back(DipRectToPx(f, kShadow));
+            }
+            if (!interaction.drag_group_preview_rect.empty()) {
+                out.push_back(DipRectToPx(interaction.drag_group_preview_rect, 8));
             }
         }
     }
@@ -1938,18 +2571,53 @@ std::vector<RECT> DesktopRenderer::CollectOccupiedRects(const model::DesktopMode
         const model::RectI hdr_anchor = !tile_board_rect.empty() ? tile_board_rect
                                                                  : ComputeBoardRectFallback(wa_fallback, true);
         if (!hdr_anchor.empty()) {
-            out.push_back(DipRectToPx(model::RectI{hdr_anchor.x, hdr_anchor.y - 34, hdr_anchor.w, 30}, 4));
+            out.push_back(DipRectToPx(model::RectI{hdr_anchor.x - 6, hdr_anchor.y - 36, hdr_anchor.w + 12, 34}, 8));
         }
         for (const auto& tile : state.tiles) {
-            out.push_back(DipRectToPx(ComputeTileRectInline(tile_board_rect, tile), kShadow));
+            model::RectI tr = ComputeTileRectInline(tile_board_rect, tile);
+            if (auto it = interaction.tile_anim_positions.find(tile.id);
+                it != interaction.tile_anim_positions.end()) {
+                tr.x = it->second.x;
+                tr.y = it->second.y;
+            }
+            const bool tile_lg = (ResolveTileMaterial(tile.material, state.settings, interaction) ==
+                                  model::CardMaterial::LiquidGlass);
+            if (tile_lg) {
+                // Room for inline dragged/springing tile hollowed ambient+contact drop shadow.
+                out.push_back(DipRectToPx(model::RectI{tr.x - 54, tr.y - 46, tr.w + 108, tr.h + 114}, 0));
+            } else {
+                out.push_back(DipRectToPx(tr, kShadow));
+            }
         }
         const bool any_free = std::any_of(state.tiles.begin(), state.tiles.end(),
                                           [](const model::DesktopTile& t) { return t.free_placed; });
         if (interaction.tile_edit_mode && !any_free && !tile_board_rect.empty()) {
             out.push_back(DipRectToPx(tile_board_rect, kShadow));
         }
-        if (interaction.dragging_tile && !interaction.drag_tile_preview_rect.empty()) {
-            out.push_back(DipRectToPx(interaction.drag_tile_preview_rect, 4));
+        if (!interaction.drag_tile_preview_rect.empty()) {
+            out.push_back(DipRectToPx(interaction.drag_tile_preview_rect, 8));
+        }
+    }
+    // Bottom-center Liquid Glass Dock bar: MUST stay in occupied rects so full redraws
+    // (such as double-clicking empty desktop to toggle icons_hidden) never let `vsurf_->Trim`
+    // reclaim or slice away the Dock!
+    if ((state.settings.dock_enabled || interaction.dock_bar_reveal > 0.01f) &&
+        interaction.dock_bar_reveal > 0.005f &&
+        !present_scene &&
+        !interaction.side_drawer_open &&
+        live_data.dock.HasItems() &&
+        live_data.dock.pill_rect.right > live_data.dock.pill_rect.left) {
+        const model::RectI dock_wa{0, 0,
+                                   static_cast<int>(std::lround(width_ / std::max(0.5f, dip_scale_))),
+                                   static_cast<int>(std::lround(height_ / std::max(0.5f, dip_scale_)))};
+        const model::RectI dock_dmg = live_data.dock.DamageRect(dock_wa);
+        if (!dock_dmg.empty()) {
+            out.push_back(DipRectToPx(dock_dmg, 24));
+        }
+        if (interaction.dock_bar_drag.active) {
+            const int gx = static_cast<int>(std::floor(interaction.dock_bar_drag.cursor_x)) - 72;
+            const int gy = static_cast<int>(std::floor(interaction.dock_bar_drag.cursor_y)) - 72;
+            out.push_back(DipRectToPx(model::RectI{gx, gy, 144, 144}, 16));
         }
     }
     if (interaction.marquee_active && !interaction.marquee_rect.empty()) out.push_back(DipRectToPx(interaction.marquee_rect, 2));
@@ -1965,71 +2633,59 @@ std::vector<RECT> DesktopRenderer::CollectOccupiedRects(const model::DesktopMode
         const model::RectI wa = !state.monitors.empty() ? state.monitors.front().work_area
                                                         : model::RectI{0, 0, static_cast<int>(width_ / dip_scale_),
                                                                        static_cast<int>(height_ / dip_scale_)};
-        out.push_back(DipRectToPx(model::RectI{wa.x + 24, wa.bottom() - 56, 820, 36}, kShadow));
+        const int base_by = wa.bottom() - 56;
+        out.push_back(DipRectToPx(model::RectI{wa.x + 24, base_by, 680, 36}, kShadow));
+        const bool dock_shown = (state.settings.dock_enabled || interaction.dock_bar_reveal > 0.01f) &&
+                                interaction.dock_bar_reveal > 0.005f &&
+                                !present_scene && !interaction.side_drawer_open &&
+                                live_data.dock.HasItems() &&
+                                live_data.dock.pill_rect.right > live_data.dock.pill_rect.left;
+        if (dock_shown) {
+            if (live_data.dock.dock_position == 1) {
+                const int shifted_x = std::max(wa.x + 24, static_cast<int>(std::ceil(live_data.dock.pill_rect.right)) + 16);
+                out.push_back(DipRectToPx(model::RectI{shifted_x, base_by, 680, 36}, kShadow));
+            } else if (static_cast<float>(wa.x + 24 + 680) > live_data.dock.pill_rect.left) {
+                const int lifted_by = std::max(wa.y + 16, static_cast<int>(std::floor(live_data.dock.pill_rect.top)) - 52);
+                out.push_back(DipRectToPx(model::RectI{wa.x + 24, lifted_by, 680, 36}, kShadow));
+            }
+        }
     }
     return out;
 }
 
 namespace {
-void ApplyBeautifyGlassOptics(GlassCardRequest& req,
-                              const model::BeautifySettings& settings,
-                              bool cursor_active,
-                              const HoverLightTracker& hover_light) noexcept {
-    req.glass_options = settings.glass_options;
-    req.reference_mode = settings.glass_reference;
-    req.blur_radius = settings.glass_blur_radius;
-    req.blur_edge = settings.glass_blur_edge;
-    req.thickness_dip = static_cast<float>(std::clamp<uint8_t>(settings.glass_thickness, 1u, 80u));
-    req.ior = static_cast<float>(std::clamp<uint16_t>(settings.glass_ior_x100, 100u, 400u)) * 0.01f;
-    req.dispersion_gain = static_cast<float>(std::min<uint8_t>(settings.glass_dispersion, 50u));
-    req.glare_percent = std::min<uint8_t>(settings.glass_glare, 120u);
-    req.glare_angle_deg = static_cast<float>(std::clamp<int16_t>(settings.glass_glare_angle, -180, 180));
-    req.frost_percent = std::min<uint8_t>(settings.glass_frost, 100u);
-    req.opacity_percent = settings.card_opacity_percent;
-    req.dark_mode = settings.dark_mode;
-    req.cursor_light_active = cursor_active;
-    if (cursor_active) {
-        req.light_dir_x = hover_light.current_x;
-        req.light_dir_y = hover_light.current_y;
-    }
-}
-
-bool GlassRequestsDiffer(const GlassCardRequest& a, const GlassCardRequest& b) noexcept {
-    return a.reference_mode != b.reference_mode ||
-           (a.reference_mode && a.glass_options != b.glass_options) ||
-           std::fabs(a.left_dip - b.left_dip) > 0.1f ||
-           std::fabs(a.top_dip - b.top_dip) > 0.1f ||
-           std::fabs(a.right_dip - b.right_dip) > 0.1f ||
-           std::fabs(a.bottom_dip - b.bottom_dip) > 0.1f ||
-           std::fabs(a.thickness_dip - b.thickness_dip) > 0.1f ||
-           std::fabs(a.ior - b.ior) > 0.002f ||
-           std::fabs(a.dispersion_gain - b.dispersion_gain) > 0.1f ||
-           a.glare_percent != b.glare_percent ||
-           std::fabs(a.glare_angle_deg - b.glare_angle_deg) > 0.25f ||
-           a.frost_percent != b.frost_percent ||
-           a.opacity_percent != b.opacity_percent ||
-           a.dark_mode != b.dark_mode ||
-           a.elevated_hover != b.elevated_hover ||
-           a.cursor_light_active != b.cursor_light_active ||
-           (a.cursor_light_active && (std::fabs(a.light_dir_x - b.light_dir_x) > 0.005f ||
-                                      std::fabs(a.light_dir_y - b.light_dir_y) > 0.005f)) ||
-           std::fabs(a.press_amount - b.press_amount) > 0.002f ||
-           std::fabs(a.background_opacity - b.background_opacity) > 0.002f;
+bool TileGlassConfigsDiffer(const TileGlassConfig& a, const TileGlassConfig& b) noexcept {
+    return std::fabs(a.corner_radius_dip - b.corner_radius_dip) > 0.1f ||
+           std::fabs(a.index_of_refraction - b.index_of_refraction) > 0.002f ||
+           std::fabs(a.bezel_slope - b.bezel_slope) > 0.01f ||
+           std::fabs(a.refraction_strength - b.refraction_strength) > 0.002f ||
+           std::fabs(a.bezel_max_dip - b.bezel_max_dip) > 0.1f ||
+           a.enable_chromatic_aberration != b.enable_chromatic_aberration ||
+           std::fabs(a.chromatic_spread - b.chromatic_spread) > 0.002f ||
+           std::fabs(a.frost_amount - b.frost_amount) > 0.002f ||
+           std::fabs(a.min_blur_dip - b.min_blur_dip) > 0.05f ||
+           std::fabs(a.vibrancy - b.vibrancy) > 0.01f ||
+           std::fabs(a.tint.r - b.tint.r) > 0.002f ||
+           std::fabs(a.tint.g - b.tint.g) > 0.002f ||
+           std::fabs(a.tint.b - b.tint.b) > 0.002f ||
+           std::fabs(a.tint.a - b.tint.a) > 0.002f ||
+           a.dark_appearance != b.dark_appearance ||
+           std::fabs(a.rim_intensity - b.rim_intensity) > 0.005f ||
+           std::fabs(a.shadow_opacity - b.shadow_opacity) > 0.005f;
 }
 } // namespace
 
-bool DesktopRenderer::DrawSingleLiquidGlassCard(ID2D1DeviceContext* dc,
-                                                const GlassCardRequest& req,
-                                                float shadow_strength) {
-    if (!dc || !d2d_factory_ || glass_pool_.Unavailable()) return false;
+bool DesktopRenderer::DrawSingleTileLiquidGlass(ID2D1DeviceContext* dc,
+                                                const D2D1_RECT_F& rect_dip,
+                                                const TileGlassConfig& cfg,
+                                                float overall_opacity,
+                                                bool draw_rim,
+                                                float light_norm_x,
+                                                float light_norm_y) {
+    if (!dc || !d2d_factory_) return false;
+    if (overall_opacity <= 1e-4f) return true;
 
-    const float fade = std::clamp(static_cast<float>(req.opacity_percent) / 30.0f, 0.0f, 1.0f);
-    if (fade <= 0.0f || req.background_opacity <= 1e-4f) {
-        return true;
-    }
-
-    const bool use_live = live_wallpaper_.HasFrame() &&
-                          (live_decision_.active || live_wallpaper_.Stats().paused);
+    const bool use_live = (live_decision_.active || live_wallpaper_.IsInternalVideoMode()) && live_wallpaper_.HasFrame();
     ID2D1Bitmap1* sharp_bmp = nullptr;
     ID2D1Bitmap1* frost_bmp = nullptr;
     uint32_t sharp_w = 0, sharp_h = 0, frost_w = 0, frost_h = 0;
@@ -2050,7 +2706,7 @@ bool DesktopRenderer::DrawSingleLiquidGlassCard(ID2D1DeviceContext* dc,
     } else {
         const bool sync_decode = (!vsurf_ && hwnd_ == nullptr) || force_inline_glass_;
         sharp_bmp = backdrop_.GlassSharpBitmap(dc, sync_decode, sharp_w, sharp_h);
-        if (req.frost_percent > 6 || req.energy_saver) {
+        if (cfg.frost_amount > 0.18f || cfg.min_blur_dip > 1.5f) {
             frost_bmp = backdrop_.GlassFrostBitmap(dc, frost_w, frost_h);
         }
     }
@@ -2058,51 +2714,59 @@ bool DesktopRenderer::DrawSingleLiquidGlassCard(ID2D1DeviceContext* dc,
         return false;
     }
 
-    D2D1_MATRIX_3X2_F prev_xf{};
-    dc->GetTransform(&prev_xf);
-    const D2D1_UNIT_MODE prev_unit = dc->GetUnitMode();
-    const float unit_scale = (prev_unit == D2D1_UNIT_MODE_PIXELS) ? 1.0f : dip_scale_;
-
-    // Map card DIP bounds through any axis-aligned scale/translation on `dc` (handles VirtualSurface
-    // atlas shift, pressed-tile scale, and offscreen menu underlay capture uniformly).
-    GlassCardRequest mapped = req;
-    mapped.live_source = use_live;
-    if (use_live && mapped.background_luminance < 0.0f) {
-        mapped.background_luminance = live_wallpaper_.AverageLuminance();
-    }
-    const float sx = (std::fabs(prev_xf.m11) > 1e-4f) ? prev_xf.m11 : 1.0f;
-    const float sy = (std::fabs(prev_xf.m22) > 1e-4f) ? prev_xf.m22 : 1.0f;
-    const float atlas_shift_x = prev_xf.dx * unit_scale;
-    const float atlas_shift_y = prev_xf.dy * unit_scale;
-    if (std::fabs(sx - 1.0f) > 1e-4f || std::fabs(sy - 1.0f) > 1e-4f) {
-        mapped.left_dip *= sx;
-        mapped.right_dip *= sx;
-        mapped.top_dip *= sy;
-        mapped.bottom_dip *= sy;
-        mapped.radius_dip *= std::min(sx, sy);
-    }
-
-    const GlassDrawPlan plan = MakeGlassDrawPlan(mapped, unit_scale, atlas_shift_x, atlas_shift_y);
-    if (!plan.visible) return true;
-
-    if (shadow_strength > 0.0f) {
-        if (!card_shadow_bitmap_ && dc == d2d_dc_.Get()) {
-            card_shadow_bitmap_ = CreateExteriorCardShadowBitmap(d2d_dc_.Get());
-        }
-        if (card_shadow_bitmap_ && dc == d2d_dc_.Get()) {
-            const D2D1_RECT_F shadow_rc = D2D1::RectF(req.left_dip, req.top_dip, req.right_dip, req.bottom_dip);
-            DrawExteriorCardShadow(dc, card_shadow_bitmap_.Get(), shadow_rc, req.radius_dip, shadow_strength);
-        }
-    }
-
-    return glass_pool_.DrawCard(
+    const float unit_scale = (dc->GetUnitMode() == D2D1_UNIT_MODE_PIXELS) ? 1.0f : dip_scale_;
+    return tile_glass_.DrawTile(
         d2d_factory_.Get(), dc,
         sharp_bmp, sharp_w, sharp_h,
-        frost_bmp, frost_w, frost_h,
         logical_w, logical_h,
         orig_x, orig_y,
-        atlas_shift_x, atlas_shift_y,
-        plan);
+        unit_scale,
+        rect_dip, cfg, overall_opacity, draw_rim,
+        light_norm_x, light_norm_y,
+        frost_bmp, frost_w, frost_h);
+}
+
+void DesktopRenderer::DrawDragGhostPreview(const model::RectI& rect,
+                                           float corner_radius_dip,
+                                           bool valid,
+                                           bool merge_armed,
+                                           bool dark_mode,
+                                           uint32_t accent_argb) {
+    if (rect.empty() || !d2d_dc_) return;
+    const D2D1_RECT_F pr = ToRectF(rect);
+    const float rad = std::min({corner_radius_dip, static_cast<float>(rect.w) * 0.5f,
+                                static_cast<float>(rect.h) * 0.5f});
+    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(pr, rad, rad);
+
+    if (!valid) {
+        d2d_dc_->FillRoundedRectangle(rr, Brush(0xFFFF5F56u, 0.14f));
+        const D2D1_RECT_F inset = D2D1::RectF(pr.left + 0.9f, pr.top + 0.9f, pr.right - 0.9f, pr.bottom - 0.9f);
+        d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(inset, std::max(1.0f, rad - 0.9f), std::max(1.0f, rad - 0.9f)),
+                                      Brush(0xFFFF5F56u, 0.78f), 1.8f);
+        return;
+    }
+
+    if (merge_armed) {
+        d2d_dc_->FillRoundedRectangle(rr, Brush(accent_argb, 0.20f));
+        const D2D1_RECT_F inset = D2D1::RectF(pr.left + 1.0f, pr.top + 1.0f, pr.right - 1.0f, pr.bottom - 1.0f);
+        d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(inset, std::max(1.0f, rad - 1.0f), std::max(1.0f, rad - 1.0f)),
+                                      Brush(accent_argb, 0.88f), 2.0f);
+        return;
+    }
+
+    // Exact reference widget_demo.cpp translucent SDF ghost preview
+    // (pure white translucent interior ~0.14 + crisp 1.8 DIP white rim ~0.45).
+    const float fill_a = dark_mode ? 0.14f : 0.18f;
+    const float rim_a = dark_mode ? 0.45f : 0.56f;
+    d2d_dc_->FillRoundedRectangle(rr, Brush(0xFFFFFFFFu, fill_a));
+    if (!dark_mode) {
+        const D2D1_RECT_F outer = D2D1::RectF(pr.left + 0.5f, pr.top + 0.5f, pr.right - 0.5f, pr.bottom - 0.5f);
+        d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(outer, std::max(1.0f, rad - 0.5f), std::max(1.0f, rad - 0.5f)),
+                                      Brush(0xFF000000u, 0.12f), 1.0f);
+    }
+    const D2D1_RECT_F inset = D2D1::RectF(pr.left + 0.9f, pr.top + 0.9f, pr.right - 0.9f, pr.bottom - 0.9f);
+    d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(inset, std::max(1.0f, rad - 0.9f), std::max(1.0f, rad - 0.9f)),
+                                  Brush(0xFFFFFFFFu, rim_a), 1.8f);
 }
 
 bool DesktopRenderer::SyncGlassVirtualSurface(bool force_all, const std::vector<RECT>& content_regions_px) {
@@ -2143,25 +2807,35 @@ bool DesktopRenderer::SyncGlassVirtualSurface(bool force_all, const std::vector<
         return false;
     }
 
-    // Build occupied regions for every active LiquidGlass card (expanded for shadow + fusion bridge).
+    // Build occupied regions for every active WacOS LiquidGlass card (expanded for exterior ambient shadow).
     std::vector<RECT> raw_occupied;
     raw_occupied.reserve(pending_glass_cards_.size());
     for (const auto& c : pending_glass_cards_) {
-        const int pad = std::max<int>(c.neighbor_cnt > 0 ? 48 : 32, static_cast<int>(c.req.thickness_dip) + 12);
         raw_occupied.push_back(DipRectToPx(model::RectI{
-            static_cast<int>(std::floor(c.req.left_dip)),
-            static_cast<int>(std::floor(c.req.top_dip)),
-            static_cast<int>(std::ceil(c.req.right_dip - c.req.left_dip)),
-            static_cast<int>(std::ceil(c.req.bottom_dip - c.req.top_dip))}, pad));
+            static_cast<int>(std::floor(c.tile_rect_dip.left)) - 54,
+            static_cast<int>(std::floor(c.tile_rect_dip.top)) - 46,
+            static_cast<int>(std::ceil(c.tile_rect_dip.right - c.tile_rect_dip.left)) + 108,
+            static_cast<int>(std::ceil(c.tile_rect_dip.bottom - c.tile_rect_dip.top)) + 114}, 0));
     }
     std::vector<RECT> glass_occupied = CoalesceToGrid(raw_occupied, w, h);
+
+    auto pending_card_differs = [](const PendingGlassCard& a, const PendingGlassCard& b) noexcept -> bool {
+        return a.id != b.id ||
+               std::fabs(a.tile_rect_dip.left - b.tile_rect_dip.left) > 0.1f ||
+               std::fabs(a.tile_rect_dip.top - b.tile_rect_dip.top) > 0.1f ||
+               std::fabs(a.tile_rect_dip.right - b.tile_rect_dip.right) > 0.1f ||
+               std::fabs(a.tile_rect_dip.bottom - b.tile_rect_dip.bottom) > 0.1f ||
+               std::fabs(a.tile_opacity - b.tile_opacity) > 0.002f ||
+               a.tile_draw_rim != b.tile_draw_rim ||
+               std::fabs(a.tile_light_x - b.tile_light_x) > 0.004f ||
+               std::fabs(a.tile_light_y - b.tile_light_y) > 0.004f ||
+               TileGlassConfigsDiffer(a.tile_cfg, b.tile_cfg);
+    };
 
     bool geometry_changed = (pending_glass_cards_.size() != committed_glass_cards_.size());
     if (!geometry_changed) {
         for (size_t i = 0; i < pending_glass_cards_.size(); ++i) {
-            if (pending_glass_cards_[i].id != committed_glass_cards_[i].id ||
-                pending_glass_cards_[i].neighbor_cnt != committed_glass_cards_[i].neighbor_cnt ||
-                GlassRequestsDiffer(pending_glass_cards_[i].req, committed_glass_cards_[i].req)) {
+            if (pending_card_differs(pending_glass_cards_[i], committed_glass_cards_[i])) {
                 geometry_changed = true;
                 break;
             }
@@ -2201,7 +2875,7 @@ bool DesktopRenderer::SyncGlassVirtualSurface(bool force_all, const std::vector<
 
     const float s = dip_scale_;
     HRESULT hr = S_OK;
-    glass_pool_.BeginFrame();
+    tile_glass_.BeginFrame();
     for (const RECT& r : draw_regions) {
         POINT off{};
         ComPtr<IDXGISurface> surface;
@@ -2225,16 +2899,16 @@ bool DesktopRenderer::SyncGlassVirtualSurface(bool force_all, const std::vector<
         d2d_dc_->PushAxisAlignedClip(clip_dip, D2D1_ANTIALIAS_MODE_ALIASED);
         d2d_dc_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
-        for (auto& card : pending_glass_cards_) {
-            const float pad = std::max(40.0f, card.req.thickness_dip + 16.0f);
-            if (card.req.right_dip + pad <= clip_dip.left ||
-                card.req.left_dip - pad >= clip_dip.right ||
-                card.req.bottom_dip + pad <= clip_dip.top ||
-                card.req.top_dip - pad >= clip_dip.bottom) {
+        for (const auto& card : pending_glass_cards_) {
+            if (card.tile_rect_dip.right + 56.0f <= clip_dip.left ||
+                card.tile_rect_dip.left - 56.0f >= clip_dip.right ||
+                card.tile_rect_dip.bottom + 70.0f <= clip_dip.top ||
+                card.tile_rect_dip.top - 48.0f >= clip_dip.bottom) {
                 continue;
             }
-            card.req.neighbors = std::span<const GlassNeighborDip>(card.neighbor_buf.data(), card.neighbor_cnt);
-            if (!DrawSingleLiquidGlassCard(d2d_dc_.Get(), card.req, card.shadow_strength)) {
+            if (!DrawSingleTileLiquidGlass(d2d_dc_.Get(), card.tile_rect_dip, card.tile_cfg,
+                                           card.tile_opacity, card.tile_draw_rim,
+                                           card.tile_light_x, card.tile_light_y)) {
                 // Hardware could not run ps_4_0 effect: force foreground fallback pass!
                 full_dirty_ = true;
             }
@@ -2247,7 +2921,7 @@ bool DesktopRenderer::SyncGlassVirtualSurface(bool force_all, const std::vector<
         glass_vsurf_->EndDraw();
         if (FAILED(hr)) break;
     }
-    glass_pool_.EndFrame();
+    tile_glass_.EndFrame();
 
     if (SUCCEEDED(hr)) {
         const bool same_trim =
@@ -2275,9 +2949,16 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
                                   const DesktopInteractionState& interaction) {
     UpdateHoverLight(state, group_views, tile_board_rect, interaction);
 
-    // Build authoritative settled LiquidGlass card list independent of partial `active_clip_dip_` culling.
+    // Build authoritative settled WacOS LiquidGlass card list independent of partial `active_clip_dip_` culling.
+    const bool prev_dock_uses_lower_glass = dock_uses_lower_glass_;
     pending_glass_cards_.clear();
-    if (interaction.transparency_enabled && !glass_pool_.Unavailable()) {
+    inline_glass_rects_dip_.clear();
+    has_any_glass_card_ = false;
+    has_inline_glass_card_ = false;
+    dock_inline_glass_rect_dip_ = {};
+    dock_inline_needs_frost_ = false;
+    dock_uses_lower_glass_ = false;
+    if (interaction.transparency_enabled && !tile_glass_.Unavailable()) {
         const bool focus_scene = (state.settings.active_scene == model::DesktopScene::Focus);
         const bool present_scene = (state.settings.active_scene == model::DesktopScene::Present);
         if (!state.settings.icons_hidden && !present_scene && state.settings.organize_enabled) {
@@ -2288,8 +2969,23 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
                 if (ResolveMaterial(grp.material, state.settings, interaction) != model::CardMaterial::LiquidGlass) {
                     continue;
                 }
+                has_any_glass_card_ = true;
                 model::RectI f = view.frame;
+                if (auto it = interaction.group_anim_positions.find(grp.id);
+                    it != interaction.group_anim_positions.end()) {
+                    f.x = it->second.x;
+                    f.y = it->second.y;
+                }
                 if (!view.expanded) f.h = model::kGroupHeaderHeight;
+                const bool active_grp_motion =
+                    (interaction.dragging_group && interaction.dragging_group_id == grp.id) ||
+                    interaction.group_anim_positions.contains(grp.id);
+                if (active_grp_motion) {
+                    has_inline_glass_card_ = true;
+                    inline_glass_rects_dip_.push_back(model::RectI{f.x - 56, f.y - 48, f.w + 112, f.h + 118});
+                    continue;
+                }
+
                 const D2D1_RECT_F rc = ToRectF(f);
                 const float op_scale = (focus_scene && !grp.focus_visible) ? 0.40f : 1.0f;
                 const float fade = std::clamp(static_cast<float>(state.settings.card_opacity_percent) / 30.0f, 0.0f, 1.0f);
@@ -2298,34 +2994,44 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
 
                 PendingGlassCard pc{};
                 pc.id = "grp:" + grp.id;
-                pc.is_group = true;
-                pc.req.left_dip = rc.left;
-                pc.req.top_dip = rc.top;
-                pc.req.right_dip = rc.right;
-                pc.req.bottom_dip = rc.bottom;
-                pc.req.radius_dip = 14.0f;
-                ApplyBeautifyGlassOptics(pc.req, state.settings, hover_light_card_id_ == pc.id, hover_light_);
-                pc.req.elevated_hover = hov;
-                pc.req.allow_clear_passthrough = !interaction.force_opaque_wallpaper;
-                pc.req.energy_saver = energy_saver_cached_;
-                pc.req.draw_rim_in_shader = !drop;
-                pc.req.background_luminance = backdrop_.AverageLuminance(rc);
-                pc.req.background_opacity = op_scale;
-                pc.shadow_strength = (state.settings.dark_mode ? (hov ? 0.65f : 0.54f) : (hov ? 0.46f : 0.32f)) * fade * op_scale;
+                pc.tile_rect_dip = rc;
+                model::BeautifySettings grp_gs = state.settings;
+                grp_gs.dark_mode = ResolveLiquidGlassDark(pc.id, rc, state.settings.card_opacity_percent,
+                                                          state.settings.dark_mode);
+                pc.tile_cfg = MakeTileGlassConfig(grp_gs, 14.0f, hov, energy_saver_cached_);
+                pc.tile_opacity = fade * op_scale;
+                pc.tile_draw_rim = !drop;
+                if (tile_hover_id_ == pc.id) {
+                    pc.tile_light_x = tile_hover_spring_.x;
+                    pc.tile_light_y = tile_hover_spring_.y;
+                }
                 pending_glass_cards_.push_back(std::move(pc));
             }
         }
         if (state.settings.tiles_enabled && state.settings.organize_enabled && !interaction.side_drawer_open) {
             for (const auto& tile : state.tiles) {
-                if (ResolveMaterial(tile.material, state.settings, interaction) != model::CardMaterial::LiquidGlass) {
+                if (ResolveTileMaterial(tile.material, state.settings, interaction) != model::CardMaterial::LiquidGlass) {
                     continue;
                 }
-                const bool active_drag = (interaction.dragging_tile && interaction.dragging_tile_id == tile.id);
-                const bool jiggle = interaction.tile_edit_mode && !active_drag && (interaction.resizing_tile_id != tile.id);
-                // Dragged and jiggling tiles render inline on `vsurf_` for proper foreground overlap / rotation.
-                if (active_drag || jiggle) continue;
-
+                has_any_glass_card_ = true;
                 model::RectI tr = ComputeTileRectInline(tile_board_rect, tile);
+                if (auto it = interaction.tile_anim_positions.find(tile.id);
+                    it != interaction.tile_anim_positions.end()) {
+                    tr.x = it->second.x;
+                    tr.y = it->second.y;
+                }
+                const bool active_drag = (interaction.dragging_tile && interaction.dragging_tile_id == tile.id);
+                const bool springing = interaction.tile_anim_positions.contains(tile.id);
+                const bool jiggle = interaction.tile_edit_mode && !active_drag && (interaction.resizing_tile_id != tile.id);
+                // Dragged, springing, and jiggling tiles render inline on `vsurf_` for foreground Z-order.
+                if (active_drag || springing || jiggle) {
+                    has_inline_glass_card_ = true;
+                    if (!tr.empty()) {
+                        inline_glass_rects_dip_.push_back(model::RectI{tr.x - 56, tr.y - 48, tr.w + 112, tr.h + 118});
+                    }
+                    continue;
+                }
+
                 if (tr.empty()) continue;
                 D2D1_RECT_F rc = ToRectF(tr);
                 const bool pressed = (interaction.pressed_tile_id == tile.id && std::abs(interaction.tile_press) > 0.001f);
@@ -2342,56 +3048,136 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
 
                 PendingGlassCard pc{};
                 pc.id = "tile:" + tile.id;
-                pc.is_group = false;
-                pc.req.left_dip = rc.left;
-                pc.req.top_dip = rc.top;
-                pc.req.right_dip = rc.right;
-                pc.req.bottom_dip = rc.bottom;
-                pc.req.radius_dip = 16.0f;
-                ApplyBeautifyGlassOptics(pc.req, state.settings, hover_light_card_id_ == pc.id, hover_light_);
-                pc.req.elevated_hover = hov;
-                pc.req.allow_clear_passthrough = !interaction.force_opaque_wallpaper;
-                pc.req.energy_saver = energy_saver_cached_;
-                pc.req.draw_rim_in_shader = !drop;
-                pc.req.background_luminance = backdrop_.AverageLuminance(rc);
-                pc.req.background_opacity = tile_op;
-                pc.req.press_amount = pressed ? interaction.tile_press : 0.0f;
-                pc.shadow_strength = (state.settings.dark_mode ? (hov ? 0.65f : 0.54f) : (hov ? 0.46f : 0.32f)) * fade * tile_op;
+                pc.tile_rect_dip = rc;
+                // The same corner the face clips its photo / sky to (DrawTile): a smaller glass corner shows
+                // its rim outside a full-bleed face.
+                model::BeautifySettings tile_gs = state.settings;
+                tile_gs.dark_mode = ResolveLiquidGlassDark(pc.id, rc, state.settings.card_opacity_percent,
+                                                           state.settings.dark_mode);
+                pc.tile_cfg = MakeTileGlassConfig(tile_gs, TileCornerRadiusDip(tile, rc), hov, energy_saver_cached_);
+                pc.tile_opacity = fade * tile_op;
+                pc.tile_draw_rim = !drop;
+                if (tile_hover_id_ == pc.id) {
+                    pc.tile_light_x = tile_hover_spring_.x;
+                    pc.tile_light_y = tile_hover_spring_.y;
+                }
                 pending_glass_cards_.push_back(std::move(pc));
             }
         }
-
-        // Smooth-min liquid fusion:
-        // 1) Group cards manually placed within <= 18 DIP of another LiquidGlass group card fuse smoothly.
-        // 2) While dragging/resizing a tile, nearby settled tiles reach out toward `drag_tile_preview_rect`!
-        for (size_t i = 0; i < pending_glass_cards_.size(); ++i) {
-            auto& ci = pending_glass_cards_[i];
-            if (ci.is_group) {
-                for (size_t j = 0; j < pending_glass_cards_.size() && ci.neighbor_cnt < 4; ++j) {
-                    if (i == j || !pending_glass_cards_[j].is_group) continue;
-                    const auto& cj = pending_glass_cards_[j].req;
-                    const float gx = std::max({0.0f, ci.req.left_dip - cj.right_dip, cj.left_dip - ci.req.right_dip});
-                    const float gy = std::max({0.0f, ci.req.top_dip - cj.bottom_dip, cj.top_dip - ci.req.bottom_dip});
-                    if (std::hypot(gx, gy) <= 18.0f) {
-                        ci.neighbor_buf[ci.neighbor_cnt++] = {cj.left_dip, cj.top_dip, cj.right_dip, cj.bottom_dip, cj.radius_dip};
+        // Bottom-center Liquid Glass Dock bar: when settled open and unobstructed by any desktop
+        // icon, group, or tile, host its Liquid Glass pill on `glass_vsurf_` so steady 60fps video
+        // wallpaper updates stay 100% on the Fast Glass-Only Path (0 `vsurf_->BeginDraw` per frame!).
+        // If any icon/group/tile overlaps the pill or during reveal slide, fall back seamlessly to
+        // inline `vsurf_` rendering so Z-order over overlapped items stays exact.
+        if ((state.settings.dock_enabled || interaction.dock_bar_reveal > 0.01f) &&
+            interaction.dock_bar_reveal > 0.005f &&
+            !present_scene && !interaction.side_drawer_open &&
+            live_data.dock.HasItems() &&
+            live_data.dock.pill_rect.right > live_data.dock.pill_rect.left &&
+            ResolveMaterial(model::CardMaterial::FollowHost, state.settings, interaction) == model::CardMaterial::LiquidGlass) {
+            has_any_glass_card_ = true;
+            const D2D1_RECT_F pill = live_data.dock.pill_rect;
+            const model::RectI wa{0, 0, static_cast<int>(std::lround(width_ / std::max(0.5f, dip_scale_))),
+                                  static_cast<int>(std::lround(height_ / std::max(0.5f, dip_scale_)))};
+            const model::RectI dock_dmg = live_data.dock.DamageRect(wa);
+            auto overlaps_pill = [&](const model::RectI& r) noexcept -> bool {
+                return !r.empty() &&
+                       static_cast<float>(r.right()) > pill.left - 2.0f &&
+                       static_cast<float>(r.x) < pill.right + 2.0f &&
+                       static_cast<float>(r.bottom()) > pill.top - 2.0f &&
+                       static_cast<float>(r.y) < pill.bottom + 2.0f;
+            };
+            bool dock_occluded = (interaction.dock_bar_reveal < 0.99f) ||
+                                 (interaction.marquee_active && overlaps_pill(interaction.marquee_rect));
+            if (!dock_occluded && !state.settings.icons_hidden && !present_scene) {
+                if (state.settings.organize_enabled) {
+                    for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
+                        model::RectI f = group_views[i].frame;
+                        if (auto it = interaction.group_anim_positions.find(state.groups[i].id);
+                            it != interaction.group_anim_positions.end()) {
+                            f.x = it->second.x;
+                            f.y = it->second.y;
+                        }
+                        if (!group_views[i].expanded) f.h = model::kGroupHeaderHeight;
+                        if (overlaps_pill(f)) {
+                            dock_occluded = true;
+                            break;
+                        }
                     }
                 }
-            } else if (interaction.dragging_tile && !interaction.drag_tile_preview_rect.empty() && ci.neighbor_cnt < 4) {
-                const auto& dr = interaction.drag_tile_preview_rect;
-                const float dl = static_cast<float>(dr.x), dt = static_cast<float>(dr.y);
-                const float drt = static_cast<float>(dr.right()), db = static_cast<float>(dr.bottom());
-                const float gx = std::max({0.0f, ci.req.left_dip - drt, dl - ci.req.right_dip});
-                const float gy = std::max({0.0f, ci.req.top_dip - db, dt - ci.req.bottom_dip});
-                if (std::hypot(gx, gy) <= 28.0f) {
-                    ci.neighbor_buf[ci.neighbor_cnt++] = {dl, dt, drt, db, 16.0f};
+                if (!dock_occluded && !(state.settings.organize_enabled && focus_scene)) {
+                    const model::PointI cell_sz = model::IconCellMetrics(state.settings.icon_size);
+                    const int cw = std::max(cell_sz.x, model::kLooseCellW);
+                    const int ch = std::max(cell_sz.y, model::kLooseCellH);
+                    for (const auto& it : state.items) {
+                        if (it.hidden_by_mapped_group || !it.mapped_owner_group_id.empty()) continue;
+                        if (state.settings.organize_enabled &&
+                            (it.in_apps_tile || (!it.force_loose && !it.pinned_group_id.empty() &&
+                                                 it.pinned_group_id != model::kAppsTileGroupId))) {
+                            continue;
+                        }
+                        if (overlaps_pill(model::RectI{it.loose_pos.x, it.loose_pos.y, cw, ch})) {
+                            dock_occluded = true;
+                            break;
+                        }
+                    }
                 }
             }
+            if (!dock_occluded && state.settings.tiles_enabled && state.settings.organize_enabled) {
+                for (const auto& tile : state.tiles) {
+                    model::RectI tr = ComputeTileRectInline(tile_board_rect, tile);
+                    if (auto it = interaction.tile_anim_positions.find(tile.id);
+                        it != interaction.tile_anim_positions.end()) {
+                        tr.x = it->second.x;
+                        tr.y = it->second.y;
+                    }
+                    if (overlaps_pill(tr)) {
+                        dock_occluded = true;
+                        break;
+                    }
+                }
+            }
+
+            model::BeautifySettings dock_gs = state.settings;
+            dock_gs.dark_mode = ResolveLiquidGlassDark("dock:bar", pill, state.settings.card_opacity_percent,
+                                                       state.settings.dark_mode);
+            const TileGlassConfig dcfg = MakeTileGlassConfig(dock_gs, live_data.dock.pill_radius,
+                                                             interaction.dock_bar_hovered, energy_saver_cached_);
+            if (!dock_occluded && vsurf_ && !force_inline_glass_) {
+                dock_uses_lower_glass_ = true;
+                const float fade = std::clamp(static_cast<float>(state.settings.card_opacity_percent) / 30.0f, 0.0f, 1.0f);
+                const float dock_op = std::clamp(interaction.dock_bar_reveal * 2.2f, 0.0f, 1.0f);
+                PendingGlassCard pc{};
+                pc.id = "dock:bar";
+                pc.tile_rect_dip = pill;
+                pc.tile_cfg = dcfg;
+                pc.tile_opacity = fade * dock_op;
+                pc.tile_draw_rim = true;
+                pending_glass_cards_.push_back(std::move(pc));
+            } else {
+                dock_inline_glass_rect_dip_ = dock_dmg;
+                dock_inline_needs_frost_ = (dcfg.frost_amount > 0.12f || dcfg.min_blur_dip > 1.5f);
+            }
+            if (dock_uses_lower_glass_ != prev_dock_uses_lower_glass && !dock_dmg.empty()) {
+                InvalidateRect(dock_dmg);
+                glass_only_dirty_ = true;
+            }
         }
+    }
+    if (prev_dock_uses_lower_glass && !dock_uses_lower_glass_ &&
+        live_data.dock.pill_rect.right > live_data.dock.pill_rect.left) {
+        const model::RectI wa{0, 0, static_cast<int>(std::lround(width_ / std::max(0.5f, dip_scale_))),
+                              static_cast<int>(std::lround(height_ / std::max(0.5f, dip_scale_)))};
+        const model::RectI dock_dmg = live_data.dock.DamageRect(wa);
+        if (!dock_dmg.empty()) {
+            InvalidateRect(dock_dmg);
+        }
+        glass_only_dirty_ = true;
     }
 
     // Sync live dynamic wallpaper state & evict static glass source 5s after switching away.
     const uint64_t now_tick = GetTickCount64();
-    if (!pending_glass_cards_.empty()) {
+    if (!pending_glass_cards_.empty() || has_any_glass_card_) {
         last_glass_used_ms_ = now_tick;
     } else if (last_glass_used_ms_ != 0 && (now_tick - last_glass_used_ms_ > 5000ull)) {
         backdrop_.ReleaseGlassSource();
@@ -2400,14 +3186,31 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
     const bool live_paused = ShouldPauseLiveActivity(state.settings.pause_on_fullscreen_or_battery);
     (void)OnLiveWallpaperFrameNotification(live_paused);
 
+    backdrop_.DrainCompletedUploads(d2d_dc_.Get());
+    if (backdrop_.ConsumeGlassSharpUpdated()) {
+        committed_glass_cards_.clear();
+        glass_only_dirty_ = true;
+    }
+
     const bool content_dirty = full_dirty_ || !dirty_rects_.empty() || animating_;
     bool glass_dirty = glass_only_dirty_ || !glass_dirty_rects_.empty() ||
                        (pending_glass_cards_.size() != committed_glass_cards_.size());
     if (!glass_dirty && !content_dirty) {
         for (size_t i = 0; i < pending_glass_cards_.size(); ++i) {
-            if (pending_glass_cards_[i].id != committed_glass_cards_[i].id ||
-                pending_glass_cards_[i].neighbor_cnt != committed_glass_cards_[i].neighbor_cnt ||
-                GlassRequestsDiffer(pending_glass_cards_[i].req, committed_glass_cards_[i].req)) {
+            const auto& a = pending_glass_cards_[i];
+            const auto& b = committed_glass_cards_[i];
+            const bool diff =
+                a.id != b.id ||
+                std::fabs(a.tile_rect_dip.left - b.tile_rect_dip.left) > 0.1f ||
+                std::fabs(a.tile_rect_dip.top - b.tile_rect_dip.top) > 0.1f ||
+                std::fabs(a.tile_rect_dip.right - b.tile_rect_dip.right) > 0.1f ||
+                std::fabs(a.tile_rect_dip.bottom - b.tile_rect_dip.bottom) > 0.1f ||
+                std::fabs(a.tile_opacity - b.tile_opacity) > 0.002f ||
+                a.tile_draw_rim != b.tile_draw_rim ||
+                std::fabs(a.tile_light_x - b.tile_light_x) > 0.004f ||
+                std::fabs(a.tile_light_y - b.tile_light_y) > 0.004f ||
+                TileGlassConfigsDiffer(a.tile_cfg, b.tile_cfg);
+            if (diff) {
                 glass_dirty = true;
                 break;
             }
@@ -2441,20 +3244,48 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
     }
 
     native_acrylic_allowed_ = interaction.transparency_enabled;
-    host_backdrop_.BeginFrame();
-    glass_pool_.BeginFrame();
+    // Only force a full-scene Acrylic rebuild when native Acrylic visuals actually exist or are
+    // needed this frame; pure LiquidGlass/Mica/Solid scenes keep surgical dirty-rect updates (~1ms drag!).
+    bool need_acrylic_full = false;
+    if (host_backdrop_.Active()) {
+        if (host_backdrop_.VisualCount() > 0) {
+            need_acrylic_full = true;
+        } else if (native_acrylic_allowed_) {
+            if (interaction.dragging_items || interaction.drop_hint_visible) {
+                need_acrylic_full = true;
+            } else {
+                for (size_t i = 0; i < state.groups.size() && i < group_views.size() && !need_acrylic_full; ++i) {
+                    if (!group_views[i].frame.empty() &&
+                        ResolveMaterial(state.groups[i].material, state.settings, interaction) == model::CardMaterial::Acrylic) {
+                        need_acrylic_full = true;
+                    }
+                }
+                if (!need_acrylic_full && state.settings.tiles_enabled && state.settings.organize_enabled) {
+                    for (const auto& t : state.tiles) {
+                        if (ResolveTileMaterial(t.material, state.settings, interaction) == model::CardMaterial::Acrylic) {
+                            need_acrylic_full = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (need_acrylic_full) {
+        host_backdrop_.BeginFrame();
+    }
+    tile_glass_.BeginFrame();
     LARGE_INTEGER t0{}, t1{};
     QueryPerformanceCounter(&t0);
 
     const LONG w = static_cast<LONG>(width_), h = static_cast<LONG>(height_);
     // Native acrylic EndFrame replaces the complete card visual list. A clipped
     // foreground pass would otherwise remove every undrawn card's backdrop.
-    const bool full = full_dirty_ || animating_ ||
-                      (host_backdrop_.Active() && native_acrylic_allowed_);
+    const bool full = full_dirty_ || animating_ || need_acrylic_full;
     std::vector<RECT> occupied;
     std::vector<RECT> regions;
     if (full) {
-        occupied = CoalesceToGrid(CollectOccupiedRects(state, group_views, tile_board_rect, interaction), w, h);
+        occupied = CoalesceToGrid(CollectOccupiedRects(state, group_views, tile_board_rect, live_data, interaction), w, h);
         regions = occupied;
     } else {
         // Dirty rectangles arrive in scene DIPs.
@@ -2512,12 +3343,18 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
             last_trimmed_occupied_ = std::move(occupied);
         }
     }
-    glass_pool_.EndFrame();
+    tile_glass_.EndFrame();
     if (SUCCEEDED(hr)) {
-        (void)SyncGlassVirtualSurface(full_dirty_, regions);
+        // `glass_vsurf_` is an independent DirectComposition visual layer strictly below `vsurf_`:
+        // stationary glass cards only redraw when `full_dirty_`, `glass_only_dirty_`, `glass_dirty_rects_`,
+        // or `pending_glass_cards_` geometry/optics actually changed (never on foreground drag overlap!).
+        const std::vector<RECT> no_content_propagation;
+        (void)SyncGlassVirtualSurface(full_dirty_, no_content_propagation);
     }
-    const bool had_native_acrylic = host_backdrop_.Active();
-    host_backdrop_.EndFrame();
+    const bool had_native_acrylic = need_acrylic_full && host_backdrop_.Active();
+    if (need_acrylic_full) {
+        host_backdrop_.EndFrame();
+    }
     const bool acrylic_failed = had_native_acrylic && !host_backdrop_.Active();
     if (SUCCEEDED(hr)) hr = dcomp_device_->Commit();
 
@@ -2535,15 +3372,15 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
     return SUCCEEDED(hr);
 }
 
-bool DesktopRenderer::RenderCompositePng(
-    const std::wstring& png_path,
+bool DesktopRenderer::RenderCompositeMapped(
     const model::DesktopModelState& state,
     std::span<const model::GroupComputedView> group_views,
     const model::RectI& tile_board_rect,
     const LiveTileRuntimeData& live_data,
     const DesktopInteractionState& interaction,
-    const std::function<void(ID2D1DeviceContext*)>& post_overlay_draw) {
-    if (!d2d_dc_ || !swap_chain_ || !d3d_device_ || !d3d_context_ || png_path.empty()) return false;
+    const std::function<void(ID2D1DeviceContext*)>& post_overlay_draw,
+    const std::function<bool(const uint8_t* pixels, uint32_t row_pitch, uint32_t width, uint32_t height)>& sink) {
+    if (!d2d_dc_ || !swap_chain_ || !d3d_device_ || !d3d_context_ || !sink) return false;
 
     backdrop_.LoadForScreen(d2d_dc_.Get(), BackdropWidth(), BackdropHeight(),
                             state.settings.wallpaper_preset, state.settings.dark_mode);
@@ -2556,7 +3393,7 @@ bool DesktopRenderer::RenderCompositePng(
 
     const bool prev_force = force_inline_glass_;
     force_inline_glass_ = true;
-    glass_pool_.BeginFrame();
+    tile_glass_.BeginFrame();
     d2d_dc_->BeginDraw();
     d2d_dc_->SetTransform(D2D1::Matrix3x2F::Identity());
     DrawScene(state, group_views, tile_board_rect, live_data, snap_inter);
@@ -2565,7 +3402,7 @@ bool DesktopRenderer::RenderCompositePng(
         post_overlay_draw(d2d_dc_.Get());
     }
     const HRESULT snap_hr = d2d_dc_->EndDraw();
-    glass_pool_.EndFrame();
+    tile_glass_.EndFrame();
     force_inline_glass_ = prev_force;
     if (FAILED(snap_hr)) return false;
 
@@ -2586,7 +3423,23 @@ bool DesktopRenderer::RenderCompositePng(
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(d3d_context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) return false;
 
-    bool encoded_ok = false;
+    const bool ok = sink(static_cast<const uint8_t*>(mapped.pData), mapped.RowPitch, desc.Width, desc.Height);
+    d3d_context_->Unmap(staging.Get(), 0);
+    return ok;
+}
+
+bool DesktopRenderer::RenderCompositePng(
+    const std::wstring& png_path,
+    const model::DesktopModelState& state,
+    std::span<const model::GroupComputedView> group_views,
+    const model::RectI& tile_board_rect,
+    const LiveTileRuntimeData& live_data,
+    const DesktopInteractionState& interaction,
+    const std::function<void(ID2D1DeviceContext*)>& post_overlay_draw) {
+    if (png_path.empty()) return false;
+    return RenderCompositeMapped(state, group_views, tile_board_rect, live_data, interaction, post_overlay_draw,
+                                 [&](const uint8_t* pixels, uint32_t row_pitch, uint32_t width, uint32_t height) {
+        bool encoded_ok = false;
     ComPtr<IWICImagingFactory> wic;
     if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) && wic) {
         ComPtr<IWICStream> stream;
@@ -2599,12 +3452,12 @@ bool DesktopRenderer::RenderCompositePng(
                 ComPtr<IPropertyBag2> props;
                 if (SUCCEEDED(enc->CreateNewFrame(&frame, &props)) && frame &&
                     SUCCEEDED(frame->Initialize(props.Get())) &&
-                    SUCCEEDED(frame->SetSize(desc.Width, desc.Height))) {
+                    SUCCEEDED(frame->SetSize(width, height))) {
                     WICPixelFormatGUID pf = GUID_WICPixelFormat32bppBGRA;
                     if (SUCCEEDED(frame->SetPixelFormat(&pf))) {
-                        const UINT total_bytes = mapped.RowPitch * desc.Height;
+                        const UINT total_bytes = row_pitch * height;
                         if (SUCCEEDED(frame->WritePixels(
-                                desc.Height, mapped.RowPitch, total_bytes, static_cast<BYTE*>(mapped.pData))) &&
+                                height, row_pitch, total_bytes, const_cast<BYTE*>(pixels))) &&
                             SUCCEEDED(frame->Commit()) &&
                             SUCCEEDED(enc->Commit())) {
                             encoded_ok = true;
@@ -2615,9 +3468,46 @@ bool DesktopRenderer::RenderCompositePng(
         }
     }
 
-    d3d_context_->Unmap(staging.Get(), 0);
-    return encoded_ok;
+        return encoded_ok;
+    });
 }
+
+bool DesktopRenderer::RenderTilePixels(const model::DesktopTile& tile, const model::DesktopModelState& state,
+                                       const LiveTileRuntimeData& live_data, std::vector<uint8_t>& bgra,
+                                       uint32_t& out_w, uint32_t& out_h) {
+    // The tile alone, free-placed at the surface's padding, cropped back out (the wallpaper stays under its
+    // glass; the caller clips the corners). Used by the 添加小组件 drawer's preview.
+    constexpr int kPad = 8;
+    model::DesktopModelState one;
+    one.settings = state.settings;
+    one.settings.icons_hidden = true;
+    one.settings.organize_enabled = true;   // the scene draws tiles only while 桌面整理 is on
+    one.settings.tiles_enabled = true;
+    one.todos = state.todos;
+    model::DesktopTile t = tile;
+    t.free_placed = true;
+    t.x = kPad;
+    t.y = kPad;
+    if (t.w <= 0) t.w = t.size.cols * model::kTileUnitPx + (t.size.cols - 1) * model::kTileGapPx;
+    if (t.h <= 0) t.h = t.size.rows * model::kTileUnitPx + (t.size.rows - 1) * model::kTileGapPx;
+    one.tiles.push_back(t);
+    DesktopInteractionState idle{};
+    idle.banner_suppressed = true;
+    const uint32_t tw = static_cast<uint32_t>(t.w), th = static_cast<uint32_t>(t.h);
+    return RenderCompositeMapped(one, {}, {}, live_data, idle, {},
+                                 [&](const uint8_t* pixels, uint32_t row_pitch, uint32_t width, uint32_t height) {
+        if (width < tw + kPad || height < th + kPad) return false;
+        bgra.resize(static_cast<size_t>(tw) * th * 4u);
+        for (uint32_t y = 0; y < th; ++y)
+            std::memcpy(bgra.data() + static_cast<size_t>(y) * tw * 4u,
+                        pixels + static_cast<size_t>(y + kPad) * row_pitch + static_cast<size_t>(kPad) * 4u, tw * 4u);
+        out_w = tw;
+        out_h = th;
+        return true;
+    });
+}
+
+
 
 void DesktopRenderer::CaptureMenuUnderlay(POINT anchor_screen_px,
                                           const model::DesktopModelState& state,
@@ -2625,6 +3515,8 @@ void DesktopRenderer::CaptureMenuUnderlay(POINT anchor_screen_px,
                                           const model::RectI& tile_board_rect,
                                           const LiveTileRuntimeData& live_data,
                                           const DesktopInteractionState& interaction) {
+    // A failed/new capture must never retain a previous menu's scene.
+    backdrop_.SetMenuUnderlaySnapshot(nullptr, {});
     if (!d2d_dc_ || !d3d_device_ || !d3d_context_ || width_ == 0 || height_ == 0) return;
 
     const model::CardMaterial menu_mat =
@@ -2632,7 +3524,6 @@ void DesktopRenderer::CaptureMenuUnderlay(POINT anchor_screen_px,
             ? interaction.host_material
             : state.settings.default_material;
     if (menu_mat != model::CardMaterial::LiquidGlass || !interaction.transparency_enabled) {
-        backdrop_.SetMenuUnderlaySnapshot({}, 0, 0, {});
         return;
     }
 
@@ -2641,19 +3532,21 @@ void DesktopRenderer::CaptureMenuUnderlay(POINT anchor_screen_px,
         surface_px_.x, surface_px_.y,
         surface_px_.x + (surface_px_.w > 0 ? surface_px_.w : static_cast<int>(width_)),
         surface_px_.y + (surface_px_.h > 0 ? surface_px_.h : static_cast<int>(height_))};
+    // A card outside this snapshot falls back to the wallpaper alone (WallpaperBackdrop::DrawMenuMaterial),
+    // which reads as a different material, so it covers the root card and one submenu wherever they land:
+    // two of the widest menu cards (320 DIP, FluentMenuModel::Layout) across, and the full height, since a
+    // long submenu is lined up with its row and only clamped to the work area. Near the right edge the menu
+    // shifts back inside the work area and the submenu opens on its left, so the window slides back with
+    // them instead of being cut off at the edge.
     const LONG pad_px = static_cast<LONG>(std::ceil(64.0f * dip_scale_));
-    const LONG span_w = static_cast<LONG>(std::ceil(560.0f * dip_scale_));
-    const LONG span_h = static_cast<LONG>(std::ceil(520.0f * dip_scale_));
-    RECT cap_scr{
-        std::max(surf_scr.left, anchor_screen_px.x - pad_px),
-        std::max(surf_scr.top, anchor_screen_px.y - pad_px),
-        std::min(surf_scr.right, anchor_screen_px.x + span_w),
-        std::min(surf_scr.bottom, anchor_screen_px.y + span_h)};
+    const LONG span_w = static_cast<LONG>(std::ceil(660.0f * dip_scale_));
+    const LONG cap_left = std::max(surf_scr.left, std::min(anchor_screen_px.x - pad_px, surf_scr.right - (pad_px + span_w)));
+    RECT cap_scr{cap_left, surf_scr.top, std::min(surf_scr.right, cap_left + pad_px + span_w), surf_scr.bottom};
     const LONG cap_w = cap_scr.right - cap_scr.left;
     const LONG cap_h = cap_scr.bottom - cap_scr.top;
     if (cap_w < 32 || cap_h < 32) return;
 
-    // Render at 1/2 physical resolution (~280x260 = ~290 KB, < 0.8 ms) onto an isolated target texture.
+    // Keep the half-resolution composite on the GPU; menu devices import it on demand.
     const uint32_t out_w = std::max(16u, static_cast<uint32_t>(cap_w) / 2u);
     const uint32_t out_h = std::max(16u, static_cast<uint32_t>(cap_h) / 2u);
 
@@ -2698,7 +3591,7 @@ void DesktopRenderer::CaptureMenuUnderlay(POINT anchor_screen_px,
     current_glass_settings_ = state.settings;
     current_glass_live_rate_ = state.settings.glass_live_rate;
 
-    glass_pool_.BeginFrame();
+    tile_glass_.BeginFrame();
     d2d_dc_->SetTarget(target.Get());
     d2d_dc_->SetDpi(half_dpi, half_dpi);
     d2d_dc_->BeginDraw();
@@ -2712,27 +3605,11 @@ void DesktopRenderer::CaptureMenuUnderlay(POINT anchor_screen_px,
     d2d_dc_->SetTarget(prev_target.Get());
     d2d_dc_->SetDpi(prev_dpi_x, prev_dpi_y);
     active_clip_dip_ = prev_clip;
-    glass_pool_.EndFrame();
+    tile_glass_.EndFrame();
     force_inline_glass_ = prev_force;
     if (FAILED(draw_hr)) return;
 
-    td.Usage = D3D11_USAGE_STAGING;
-    td.BindFlags = 0;
-    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    ComPtr<ID3D11Texture2D> staging;
-    if (FAILED(d3d_device_->CreateTexture2D(&td, nullptr, &staging)) || !staging) return;
-    d3d_context_->CopyResource(staging.Get(), gpu_tex.Get());
-
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(d3d_context_->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped)) || !mapped.pData) return;
-    std::vector<uint8_t> pbgra(static_cast<size_t>(out_w) * out_h * 4u);
-    for (uint32_t y = 0; y < out_h; ++y) {
-        std::memcpy(pbgra.data() + static_cast<size_t>(y) * out_w * 4u,
-                    static_cast<const uint8_t*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch,
-                    static_cast<size_t>(out_w) * 4u);
-    }
-    d3d_context_->Unmap(staging.Get(), 0);
-    backdrop_.SetMenuUnderlaySnapshot(std::move(pbgra), out_w, out_h, cap_scr);
+    backdrop_.SetMenuUnderlaySnapshot(gpu_tex.Get(), cap_scr);
 }
 
 model::CardMaterial DesktopRenderer::ResolveMaterial(model::CardMaterial requested,
@@ -2744,6 +3621,16 @@ model::CardMaterial DesktopRenderer::ResolveMaterial(model::CardMaterial request
     if (m == model::CardMaterial::FollowHost) m = interaction.host_material;
     if (m == model::CardMaterial::FollowHost) m = model::CardMaterial::Acrylic;
     return m;
+}
+
+// Widgets are designed as liquid glass (docs/design/desktop_widgets_redesign.html): a tile that follows the
+// desktop's effect wears it unless that effect is 无 (or transparency is off). A tile's own effect still wins.
+model::CardMaterial DesktopRenderer::ResolveTileMaterial(model::CardMaterial requested,
+                                                         const model::BeautifySettings& settings,
+                                                         const DesktopInteractionState& interaction) const noexcept {
+    const model::CardMaterial m = ResolveMaterial(requested, settings, interaction);
+    if (requested != model::CardMaterial::FollowHost || m == model::CardMaterial::Solid) return m;
+    return model::CardMaterial::LiquidGlass;
 }
 
 uint32_t DesktopRenderer::ResolveAccentArgb(uint32_t item_accent,
@@ -2808,17 +3695,58 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
             if (!focus_scene) {
                 DrawLooseIcons(state, group_views, live_data, interaction);
             }
-            for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
-                if (group_views[i].temporarily_expanded) continue;
-                const auto& grp = state.groups[i];
-                const auto& view = group_views[i];
+            auto draw_group_at = [&](size_t idx, const model::PointI* anim_pos) {
+                const auto& grp = state.groups[idx];
+                model::GroupComputedView view = group_views[idx];
+                if (view.frame.empty()) return;
+                if (anim_pos) {
+                    const int dx = anim_pos->x - view.frame.x;
+                    const int dy = anim_pos->y - view.frame.y;
+                    view.frame.x = anim_pos->x;
+                    view.frame.y = anim_pos->y;
+                    view.content_rect.x += dx;
+                    view.content_rect.y += dy;
+                }
                 model::RectI actual_frame = view.frame;
                 if (!view.expanded) {
                     actual_frame.h = model::kGroupHeaderHeight;
                 }
-                if (!IntersectsActiveClip(actual_frame, 24)) continue;
+                if (!anim_pos && !IntersectsActiveClip(actual_frame, 24)) return;
                 const float op = (focus_scene && !grp.focus_visible) ? 0.40f : 1.0f;
                 DrawGroupCard(grp, view, state, live_data, interaction, op);
+            };
+            // Stationary groups first.
+            for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
+                if (group_views[i].temporarily_expanded) continue;
+                const auto& grp = state.groups[i];
+                const bool is_dragged = interaction.dragging_group && interaction.dragging_group_id == grp.id;
+                if (is_dragged || interaction.group_anim_positions.contains(grp.id)) continue;
+                draw_group_at(i, nullptr);
+            }
+            // Translucent smooth-sliding group ghost preview behind floating/springing group.
+            if (!interaction.drag_group_preview_rect.empty() &&
+                (interaction.dragging_group || !interaction.group_anim_positions.empty())) {
+                DrawDragGhostPreview(interaction.drag_group_preview_rect, 14.0f, true,
+                                     interaction.drag_group_merge_armed, state.settings.dark_mode,
+                                     ResolveAccentArgb(0, state.settings, interaction));
+            }
+            // Springing groups and actively dragged group draw on top of stationary groups & ghost.
+            for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
+                if (group_views[i].temporarily_expanded) continue;
+                const auto& grp = state.groups[i];
+                if (interaction.dragging_group && interaction.dragging_group_id == grp.id) continue;
+                if (auto it = interaction.group_anim_positions.find(grp.id);
+                    it != interaction.group_anim_positions.end()) {
+                    draw_group_at(i, &it->second);
+                }
+            }
+            if (interaction.dragging_group && !interaction.dragging_group_id.empty()) {
+                for (size_t i = 0; i < state.groups.size() && i < group_views.size(); ++i) {
+                    if (state.groups[i].id == interaction.dragging_group_id) {
+                        draw_group_at(i, nullptr);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -2833,12 +3761,6 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
         const bool any_free = std::any_of(state.tiles.begin(), state.tiles.end(),
                                           [](const model::DesktopTile& t) { return t.free_placed; });
         const bool show_idle_hdr = !any_free && !state.tiles.empty();
-        if (!hdr_rect.empty() && (interaction.tile_edit_mode || show_idle_hdr)) {
-            DrawTileBoardHeader(hdr_rect, state.settings.dark_mode,
-                                ResolveAccentArgb(0, state.settings, interaction),
-                                interaction.tile_edit_mode, show_idle_hdr, interaction.hovered_tile_header_btn,
-                                focus_scene ? 0.38f : 1.0f);
-        }
 
         // 编辑磁贴区: show 5x7 + slots only when tiles still use the default starter grid.
         if (interaction.tile_edit_mode && !any_free && !tile_board_rect.empty()) {
@@ -2857,15 +3779,21 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
                     DrawGlyph(d2d_dc_.Get(), plus, 1, fmt_fluent_21_.Get(), cr, Brush(state.settings.dark_mode ? 0xC0FFFFFFu : 0xA0000000u));
                 }
         }
-        for (const auto& tile : state.tiles) {
-            const model::RectI px_rect = ComputeTileRectInline(tile_board_rect, tile);
+        auto draw_one_tile = [&](const model::DesktopTile& tile, const model::PointI* anim_pos) {
+            model::RectI px_rect = ComputeTileRectInline(tile_board_rect, tile);
+            if (anim_pos) {
+                px_rect.x = anim_pos->x;
+                px_rect.y = anim_pos->y;
+            }
             const bool active_drag_or_resize =
                 (interaction.dragging_tile && interaction.dragging_tile_id == tile.id) ||
                 interaction.resizing_tile_id == tile.id;
+            const bool springing = (anim_pos != nullptr);
             // Jiggle while editing (a fraction of a degree, alternating between neighbours), as on a phone.
-            const bool jiggle = interaction.tile_edit_mode && !active_drag_or_resize;
+            const bool jiggle = interaction.tile_edit_mode && !active_drag_or_resize && !springing;
             const bool pressed = interaction.pressed_tile_id == tile.id && std::abs(interaction.tile_press) > 0.001f;
-            if (!jiggle && !pressed && !active_drag_or_resize && !IntersectsActiveClip(px_rect, 28)) continue;
+            const int clip_pad = (model::ActiveTileView(tile).kind == model::TileKind::Apps) ? 84 : 68;
+            if (!jiggle && !pressed && !active_drag_or_resize && !springing && !IntersectsActiveClip(px_rect, clip_pad)) return;
             const float tile_op = (focus_scene && !IsFocusKeepTileKind(model::ActiveTileView(tile).kind)) ? 0.38f : 1.0f;
             D2D1_MATRIX_3X2_F saved_tf{};
             if (jiggle || pressed) {
@@ -2886,7 +3814,7 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
             }
             if (tile_op < 0.99f) {
                 d2d_dc_->PushLayer(
-                    D2D1::LayerParameters1(ToRectF(model::RectI{px_rect.x - 16, px_rect.y - 16, px_rect.w + 32, px_rect.h + 32}),
+                    D2D1::LayerParameters1(ToRectF(model::RectI{px_rect.x - 56, px_rect.y - 72, px_rect.w + 112, px_rect.h + 144}),
                                            nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                            D2D1::IdentityMatrix(), tile_op, nullptr, D2D1_LAYER_OPTIONS1_NONE),
                     nullptr);
@@ -2895,21 +3823,68 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
             if (tile_op < 0.99f) {
                 d2d_dc_->PopLayer();
             }
-            if (jiggle || pressed) d2d_dc_->SetTransform(saved_tf);
-            if (interaction.tile_edit_mode && !(interaction.dragging_tile && interaction.dragging_tile_id == tile.id)) {
+            if (interaction.tile_edit_mode && !springing &&
+                !(interaction.dragging_tile && interaction.dragging_tile_id == tile.id)) {
                 DrawTileEditDecor(tile, ToRectF(px_rect), state.settings.dark_mode,
                                   interaction.hovered_tile_id == tile.id,
                                   interaction.resizing_tile_id == tile.id,
                                   ResolveAccentArgb(tile.accent_argb, state.settings, interaction));
             }
+            if (jiggle || pressed) d2d_dc_->SetTransform(saved_tf);
+        };
+
+        // 2a. Stationary tiles first.
+        for (const auto& tile : state.tiles) {
+            if ((interaction.dragging_tile && interaction.dragging_tile_id == tile.id) ||
+                interaction.tile_anim_positions.contains(tile.id)) {
+                continue;
+            }
+            draw_one_tile(tile, nullptr);
         }
 
-        if (interaction.dragging_tile && !interaction.drag_tile_preview_rect.empty()) {
-            const D2D1_RECT_F pr = ToRectF(interaction.drag_tile_preview_rect);
-            const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(pr, 16.0f, 16.0f);
-            const uint32_t preview_color = interaction.drag_tile_valid ? 0xFF4CC2FFu : 0xFFFF5F56u;
-            d2d_dc_->FillRoundedRectangle(rr, Brush(preview_color, 0.14f));
-            d2d_dc_->DrawRoundedRectangle(rr, Brush(preview_color, 0.92f), 2.0f, dashed_stroke_.Get());
+        // 2b. Reference-aligned translucent smooth-sliding ghost preview behind floating/springing tile.
+        if (!interaction.drag_tile_preview_rect.empty() &&
+            (interaction.dragging_tile || !interaction.tile_anim_positions.empty())) {
+            float ghost_rad = 16.0f;
+            const std::string& ghost_tid = !interaction.dragging_tile_id.empty()
+                ? interaction.dragging_tile_id
+                : (!interaction.tile_anim_positions.empty() ? interaction.tile_anim_positions.begin()->first : std::string{});
+            if (!ghost_tid.empty()) {
+                for (const auto& tile : state.tiles) {
+                    if (tile.id == ghost_tid) {
+                        ghost_rad = TileCornerRadiusDip(tile, ToRectF(interaction.drag_tile_preview_rect));
+                        break;
+                    }
+                }
+            }
+            DrawDragGhostPreview(interaction.drag_tile_preview_rect, ghost_rad, interaction.drag_tile_valid,
+                                 interaction.drag_tile_merge_armed || !interaction.stack_drop_target_tile_id.empty(),
+                                 state.settings.dark_mode,
+                                 ResolveAccentArgb(0, state.settings, interaction));
+        }
+
+        // 2c. Springing tiles and actively dragged tile render on top of all siblings & ghost.
+        for (const auto& tile : state.tiles) {
+            if (interaction.dragging_tile && interaction.dragging_tile_id == tile.id) continue;
+            if (auto it = interaction.tile_anim_positions.find(tile.id);
+                it != interaction.tile_anim_positions.end()) {
+                draw_one_tile(tile, &it->second);
+            }
+        }
+        if (interaction.dragging_tile && !interaction.dragging_tile_id.empty()) {
+            for (const auto& tile : state.tiles) {
+                if (tile.id == interaction.dragging_tile_id) {
+                    draw_one_tile(tile, nullptr);
+                    break;
+                }
+            }
+        }
+        // Draw tile edit toolbar above tiles so free-placed cards near the top edge never obscure it.
+        if (!hdr_rect.empty() && (interaction.tile_edit_mode || show_idle_hdr)) {
+            DrawTileBoardHeader(hdr_rect, state.settings.dark_mode,
+                                ResolveAccentArgb(0, state.settings, interaction),
+                                interaction.tile_edit_mode, show_idle_hdr, interaction.hovered_tile_header_btn,
+                                focus_scene ? 0.38f : 1.0f);
         }
     }
 
@@ -2919,6 +3894,71 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
             const auto& view = group_views[i];
             if (view.temporarily_expanded && IntersectsActiveClip(view.frame, 24))
                 DrawGroupCard(state.groups[i], view, state, live_data, interaction, 1.0f);
+        }
+    }
+
+    // 2.5. Bottom-center macOS 26 Tahoe Liquid Glass Dock bar (with smooth reveal/collapse slide).
+    if ((state.settings.dock_enabled || interaction.dock_bar_reveal > 0.01f) &&
+        interaction.dock_bar_reveal > 0.005f &&
+        state.settings.active_scene != model::DesktopScene::Present &&
+        !interaction.side_drawer_open &&
+        live_data.dock.HasItems() &&
+        live_data.dock.pill_rect.right > live_data.dock.pill_rect.left) {
+        const model::RectI wa{0, 0, static_cast<int>(std::lround(width_ / std::max(0.5f, dip_scale_))),
+                              static_cast<int>(std::lround(height_ / std::max(0.5f, dip_scale_)))};
+        const model::RectI dock_dmg = live_data.dock.DamageRect(wa);
+        if (dock_dmg.empty() || interaction.dock_bar_drag.active || IntersectsActiveClip(dock_dmg, 24)) {
+            const bool theme_dark = state.settings.dark_mode;
+            const uint32_t accent = ResolveAccentArgb(0, state.settings, interaction);
+            const model::CardMaterial mat = ResolveMaterial(model::CardMaterial::FollowHost, state.settings, interaction);
+            const bool dark_ink = CardInkLight(live_data.dock.pill_rect, mat, state.settings.card_opacity_percent,
+                                               theme_dark, "dock:bar");
+            const float dock_op = std::clamp(interaction.dock_bar_reveal * 2.2f, 0.0f, 1.0f);
+            DrawCardMaterial(live_data.dock.pill_rect, live_data.dock.pill_radius, mat,
+                             state.settings.card_opacity_percent, theme_dark, accent,
+                             /*drop_target=*/false, /*hovered=*/interaction.dock_bar_hovered,
+                             /*opacity=*/dock_op, state.settings.glass_dispersion, /*press=*/0.0f,
+                             /*allow_lower_glass=*/dock_uses_lower_glass_, /*is_group_card=*/false,
+                             "dock:bar", &state.settings);
+            const DockBarMeasureFn measure_fn = [&](const std::wstring& s, float sz) -> float {
+                IDWriteTextFormat* fmt = FaceFormat(std::clamp(sz, 9.0f, 18.0f), DWRITE_FONT_WEIGHT_SEMI_BOLD, false);
+                return MeasureSingleLineWidth(s, fmt ? fmt : fmt_tile_small_title_.Get(), 240.0f);
+            };
+            const DockBarTextFn text_fn = [&](const std::wstring& s, const D2D1_RECT_F& rc,
+                                              float sz, bool bold, uint32_t argb, float op) {
+                IDWriteTextFormat* fmt = FaceFormat(std::clamp(sz, 9.0f, 22.0f),
+                                                    bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_MEDIUM,
+                                                    false);
+                if (!fmt) fmt = (sz >= 15.0f) ? fmt_tile_hdr_.Get() : fmt_tile_small_title_.Get();
+                if (!fmt || s.empty() || rc.right <= rc.left || rc.bottom <= rc.top) return;
+                widget_text_.Bind(dwrite_factory_.Get(), d2d_dc_.Get());
+                const float w = rc.right - rc.left;
+                const float h = rc.bottom - rc.top;
+                if (auto* tl = widget_text_.Layout(dwrite_factory_.Get(), s, fmt, w, h, true,
+                                                   DWRITE_TEXT_ALIGNMENT_CENTER)) {
+                    // DesktopTextRenderer::Layout(..., ellipsized=true) already applies
+                    // DWRITE_PARAGRAPH_ALIGNMENT_CENTER inside [0, h]; draw directly at rc.top.
+                    widget_text_.DrawLayout(dwrite_factory_.Get(), d2d_dc_.Get(),
+                                            D2D1::Point2F(rc.left, rc.top), tl, Brush(argb, op));
+                }
+            };
+            DrawLiquidDockBarContents(d2d_factory_.Get(), d2d_dc_.Get(), dock_icon_cache_,
+                                      live_data.dock,
+                                      interaction.dock_bar_pressed_index,
+                                      interaction.dock_bar_tooltip_index,
+                                      interaction.dock_bar_tooltip_alpha,
+                                      interaction.drop_target_dock,
+                                      dark_ink,
+                                      static_cast<float>(width_) / std::max(0.5f, dip_scale_),
+                                      measure_fn, text_fn,
+                                      interaction.dock_bar_drag.active ? &interaction.dock_bar_drag : nullptr,
+                                      interaction.dock_now_ms,
+                                      static_cast<float>(height_) / std::max(0.5f, dip_scale_),
+                                      interaction.dock_sys_hovered_kind,
+                                      interaction.dock_sys_hovered_tray_idx,
+                                      interaction.dock_sys_open_kind,
+                                      interaction.dock_sys_open_tray_idx,
+                                      state.settings.widgets.battery_low_pct);
         }
     }
 
@@ -2967,8 +4007,8 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
                           Brush(state.settings.dark_mode ? 0xFFFFFFFFu : 0xFF141820u));
     }
 
-    // 6. Bottom-left scene / hidden-icons #banner pill
-    DrawSceneBanner(state, interaction);
+    // 6. Bottom-left scene / hidden-icons #banner pill (lifts cleanly above Dock if they would collide)
+    DrawSceneBanner(state, live_data, interaction);
 }
 
 ComPtr<ID2D1Bitmap1> CreateExteriorCardShadowBitmap(ID2D1DeviceContext* dc) {
@@ -3126,7 +4166,7 @@ void DesktopRenderer::DrawCardMaterial(const D2D1_RECT_F& rect, float radius,
                                        bool emphasized_border,
                                        bool elevated_hover, float background_opacity,
                                        uint8_t /*dispersion_level*/,
-                                       float press_amount,
+                                       float /*press_amount*/,
                                        bool allow_lower_glass,
                                        bool /*is_group_card*/,
                                        std::string_view card_id,
@@ -3136,10 +4176,8 @@ void DesktopRenderer::DrawCardMaterial(const D2D1_RECT_F& rect, float radius,
     const float fade = std::clamp(static_cast<float>(opacity_percent) / 30.0f, 0.0f, 1.0f);
 
     if (material == model::CardMaterial::LiquidGlass) {
-        // 1) Settled desktop cards on `vsurf_` delegate shadow + refractive glass + 1px SDF rim
-        //    to the lower `glass_vsurf_` DComp layer so dynamic wallpaper & cursor hover light
-        //    updates never redraw foreground icons/text!
-        if (allow_lower_glass && vsurf_ && !force_inline_glass_ && !glass_pool_.Unavailable() &&
+        // Unified WacOS / macOS Tahoe Liquid Glass optical pipeline for groups, tiles, and Dock.
+        if (allow_lower_glass && vsurf_ && !force_inline_glass_ && !tile_glass_.Unavailable() &&
             EnsureGlassVirtualSurface()) {
             if (emphasized_border) {
                 const D2D1_RECT_F inset = D2D1::RectF(rect.left + 0.5f, rect.top + 0.5f, rect.right - 0.5f, rect.bottom - 0.5f);
@@ -3149,30 +4187,17 @@ void DesktopRenderer::DrawCardMaterial(const D2D1_RECT_F& rect, float radius,
             }
             return;
         }
-
-        // 2) Inline Liquid Glass pass (offscreen PNG snapshots, benchmarks, dragged/jiggling cards, drag pills):
-        GlassCardRequest req{};
-        req.left_dip = rect.left;
-        req.top_dip = rect.top;
-        req.right_dip = rect.right;
-        req.bottom_dip = rect.bottom;
-        req.radius_dip = radius;
-        const model::BeautifySettings& gs = glass_settings ? *glass_settings : current_glass_settings_;
-        const bool cursor_active = (!card_id.empty() && hover_light_card_id_ == card_id);
-        ApplyBeautifyGlassOptics(req, gs, cursor_active, hover_light_);
-        req.opacity_percent = opacity_percent;
-        req.dark_mode = dark_mode;
-        req.elevated_hover = elevated_hover;
-        req.allow_clear_passthrough = (vsurf_ != nullptr && !force_inline_glass_);
-        req.energy_saver = energy_saver_cached_;
-        req.draw_rim_in_shader = !emphasized_border;
-        req.background_luminance = backdrop_.AverageLuminance(rect);
-        req.background_opacity = background_opacity;
-        req.press_amount = press_amount;
-        const float glass_shadow = (dark_mode ? (elevated_hover ? 0.65f : 0.54f)
-                                              : (elevated_hover ? 0.46f : 0.32f)) *
-                                   fade * background_opacity;
-        if (DrawSingleLiquidGlassCard(d2d_dc_.Get(), req, glass_shadow)) {
+        model::BeautifySettings gs = glass_settings ? *glass_settings : current_glass_settings_;
+        gs.dark_mode = ResolveLiquidGlassDark(card_id, rect, opacity_percent, dark_mode);
+        gs.card_opacity_percent = opacity_percent;
+        const TileGlassConfig tcfg = MakeTileGlassConfig(gs, radius, elevated_hover, energy_saver_cached_);
+        float lx = -1.0f, ly = -1.0f;
+        if (!card_id.empty() && tile_hover_id_ == card_id) {
+            lx = tile_hover_spring_.x;
+            ly = tile_hover_spring_.y;
+        }
+        if (DrawSingleTileLiquidGlass(d2d_dc_.Get(), rect, tcfg, fade * background_opacity,
+                                      !emphasized_border, lx, ly)) {
             if (emphasized_border) {
                 const D2D1_RECT_F inset = D2D1::RectF(rect.left + 0.5f, rect.top + 0.5f, rect.right - 0.5f, rect.bottom - 0.5f);
                 const float inset_r = std::max(0.5f, radius - 0.5f);
@@ -3181,7 +4206,7 @@ void DesktopRenderer::DrawCardMaterial(const D2D1_RECT_F& rect, float radius,
             }
             return;
         }
-        // 3) Graceful fallback (§4.8): if D3D FL < 10_0 or custom effect unavailable, fall back to Acrylic!
+        // Graceful fallback: if D3D FL < 10_0 or custom effect unavailable, fall back to Acrylic.
         material = model::CardMaterial::Acrylic;
     }
 
@@ -3234,7 +4259,7 @@ void DesktopRenderer::DrawCardMaterial(const D2D1_RECT_F& rect, float radius,
         const auto profile = CardSurfaceProfile(dark_mode, opacity_percent);
         d2d_dc_->FillRoundedRectangle(
             rr, Brush(ColorToArgb(CardMaterialTint(dark_mode)),
-                      std::clamp(profile.tint_opacity + 0.14f, 0.45f, 0.90f)));
+                      std::clamp(profile.luminosity_opacity, 0.55f, 0.90f)));
     } else {
         // Unsupported/composition-disabled paths are explicitly solid,
         // never a static wallpaper approximation labelled as live acrylic.
@@ -3318,9 +4343,10 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
 
     const D2D1_RECT_F rc = ToRectF(actual_frame);
     const bool theme_dark = state.settings.dark_mode;
-    // The ink (text, glyphs, icon labels) follows what shows through the card, not only the theme.
-    const bool dark = CardInkLight(rc, ResolveMaterial(group.material, state.settings, interaction),
-                                   state.settings.card_opacity_percent, theme_dark);
+    const std::string grp_card_id = "grp:" + group.id;
+    const model::CardMaterial mat = ResolveMaterial(group.material, state.settings, interaction);
+    // The ink (text, glyphs, icon labels) couples to the card's resolved material appearance.
+    const bool dark = CardInkLight(rc, mat, state.settings.card_opacity_percent, theme_dark, grp_card_id);
     const uint32_t accent = ResolveAccentArgb(group.accent_argb, state.settings, interaction);
     const auto blend_ch = [](uint32_t c, uint32_t target, float t) -> uint32_t {
         const auto ch = [t](uint32_t a, uint32_t b, int shift) -> uint32_t {
@@ -3331,7 +4357,6 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
         return 0xFF000000u | ch(c, target, 16) | ch(c, target, 8) | ch(c, target, 0);
     };
     const uint32_t accent_fg = dark ? blend_ch(accent, 0xFFFFFFFFu, 0.36f) : blend_ch(accent, 0xFF000000u, 0.12f);
-    const model::CardMaterial mat = ResolveMaterial(group.material, state.settings, interaction);
     const bool group_hovered = (interaction.hovered_group_id == group.id);
     const bool drop_target = (interaction.drop_target_group_id == group.id);
 
@@ -3343,11 +4368,13 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
             nullptr);
     }
 
-    const std::string grp_card_id = "grp:" + group.id;
+    const bool grp_floating =
+        (interaction.dragging_group && interaction.dragging_group_id == group.id) ||
+        interaction.group_anim_positions.contains(group.id);
     DrawCardMaterial(rc, 14.0f, mat, state.settings.card_opacity_percent, theme_dark, accent,
                      drop_target, group_hovered, opacity_scale,
                      state.settings.glass_dispersion, 0.0f,
-                     /*allow_lower_glass=*/true, /*is_group_card=*/true, grp_card_id,
+                     /*allow_lower_glass=*/!grp_floating, /*is_group_card=*/true, grp_card_id,
                      &state.settings);
 
     const float hdr_bottom = rc.top + static_cast<float>(model::kGroupHeaderHeight);
@@ -3392,11 +4419,11 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
         const float title_x = rc.left + 34.0f;
         const float max_title_w = std::max(40.0f, (rc.right - rc.left) * 0.52f);
         const float title_w = std::min(max_title_w, MeasureSingleLineWidth(group.title, fmt_group_title_.Get(), max_title_w));
-        if (mat == model::CardMaterial::LiquidGlass && state.settings.glass_frost < 35) {
+        if (mat == model::CardMaterial::LiquidGlass && dark && state.settings.glass_frost < 35) {
             DrawWidgetText(group.title.c_str(), static_cast<UINT32>(group.title.size()),
                               fmt_group_title_.Get(),
                               D2D1::RectF(title_x, rc.top + 1.0f, title_x + title_w + 4.0f, hdr_bottom + 1.0f),
-                              Brush(dark ? 0x5A000000u : 0x55FFFFFFu));
+                              Brush(0x52000000u));
         }
         DrawWidgetText(group.title.c_str(), static_cast<UINT32>(group.title.size()),
                           fmt_group_title_.Get(),
@@ -3728,8 +4755,19 @@ void DesktopRenderer::DrawIconCell(const D2D1_RECT_F& cell_rect,
     const D2D1_RECT_F label_rc = D2D1::RectF(cell_rect.left + 4.0f, icon_rc.bottom + 4.0f,
                                              cell_rect.right - 4.0f, cell_rect.bottom - 3.0f);
 
-    const auto background = surface_settings ? CardBackgroundSamples(label_rc, surface_material,
-        surface_settings->card_opacity_percent, surface_settings->dark_mode) : backdrop_.SampleColors(label_rc);
+    text_contrast::Samples background;
+    if (surface_settings) {
+        if (surface_material == model::CardMaterial::LiquidGlass &&
+            surface_settings->card_opacity_percent >= 30u) {
+            // Keep every icon label inside a Liquid Glass card cohesive with the card's coupled ink.
+            background = text_contrast::Fill(dark_mode ? 0xFF141820u : 0xFFF4F6FAu);
+        } else {
+            background = CardBackgroundSamples(label_rc, surface_material,
+                surface_settings->card_opacity_percent, surface_settings->dark_mode);
+        }
+    } else {
+        background = backdrop_.SampleColors(label_rc);
+    }
     DrawIconLabel(item.name, label_rc, fmt_item_label_.Get(), label_style,
                   dark_mode, in_group, hovered || selected || search_matched, alpha_mul, &background);
 }
@@ -3826,30 +4864,40 @@ void DesktopRenderer::DrawIconLabel(std::wstring_view name, const D2D1_RECT_F& l
     const auto ink_alpha = static_cast<uint32_t>(std::lround(255.0f * std::clamp(alpha_mul, 0.0f, 1.0f))) << 24;
     const auto light_ink = ink_alpha | (text_contrast::kLightInk & 0xFFFFFFu);
     const auto dark_ink = ink_alpha | (text_contrast::kDarkInk & 0xFFFFFFu);
-    auto ink = text_contrast::ChooseInk(samples, light_ink, dark_ink, dark_mode);
-    dark_mode = ink.light;
+    bool use_light = dark_mode;
     if (style == model::IconLabelStyle::FrostedPill) {
         const auto pill = D2D1::RectF(label_rc.left, label_rc.top - 1, label_rc.right,
             std::min(label_rc.bottom + 1, label_rc.top + 31));
+        // The frosted pill plate itself locks readability; follow dark_mode consistently across the desktop.
         const uint32_t plate = dark_mode ? 0xA8161922u : 0xD8FFFFFFu;
         d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(pill, 6, 6), Brush(plate, alpha_mul));
-        text_contrast::TransformSamples(samples, [plate, alpha_mul](auto color) {
-            return text_contrast::SourceOver(color, plate, alpha_mul);
-        });
-        ink = text_contrast::ChooseInk(samples, light_ink, dark_ink, dark_mode);
-    } else if (style != model::IconLabelStyle::Normal) {
-        if (ink.valid && std::max(ink.light_contrast, ink.dark_contrast) < 4.5f) {
-            for (const auto delta : {D2D1::Point2F(-pixel_x, 0), D2D1::Point2F(pixel_x, 0),
-                                     D2D1::Point2F(0, -pixel_y), D2D1::Point2F(0, pixel_y)}) {
-                DrawLabelLayout(D2D1::Point2F(origin.x + delta.x, origin.y + delta.y), layout.Get(),
-                    ink.light ? 0xE6000000u : 0xE6FFFFFFu, alpha_mul);
-            }
+        use_light = dark_mode;
+    } else if (!card_backed) {
+        if (style == model::IconLabelStyle::Normal) {
+            // Bare Normal labels (no shadow, no pill): use smooth Rec.709 mean luma instead of noisy 10th percentile.
+            const float luma = text_contrast::MeanPerceivedLuma(samples);
+            use_light = text_contrast::ResolveHysteresisLightInk(luma, false, dark_mode, dark_mode, 0.45f, 0.55f);
         } else {
-            DrawLabelLayout(D2D1::Point2F(origin.x + pixel_x, origin.y + pixel_y), layout.Get(),
-                ink.light ? 0xCC000000u : (card_backed ? 0x70FFFFFFu : 0xCCFFFFFFu), alpha_mul);
+            // Shadow & HiddenUntilHover (when revealed): crisp WCAG ink against the local wallpaper;
+            // soft two-pass dark drop shadow under light text, clean halo-free dark ink on bright wallpapers.
+            const auto ink = text_contrast::ChooseInk(samples, light_ink, dark_ink, dark_mode);
+            use_light = ink.light;
+            if (use_light) {
+                DrawLabelLayout(D2D1::Point2F(origin.x + pixel_x, origin.y + 2.0f * pixel_y),
+                                layout.Get(), 0x52000000u, alpha_mul);
+                DrawLabelLayout(D2D1::Point2F(origin.x, origin.y + pixel_y),
+                                layout.Get(), 0xA8000000u, alpha_mul);
+            }
+        }
+    } else {
+        const auto ink = text_contrast::ChooseInk(samples, light_ink, dark_ink, dark_mode);
+        use_light = ink.light;
+        if (style != model::IconLabelStyle::Normal && use_light) {
+            // Subtle dark drop shadow under light text only; never paint a fuzzy white halo under dark text.
+            DrawLabelLayout(D2D1::Point2F(origin.x, origin.y + pixel_y), layout.Get(), 0x8C000000u, alpha_mul);
         }
     }
-    DrawLabelLayout(origin, layout.Get(), ink.light ? text_contrast::kLightInk : text_contrast::kDarkInk, alpha_mul);
+    DrawLabelLayout(origin, layout.Get(), use_light ? text_contrast::kLightInk : text_contrast::kDarkInk, alpha_mul);
 }
 
 void DesktopRenderer::DrawLooseIcons(const model::DesktopModelState& state,
@@ -3935,6 +4983,9 @@ void DesktopRenderer::DrawTileEditDecor(const model::DesktopTile& tile, const D2
     }
     const D2D1_RECT_F pill = TileSizePillRect(r, show_px);
     d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(pill, 11.0f, 11.0f), Brush(dark ? 0xF5262A33u : 0xF8FFFFFFu));
+    d2d_dc_->DrawRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(pill.left + 0.5f, pill.top + 0.5f, pill.right - 0.5f, pill.bottom - 0.5f), 10.5f, 10.5f),
+        Brush(dark ? 0x30FFFFFFu : 0x22000000u), 1.0f);
     DrawWidgetText(sz, static_cast<UINT32>(std::wcslen(sz)), fmt_pill_.Get(), pill, Brush(dark ? 0xFFFFFFFFu : 0xFF1B1B1Bu));
 }
 D2D1_RECT_F DesktopRenderer::TileRemoveBadgeRect(const D2D1_RECT_F& r) noexcept {
@@ -3942,28 +4993,14 @@ D2D1_RECT_F DesktopRenderer::TileRemoveBadgeRect(const D2D1_RECT_F& r) noexcept 
 }
 DesktopRenderer::AppsPaging DesktopRenderer::AppsTilePaging(const model::DesktopTile& tile, const D2D1_RECT_F& rect,
                                                             size_t count) noexcept {
+    const DockTileLayout layout = ComputeDockTileLayout(tile, rect, count, DockLayoutInput{});
     AppsPaging p;
-    const float w = std::max(1.0f, rect.right - rect.left);
-    p.top = rect.top + (tile.look.show_title ? 48.0f : 12.0f);
-    if (w >= 390.0f) {
-        p.cols = std::clamp(static_cast<int>((w - 16.0f) / 80.0f), 5, 12);
-    } else if (w >= 260.0f) {
-        p.cols = std::clamp(static_cast<int>((w - 16.0f) / 82.0f), 3, 4);
-    } else {
-        p.cols = 2;
-    }
-    // As many rows as fit at the compact cell height (icon 36 + one label line), then the cells share the
-    // height out evenly so a page fills the tile instead of leaving an empty band under one row.
-    constexpr float kMinCell = 62.0f, kMaxCell = 80.0f;
-    const auto fit = [&](float bottom_pad) {
-        const float avail = std::max(0.0f, rect.bottom - bottom_pad - p.top);
-        p.rows = std::max(1, static_cast<int>(avail / kMinCell));
-        p.cell_h = std::clamp(avail / static_cast<float>(p.rows), kMinCell, kMaxCell);
-        p.room = static_cast<size_t>(p.cols * p.rows);
-    };
-    fit(8.0f);
-    if (count > p.room) fit(22.0f);  // leave room for the page dots under the grid
-    p.pages = std::max(1, static_cast<int>((count + p.room - 1) / p.room));
+    p.cols = std::max(1, layout.cols);
+    p.rows = std::max(1, layout.rows);
+    p.pages = std::max(1, layout.pages);
+    p.room = std::max<size_t>(1, layout.room);
+    p.top = rect.top + 12.0f;
+    p.cell_h = std::max(1.0f, (rect.bottom - rect.top - 22.0f) / static_cast<float>(p.rows));
     return p;
 }
 
@@ -4020,29 +5057,206 @@ D2D1_RECT_F DesktopRenderer::PhotoNavRect(const model::DesktopTile& tile, const 
 }
 
 D2D1_RECT_F DesktopRenderer::ListRowRect(model::TileKind kind, const D2D1_RECT_F& r, size_t index, bool show_title) noexcept {
-    const float top = r.top + (show_title ? 46.0f : 12.0f);
-    D2D1_RECT_F row{};
-    if (kind == model::TileKind::Downloads) {
-        // The newest download leads, taller and plated.
-        row = index == 0 ? D2D1::RectF(r.left + 10.0f, top, r.right - 10.0f, top + 32.0f)
-                         : D2D1::RectF(r.left + 10.0f, top + 36.0f + 28.0f * static_cast<float>(index - 1), r.right - 10.0f,
-                                       top + 36.0f + 28.0f * static_cast<float>(index - 1) + 26.0f);
-    } else {
-        row = D2D1::RectF(r.left + 9.0f, top + 29.0f * static_cast<float>(index), r.right - 9.0f, top + 29.0f * static_cast<float>(index) + 26.0f);
+    // 下载 / 最近使用 (widget_faces style): name over time, 40 DIP a row, two columns on a wide card.
+    const float top = r.top + (show_title ? 38.0f : 12.0f);
+    if (kind == model::TileKind::Downloads || kind == model::TileKind::Recent) {
+        const bool two = (r.right - r.left) >= 400.0f;
+        const float row_h = 40.0f;
+        const int per_col = std::max(1, static_cast<int>((r.bottom - 8.0f - top) / row_h));
+        const size_t col = two ? index / static_cast<size_t>(per_col) : 0;
+        const size_t idx = two ? index % static_cast<size_t>(per_col) : index;
+        if (col > (two ? 1u : 0u)) return {};
+        const float inner_l = r.left + 8.0f, inner_r = r.right - 8.0f;
+        const float colw = two ? (inner_r - inner_l - 8.0f) * 0.5f : inner_r - inner_l;
+        const float left = inner_l + static_cast<float>(col) * (colw + 8.0f);
+        const D2D1_RECT_F row = D2D1::RectF(left, top + row_h * static_cast<float>(idx), left + colw, top + row_h * static_cast<float>(idx + 1));
+        return row.bottom <= r.bottom - 6.0f ? row : D2D1_RECT_F{};
     }
-    return row.bottom <= r.bottom - 8.0f + (index == 0 ? 6.0f : 0.0f) ? row : D2D1_RECT_F{};
+    const D2D1_RECT_F row = D2D1::RectF(r.left + 9.0f, top + 29.0f * static_cast<float>(index), r.right - 9.0f, top + 29.0f * static_cast<float>(index) + 26.0f);
+    return row.bottom <= r.bottom - 8.0f ? row : D2D1_RECT_F{};
 }
 D2D1_RECT_F DesktopRenderer::ListRowActionRect(const D2D1_RECT_F& row) noexcept {
     const float cy = (row.top + row.bottom) * 0.5f;
     return D2D1::RectF(row.right - 30.0f, cy - 11.0f, row.right - 6.0f, cy + 11.0f);
 }
-D2D1_RECT_F DesktopRenderer::TodoDeleteRect(const model::DesktopTile& tile, const D2D1_RECT_F& r, size_t index) noexcept {
-    const float top = (tile.look.show_title ? r.top + 46.0f : r.top + 12.0f) + 29.0f * static_cast<float>(index);
-    return D2D1::RectF(r.right - 34.0f, top + 3.0f, r.right - 12.0f, top + 24.0f);
+D2D1_RECT_F DesktopRenderer::TodoDeleteRect(const model::DesktopTile& tile, const D2D1_RECT_F& r, size_t row) noexcept {
+    const D2D1_RECT_F rr = TodoRowRect(tile, r, row);
+    if (rr.right <= rr.left) return {};
+    const float cy = (rr.top + rr.bottom) * 0.5f;
+    return D2D1::RectF(rr.right - 22.0f, cy - 11.0f, rr.right, cy + 11.0f);
 }
 D2D1_RECT_F DesktopRenderer::RecycleEmptyRect(const D2D1_RECT_F& r) noexcept {
-    const float cx = (r.left + r.right) * 0.5f;
-    return D2D1::RectF(cx - 26.0f, r.bottom - 28.0f, cx + 26.0f, r.bottom - 8.0f);
+    // Where the name sits on the 1×1 tile (bottom left).
+    return D2D1::RectF(r.left + 9.0f, r.bottom - 31.0f, r.left + 61.0f, r.bottom - 9.0f);
+}
+
+namespace {
+// Laid out with the faces in widget_faces.cpp (14 DIP padding; 11 on 1×1).
+D2D1_RECT_F PomodoroButtonRectImpl(const model::DesktopTile& tile, const D2D1_RECT_F& r, int btn_id) noexcept {
+    const float rw = r.right - r.left;
+    const float rh = r.bottom - r.top;
+    if (rw < 40.0f || rh < 40.0f) return {};
+    auto circle = [](float cx, float cy, float d) noexcept { return D2D1::RectF(cx - d * 0.5f, cy - d * 0.5f, cx + d * 0.5f, cy + d * 0.5f); };
+    if (tile.size.cols == 1) return btn_id == 0 ? D2D1::RectF(r.left + 6.0f, r.top + 6.0f, r.right - 6.0f, r.bottom - 6.0f) : D2D1_RECT_F{};
+    const float pad = 14.0f;
+    if (tile.size.rows == 1) {
+        const float cy = (r.top + r.bottom) * 0.5f;
+        if (tile.size.cols < 4) return btn_id == 0 ? circle(r.right - pad - 17.0f, cy, 34.0f) : D2D1_RECT_F{};
+        if (btn_id == 1) return circle(r.right - pad - 15.0f, cy, 30.0f);
+        if (btn_id == 0) return circle(r.right - pad - 30.0f - 8.0f - 17.0f, cy, 34.0f);
+        return {};
+    }
+    const float left = r.left + pad, bottom = r.bottom - pad, top = r.top + pad;
+    if (btn_id == 0) return D2D1::RectF(left, bottom - 30.0f, left + 86.0f, bottom);
+    if (btn_id == 1) return circle(left + 86.0f + 8.0f + 15.0f, bottom - 15.0f, 30.0f);
+    if (btn_id == 2) return D2D1::RectF(left, top, left + 80.0f, top + 18.0f);
+    if (tile.size.cols >= 4 && btn_id >= 3 && btn_id <= 5) {
+        const float sx = r.left + rw * 0.5f + 4.0f;
+        const float y = top + 22.0f + 42.0f * static_cast<float>(btn_id - 3);
+        if (y + 34.0f > bottom + 0.5f) return {};
+        return D2D1::RectF(sx, y, r.right - pad, y + 34.0f);
+    }
+    return {};
+}
+
+D2D1_RECT_F MediaButtonRectImpl(const model::DesktopTile& tile, const D2D1_RECT_F& r, int btn_id) noexcept {
+    if (btn_id < 0 || btn_id > 2) return {};
+    const float rw = r.right - r.left;
+    const float rh = r.bottom - r.top;
+    if (rw < 60.0f || rh < 40.0f) return {};
+    auto circle = [](float cx, float cy, float d) noexcept { return D2D1::RectF(cx - d * 0.5f, cy - d * 0.5f, cx + d * 0.5f, cy + d * 0.5f); };
+    const float pad = 14.0f;
+    if (tile.size.cols == 1)
+        return btn_id == 1 ? circle(r.right - 8.0f - 14.0f, r.bottom - 8.0f - 14.0f, 28.0f) : D2D1_RECT_F{};
+    if (tile.size.rows == 1) {
+        if (tile.size.cols >= 4) {
+            const float cy = (r.top + r.bottom) * 0.5f, play = r.right - pad - 60.0f;
+            return btn_id == 1 ? circle(play, cy, 36.0f) : circle(play + (btn_id == 0 ? -42.0f : 42.0f), cy, 28.0f);
+        }
+        const float s = rh - 28.0f;
+        const float x = r.left + pad + s + 11.0f, cy = r.bottom - pad - 12.0f;
+        if (btn_id == 0) return circle(x + 12.0f, cy, 24.0f);
+        if (btn_id == 1) return circle(x + 12.0f + 30.0f, cy, 28.0f);
+        return circle(x + 12.0f + 60.0f, cy, 24.0f);
+    }
+    if (tile.size.cols < 4) {
+        const float cy = r.bottom - pad - 14.0f, next = r.right - pad - 12.0f;
+        if (btn_id == 2) return circle(next, cy, 24.0f);
+        if (btn_id == 1) return circle(next - 34.0f, cy, 30.0f);
+        return circle(next - 68.0f, cy, 24.0f);
+    }
+    const float s = std::min(rh - pad * 2.0f, 180.0f);
+    const float x = r.left + pad + s + 16.0f, cy = r.bottom - pad - 18.0f;
+    if (btn_id == 0) return circle(x + 14.0f, cy, 28.0f);
+    if (btn_id == 1) return circle(x + 14.0f + 44.0f, cy, 36.0f);
+    return circle(x + 14.0f + 88.0f, cy, 28.0f);
+}
+
+bool PtInRectF(const D2D1_RECT_F& r, float px, float py) noexcept {
+    return r.right > r.left && r.bottom > r.top && px >= r.left && px <= r.right && py >= r.top && py <= r.bottom;
+}
+} // namespace
+
+D2D1_RECT_F DesktopRenderer::PomodoroButtonRect(const model::DesktopTile& tile, const D2D1_RECT_F& card, int id) noexcept {
+    return PomodoroButtonRectImpl(tile, card, id);
+}
+D2D1_RECT_F DesktopRenderer::MediaButtonRect(const model::DesktopTile& tile, const D2D1_RECT_F& card, int id) noexcept {
+    return MediaButtonRectImpl(tile, card, id);
+}
+
+int DesktopRenderer::HitTestPomodoroButton(const model::DesktopTile& tile, const D2D1_RECT_F& card, float px, float py) noexcept {
+    if (model::ActiveTileView(tile).kind != model::TileKind::Pomodoro) return -1;
+    for (int id = 0; id <= 5; ++id) {
+        if (PtInRectF(PomodoroButtonRectImpl(tile, card, id), px, py)) return id;
+    }
+    return -1;
+}
+
+int DesktopRenderer::HitTestMediaButton(const model::DesktopTile& tile, const D2D1_RECT_F& card, float px, float py) noexcept {
+    if (model::ActiveTileView(tile).kind != model::TileKind::MediaPlayer) return -1;
+    for (int id = 0; id <= 2; ++id) {
+        if (PtInRectF(MediaButtonRectImpl(tile, card, id), px, py)) return id;
+    }
+    return -1;
+}
+
+ID2D1Bitmap* DesktopRenderer::EnsureMediaCoverBitmap(const live::MediaSessionSnapshot& media) {
+    if (!d2d_dc_ || media.cover_bytes.empty() || media.cover_hash == 0) {
+        media_cover_bmp_.Reset();
+        media_cover_hash_ = 0;
+        media_cover_accent_ = 0xFFFF5C8Au;
+        return nullptr;
+    }
+    if (media_cover_bmp_ && media_cover_hash_ == media.cover_hash) {
+        return media_cover_bmp_.Get();
+    }
+    media_cover_bmp_.Reset();
+    media_cover_hash_ = media.cover_hash;
+    media_cover_accent_ = 0xFFFF5C8Au;
+
+    ComPtr<IWICImagingFactory> wic;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) || !wic) {
+        return nullptr;
+    }
+    ComPtr<IWICStream> stream;
+    if (FAILED(wic->CreateStream(&stream)) || !stream) return nullptr;
+    if (FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(media.cover_bytes.data()),
+                                            static_cast<DWORD>(media.cover_bytes.size())))) {
+        return nullptr;
+    }
+    ComPtr<IWICBitmapDecoder> dec;
+    if (FAILED(wic->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &dec)) || !dec) {
+        return nullptr;
+    }
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(dec->GetFrame(0, &frame)) || !frame) return nullptr;
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(wic->CreateFormatConverter(&conv)) || !conv) return nullptr;
+    if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
+                                WICBitmapPaletteTypeCustom))) {
+        return nullptr;
+    }
+    UINT w = 0, h = 0;
+    if (FAILED(conv->GetSize(&w, &h)) || w == 0 || h == 0 || w > 2048 || h > 2048) return nullptr;
+
+    std::vector<uint8_t> pixels(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+    if (FAILED(conv->CopyPixels(nullptr, w * 4u, static_cast<UINT>(pixels.size()), pixels.data()))) {
+        return nullptr;
+    }
+    // Extract a vivid average ambient accent color from a sparse grid sample.
+    double sr = 0.0, sg = 0.0, sb = 0.0, sw = 0.0;
+    const UINT step_x = std::max<UINT>(1u, w / 16u);
+    const UINT step_y = std::max<UINT>(1u, h / 16u);
+    for (UINT y = 0; y < h; y += step_y) {
+        for (UINT x = 0; x < w; x += step_x) {
+            const size_t idx = (static_cast<size_t>(y) * w + x) * 4u;
+            const double b = pixels[idx + 0];
+            const double g = pixels[idx + 1];
+            const double r = pixels[idx + 2];
+            const double mx = std::max({r, g, b});
+            const double mn = std::min({r, g, b});
+            const double sat = (mx > 1.0) ? ((mx - mn) / mx) : 0.0;
+            const double weight = 0.25 + sat * 2.2;
+            sr += r * weight;
+            sg += g * weight;
+            sb += b * weight;
+            sw += weight;
+        }
+    }
+    if (sw > 0.1) {
+        const uint32_t ar = static_cast<uint32_t>(std::clamp(sr / sw, 40.0, 255.0));
+        const uint32_t ag = static_cast<uint32_t>(std::clamp(sg / sw, 40.0, 255.0));
+        const uint32_t ab = static_cast<uint32_t>(std::clamp(sb / sw, 40.0, 255.0));
+        media_cover_accent_ = 0xFF000000u | (ar << 16) | (ag << 8) | ab;
+    }
+
+    D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    if (FAILED(d2d_dc_->CreateBitmap(D2D1::SizeU(w, h), pixels.data(), w * 4u, props, &media_cover_bmp_))) {
+        media_cover_bmp_.Reset();
+        return nullptr;
+    }
+    return media_cover_bmp_.Get();
 }
 
 D2D1_RECT_F DesktopRenderer::TileSizePillRect(const D2D1_RECT_F& r, bool pixel_mode) noexcept {
@@ -4067,20 +5281,48 @@ void DesktopRenderer::DrawTileBoardHeader(const model::RectI& board_rect, bool d
     if (!edit_mode && !show_idle_caption) return;
     const float x = static_cast<float>(board_rect.x + 2);
     const float y = static_cast<float>(board_rect.y - 28);
-    const uint32_t pri = dark_mode ? 0xE8FFFFFFu : 0xE81E2430u;
-    const uint32_t sec = dark_mode ? 0x8AFFFFFFu : 0x8A202834u;
-
-    const wchar_t* title = edit_mode ? L"磁贴" : L"固定";
-    DrawWidgetText(title, static_cast<UINT32>(std::wcslen(title)), fmt_tile_hdr_.Get(),
-                      D2D1::RectF(x, y, x + 42.0f, y + 20.0f), Brush(pri, opacity));
-    const wchar_t* hint = edit_mode ? L"全桌面自由拖动 · 拖边角调宽高 · 拖到同卡上叠放"
-                                    : L"全桌面自由拖动 · 边缘调宽高 · 右键自定义";
     const float hint_right = edit_mode ? static_cast<float>(TileHeaderAddWidgetRect(board_rect).x - 8)
                                        : static_cast<float>(board_rect.right());
-    if (hint_right > x + 46.0f) {
-        DrawWidgetText(hint, static_cast<UINT32>(std::wcslen(hint)), fmt_caption_.Get(),
-                          D2D1::RectF(x + 38.0f, y, hint_right, y + 20.0f),
-                          Brush(sec, opacity));
+    const uint32_t btn_pri = dark_mode ? 0xF2FFFFFFu : 0xF21E2430u;
+    const wchar_t* title = edit_mode ? L"磁贴" : L"固定";
+    const wchar_t* hint = edit_mode ? L"全桌面自由拖动 · 拖边角调宽高 · 拖到同卡上叠放"
+                                    : L"全桌面自由拖动 · 边缘调宽高 · 右键自定义";
+
+    if (edit_mode) {
+        // Frosted pill capsule guarantees contrast even over dark wallpaper or top-placed tiles in light mode.
+        const float pill_top = static_cast<float>(board_rect.y - 30);
+        const float pill_bot = pill_top + 24.0f;
+        const float pill_left = static_cast<float>(board_rect.x);
+        const float pill_right = std::max(pill_left + 58.0f, hint_right);
+        const D2D1_RECT_F bar_rc = D2D1::RectF(pill_left, pill_top, pill_right, pill_bot);
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(bar_rc, 12.0f, 12.0f),
+                                      Brush(dark_mode ? 0xCC1E222Cu : 0xE8F4F6FAu, opacity));
+        if (auto* nb = backdrop_.EnsureNoiseBrush(d2d_dc_.Get())) {
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(bar_rc, 12.0f, 12.0f), nb);
+        }
+        d2d_dc_->DrawRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(bar_rc.left + 0.5f, bar_rc.top + 0.5f, bar_rc.right - 0.5f, bar_rc.bottom - 0.5f), 11.5f, 11.5f),
+            Brush(dark_mode ? 0x2EFFFFFFu : 0x20000000u, opacity), 1.0f);
+        const uint32_t bar_sec = dark_mode ? 0xB8FFFFFFu : 0xB8202834u;
+        DrawWidgetText(title, static_cast<UINT32>(std::wcslen(title)), fmt_tile_hdr_.Get(),
+                       D2D1::RectF(bar_rc.left + 10.0f, pill_top + 2.0f, bar_rc.left + 44.0f, pill_bot - 2.0f),
+                       Brush(btn_pri, opacity));
+        if (bar_rc.right > bar_rc.left + 52.0f) {
+            DrawWidgetText(hint, static_cast<UINT32>(std::wcslen(hint)), fmt_caption_.Get(),
+                           D2D1::RectF(bar_rc.left + 46.0f, pill_top + 2.0f, bar_rc.right - 10.0f, pill_bot - 2.0f),
+                           Brush(bar_sec, opacity));
+        }
+    } else {
+        const D2D1_RECT_F hdr_rc = D2D1::RectF(x, y, std::max(x + 48.0f, hint_right), y + 20.0f);
+        const auto ink = text_contrast::ChooseInk(backdrop_.SampleColors(hdr_rc), 0xE8FFFFFFu, 0xE81E2430u, dark_mode);
+        const uint32_t pri = ink.light ? 0xE8FFFFFFu : 0xE81E2430u;
+        const uint32_t sec = ink.light ? 0xA8FFFFFFu : 0xA8202834u;
+        DrawWidgetText(title, static_cast<UINT32>(std::wcslen(title)), fmt_tile_hdr_.Get(),
+                       D2D1::RectF(x, y, x + 42.0f, y + 20.0f), Brush(pri, opacity));
+        if (hint_right > x + 46.0f) {
+            DrawWidgetText(hint, static_cast<UINT32>(std::wcslen(hint)), fmt_caption_.Get(),
+                           D2D1::RectF(x + 38.0f, y, hint_right, y + 20.0f), Brush(sec, opacity));
+        }
     }
 
     if (edit_mode) {
@@ -4092,22 +5334,22 @@ void DesktopRenderer::DrawTileBoardHeader(const model::RectI& board_rect, bool d
         d2d_dc_->FillRoundedRectangle(
             D2D1::RoundedRect(add_rc, 12.0f, 12.0f),
             Brush(dark_mode ? (add_hot ? 0xE02A303Cu : 0xC41E222Cu)
-                            : (add_hot ? 0xF5FFFFFFu : 0xE0F4F6FAu),
+                            : (add_hot ? 0xF5FFFFFFu : 0xE8F4F6FAu),
                   opacity));
         if (auto* nb = backdrop_.EnsureNoiseBrush(d2d_dc_.Get())) {
             d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(add_rc, 12.0f, 12.0f), nb);
         }
         d2d_dc_->DrawRoundedRectangle(
             D2D1::RoundedRect(D2D1::RectF(add_rc.left + 0.5f, add_rc.top + 0.5f, add_rc.right - 0.5f, add_rc.bottom - 0.5f), 11.5f, 11.5f),
-            Brush(dark_mode ? 0x2EFFFFFFu : 0x1C000000u, opacity), 1.0f);
+            Brush(dark_mode ? 0x2EFFFFFFu : 0x20000000u, opacity), 1.0f);
         const wchar_t plus_g[2] = {L'\xE710', 0};
         DrawGlyph(d2d_dc_.Get(), plus_g, 1, fmt_fluent_12_.Get(),
                   D2D1::RectF(add_rc.left + 8.0f, add_rc.top, add_rc.left + 22.0f, add_rc.bottom),
-                  Brush(pri, opacity));
+                  Brush(btn_pri, opacity));
         const wchar_t* add_lbl = L"添加小组件";
         DrawWidgetText(add_lbl, static_cast<UINT32>(std::wcslen(add_lbl)), fmt_tile_hdr_.Get(),
                           D2D1::RectF(add_rc.left + 24.0f, add_rc.top, add_rc.right - 6.0f, add_rc.bottom),
-                          Brush(pri, opacity));
+                          Brush(btn_pri, opacity));
 
         const uint32_t pri_fill = done_hot ? 0xFF2896EAu : (0xFF000000u | (accent_argb & 0x00FFFFFFu));
         d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(done_rc, 12.0f, 12.0f), Brush(pri_fill, opacity));
@@ -4161,7 +5403,7 @@ text_contrast::Samples DesktopRenderer::CardBackgroundSamples(const D2D1_RECT_F&
     if (!samples.count) samples = text_contrast::Fill(solid);
     const float fade = std::clamp(static_cast<float>(opacity_percent) / 30.0f, 0.0f, 1.0f);
     if (fade <= 0.0f) return samples;
-    const bool liquid_glass = (material == model::CardMaterial::LiquidGlass && !glass_pool_.Unavailable());
+    const bool liquid_glass = (material == model::CardMaterial::LiquidGlass && !tile_glass_.Unavailable());
     const bool mica = material == model::CardMaterial::Mica || material == model::CardMaterial::MicaAlt;
     const bool live_acrylic = material == model::CardMaterial::Acrylic && native_acrylic_allowed_ && host_backdrop_.Active();
     const bool sampled_acrylic = material == model::CardMaterial::Acrylic &&
@@ -4183,7 +5425,10 @@ text_contrast::Samples DesktopRenderer::CardBackgroundSamples(const D2D1_RECT_F&
             const auto tint = CardMaterialTint(theme_dark);
             const auto profile = CardSurfaceProfile(theme_dark, opacity_percent);
             if (live_acrylic) {
-                surface = MaterialBlend(wallpaper, {tint.r, tint.g, tint.b}, profile);
+                // HostBackdropLayer uses WinUI/WUC BlendEffect where `luminosity_opacity` clamps
+                // luminance and `tint_opacity` blends chroma (inverted relative to raw D2D Mica).
+                surface = MaterialBlend(wallpaper, {tint.r, tint.g, tint.b},
+                                        {profile.luminosity_opacity, profile.tint_opacity});
             } else {
                 const float lum = 0.299f * wallpaper.r + 0.587f * wallpaper.g + 0.114f * wallpaper.b;
                 const text_contrast::Srgb saturated{
@@ -4191,7 +5436,7 @@ text_contrast::Samples DesktopRenderer::CardBackgroundSamples(const D2D1_RECT_F&
                     std::clamp(lum + (wallpaper.g - lum) * 1.28f, 0.0f, 1.0f),
                     std::clamp(lum + (wallpaper.b - lum) * 1.28f, 0.0f, 1.0f)};
                 surface = text_contrast::SourceOver(saturated, {tint.r, tint.g, tint.b},
-                    std::clamp(profile.tint_opacity + 0.14f, 0.45f, 0.90f));
+                    std::clamp(profile.luminosity_opacity, 0.55f, 0.90f));
             }
         }
         return text_contrast::SourceOver(wallpaper, surface, fade);
@@ -4199,8 +5444,44 @@ text_contrast::Samples DesktopRenderer::CardBackgroundSamples(const D2D1_RECT_F&
     return samples;
 }
 
+bool DesktopRenderer::ResolveLiquidGlassDark(std::string_view card_id, const D2D1_RECT_F& rect,
+                                             uint8_t /*opacity_percent*/, bool theme_dark) const {
+    if (!glass_hysteresis_theme_valid_ || glass_hysteresis_theme_dark_ != theme_dark) {
+        glass_ink_hysteresis_.clear();
+        glass_hysteresis_theme_dark_ = theme_dark;
+        glass_hysteresis_theme_valid_ = true;
+    }
+    float perceived_luma = -1.0f;
+    if (live_wallpaper_.HasFrame() && live_wallpaper_.AverageLuminance() >= 0.0f) {
+        perceived_luma = std::pow(std::clamp(live_wallpaper_.AverageLuminance(), 0.0f, 1.0f), 1.0f / 2.2f);
+    } else {
+        perceived_luma = text_contrast::MeanPerceivedLuma(backdrop_.SampleColors(rect));
+    }
+    bool has_prev = false;
+    bool prev_dark = theme_dark;
+    if (!card_id.empty()) {
+        if (const auto it = glass_ink_hysteresis_.find(std::string(card_id)); it != glass_ink_hysteresis_.end()) {
+            has_prev = true;
+            prev_dark = it->second;
+        }
+    }
+    // macOS 26 Tahoe / WacOS glassLumaHysteresisRange (0.40 / 0.60): bright wallpapers stay Light Glass + dark ink,
+    // dark wallpapers switch both glass tint and ink together to smoked Dark Glass + white ink, and the middle
+    // band [0.40, 0.60] holds the previous / system theme without flickering across frames or neighbor cards.
+    const bool resolved = text_contrast::ResolveHysteresisLightInk(
+        perceived_luma, has_prev, prev_dark, theme_dark, 0.40f, 0.60f);
+    if (!card_id.empty()) {
+        if (glass_ink_hysteresis_.size() > 128u) glass_ink_hysteresis_.clear();
+        glass_ink_hysteresis_[std::string(card_id)] = resolved;
+    }
+    return resolved;
+}
+
 bool DesktopRenderer::CardInkLight(const D2D1_RECT_F& rect, model::CardMaterial material, uint8_t opacity_percent,
-                                   bool theme_dark) const {
+                                   bool theme_dark, std::string_view card_id) const {
+    if (material == model::CardMaterial::LiquidGlass) {
+        return ResolveLiquidGlassDark(card_id, rect, opacity_percent, theme_dark);
+    }
     return text_contrast::ChooseInk(CardBackgroundSamples(rect, material, opacity_percent, theme_dark),
         0xFAFFFFFFu, 0xFA1B2028u, theme_dark).light;
 }
@@ -4263,50 +5544,10 @@ void DesktopRenderer::DrawHeaderBand(const D2D1_RECT_F& card, float band_bottom,
     d2d_dc_->FillRectangle(D2D1::RectF(card.left + 1.0f, band_bottom - 1.0f, card.right - 1.0f, band_bottom), Brush(line, k));
 }
 
-// WMO weather code -> a drawn icon (no font glyphs): sun, sun behind cloud, cloud, rain, snow, fog, storm.
-void DesktopRenderer::DrawWeatherIcon(const D2D1_RECT_F& r, int code, bool dark) {
-    const float s = std::min(r.right - r.left, r.bottom - r.top) / 24.0f;
-    const float ox = r.left + ((r.right - r.left) - 24.0f * s) * 0.5f, oy = r.top + ((r.bottom - r.top) - 24.0f * s) * 0.5f;
-    auto P = [&](float x, float y) { return D2D1::Point2F(ox + x * s, oy + y * s); };
-    const uint32_t sun = dark ? 0xFFFFC53Du : 0xFFF5A524u;
-    const uint32_t cloud = dark ? 0xFFE8EEF6u : 0xFFAEBBCBu;
-    const uint32_t cloud_dark = dark ? 0xFFC9D3DFu : 0xFF8E9DB0u;
-    const uint32_t drop = 0xFF5AA9F0u;
-    auto draw_sun = [&](float cx, float cy, float rr) {
-        d2d_dc_->FillEllipse(D2D1::Ellipse(P(cx, cy), rr * s, rr * s), Brush(sun));
-        for (int i = 0; i < 8; ++i) {
-            const float a = static_cast<float>(i) * kPi / 4.0f;
-            d2d_dc_->DrawLine(P(cx + std::cos(a) * (rr + 2.4f), cy + std::sin(a) * (rr + 2.4f)),
-                              P(cx + std::cos(a) * (rr + 4.6f), cy + std::sin(a) * (rr + 4.6f)), Brush(sun), 1.7f * s, round_stroke_.Get());
-        }
-    };
-    auto draw_cloud = [&](float dx, float dy, uint32_t c) {
-        d2d_dc_->FillEllipse(D2D1::Ellipse(P(10.0f + dx, 13.5f + dy), 4.6f * s, 4.6f * s), Brush(c));
-        d2d_dc_->FillEllipse(D2D1::Ellipse(P(14.6f + dx, 12.0f + dy), 5.4f * s, 5.4f * s), Brush(c));
-        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(ox + (5.0f + dx) * s, oy + (13.0f + dy) * s,
-                                                                    ox + (20.5f + dx) * s, oy + (19.0f + dy) * s), 3.0f * s, 3.0f * s), Brush(c));
-    };
-    if (code == 0 || code == 1) { draw_sun(12.0f, 12.0f, 4.6f); return; }
-    if (code == 2) { draw_sun(8.5f, 8.5f, 3.6f); draw_cloud(1.0f, 1.5f, cloud); return; }
-    if (code == 45 || code == 48) {
-        for (int i = 0; i < 3; ++i) d2d_dc_->DrawLine(P(4.0f, 9.0f + i * 4.0f), P(20.0f, 9.0f + i * 4.0f), Brush(cloud_dark), 1.8f * s, round_stroke_.Get());
-        return;
-    }
-    const bool snow = (code >= 71 && code <= 77) || code == 85 || code == 86;
-    const bool rain = (code >= 51 && code <= 67) || (code >= 80 && code <= 82);
-    const bool storm = code >= 95;
-    draw_cloud(0.0f, -2.0f, (rain || snow || storm) ? cloud_dark : cloud);
-    if (rain) for (int i = 0; i < 3; ++i) d2d_dc_->DrawLine(P(8.5f + i * 3.5f, 19.0f), P(7.5f + i * 3.5f, 22.0f), Brush(drop), 1.6f * s, round_stroke_.Get());
-    if (snow) for (int i = 0; i < 3; ++i) d2d_dc_->FillEllipse(D2D1::Ellipse(P(8.5f + i * 3.5f, 20.5f), 1.1f * s, 1.1f * s), Brush(cloud));
-    if (storm) {
-        ComPtr<ID2D1PathGeometry> g; ComPtr<ID2D1GeometrySink> k;
-        if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&k))) {
-            k->BeginFigure(P(12.5f, 16.0f), D2D1_FIGURE_BEGIN_FILLED);
-            const D2D1_POINT_2F pts[] = {P(10.0f, 20.0f), P(12.0f, 20.0f), P(10.8f, 23.0f), P(14.5f, 18.5f), P(12.5f, 18.5f)};
-            k->AddLines(pts, 5); k->EndFigure(D2D1_FIGURE_END_CLOSED); k->Close();
-            d2d_dc_->FillGeometry(g.Get(), Brush(sun));
-        }
-    }
+// WMO weather code -> SF-Symbols-style Direct2D vector icon (day/night aware).
+void DesktopRenderer::DrawWeatherIcon(const D2D1_RECT_F& r, int code, bool dark, bool is_day) {
+    DrawTahoeWeatherIcon(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu),
+                         round_stroke_.Get(), r, code, is_day, dark);
 }
 
 namespace {
@@ -4319,8 +5560,13 @@ LiveTileRuntimeData::WeatherView PreviewWeather(const std::wstring& city) {
     w.code = 2;
     w.lo_c = 7;
     w.hi_c = 15;
-    w.hours = {{L"15时", 2, 15}, {L"16时", 0, 15}, {L"17时", 0, 14}, {L"18时", 3, 12}, {L"19时", 3, 11}};
-    w.days = {{L"明天", 61, 6, 11}, {L"周日", 2, 5, 13}, {L"周一", 0, 7, 16}};
+    w.is_day = true;
+    w.has_sun = true;
+    w.sunrise_min = 6 * 60 + 32;
+    w.sunset_min = 17 * 60 + 48;
+    w.hours = {{L"15时", 2, 15, true}, {L"16时", 0, 15, true}, {L"17时", 0, 14, true},
+               {L"18时", 3, 12, false}, {L"19时", 1, 11, false}, {L"20时", 0, 10, false}};
+    w.days = {{L"明天", 61, 6, 11}, {L"周日", 2, 5, 13}, {L"周一", 0, 7, 16}, {L"周二", 0, 8, 17}};
     return w;
 }
 const wchar_t* WeatherLabel(int code) {
@@ -4340,6 +5586,28 @@ const wchar_t* WeatherLabel(int code) {
 }
 } // namespace
 
+namespace {
+// "2026年10月3日" from a picture's file time (cached per path; empty when it cannot be read).
+std::wstring PhotoDateLabel(const std::wstring& path) {
+    static std::unordered_map<std::wstring, std::wstring> cache;
+    if (auto it = cache.find(path); it != cache.end()) return it->second;
+    std::wstring label;
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fa)) {
+        FILETIME local{};
+        SYSTEMTIME st{};
+        if (FileTimeToLocalFileTime(&fa.ftLastWriteTime, &local) && FileTimeToSystemTime(&local, &st)) {
+            wchar_t buf[32]{};
+            std::swprintf(buf, ARRAYSIZE(buf), L"%u年%u月%u日", st.wYear, st.wMonth, st.wDay);
+            label = buf;
+        }
+    }
+    if (cache.size() > 256) cache.clear();
+    cache.emplace(path, label);
+    return label;
+}
+} // namespace
+
 void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
                                    const D2D1_RECT_F& raw_rect,
                                    const model::DesktopModelState& state,
@@ -4354,9 +5622,10 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     const bool hovered = (interaction.hovered_tile_id == tile_in.id);
     const bool drop_target = (interaction.drop_target_tile_id == tile_in.id) || (interaction.stack_drop_target_tile_id == tile_in.id);
     const D2D1_RECT_F rect = raw_rect;
-    // `dark` below is the ink: light text where the wallpaper behind the card is dark, whatever the theme.
-    bool dark = CardInkLight(rect, ResolveMaterial(tile.material, state.settings, interaction),
-                                   state.settings.card_opacity_percent, theme_dark);
+    const std::string tile_card_id = "tile:" + tile_in.id;
+    const model::CardMaterial mat = ResolveTileMaterial(tile.material, state.settings, interaction);
+    // `dark` below is the coupled ink (light text on dark glass/cards, dark text on light glass/cards).
+    bool dark = CardInkLight(rect, mat, state.settings.card_opacity_percent, theme_dark, tile_card_id);
 
     uint32_t hue = TileHueArgb(tile.kind, dark);
     if (tile.kind == model::TileKind::StickyNote) {
@@ -4367,19 +5636,34 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         hue = dark ? kNoteHueDark[nc] : kNoteHueLight[nc];
     }
     const uint32_t accent = ResolveAccentArgb(tile.accent_argb, state.settings, interaction);
-    const model::CardMaterial mat = ResolveMaterial(tile.material, state.settings, interaction);
     const bool with_grain = (mat == model::CardMaterial::Acrylic);
 
     const bool active_drag = (interaction.dragging_tile && interaction.dragging_tile_id == tile_in.id);
-    const bool jiggle = interaction.tile_edit_mode && !active_drag && (interaction.resizing_tile_id != tile_in.id);
+    const bool springing = interaction.tile_anim_positions.contains(tile_in.id);
+    const bool jiggle = interaction.tile_edit_mode && !active_drag && !springing && (interaction.resizing_tile_id != tile_in.id);
     const float press_amt = (interaction.pressed_tile_id == tile_in.id) ? interaction.tile_press : 0.0f;
-    const std::string tile_card_id = "tile:" + tile_in.id;
-    DrawCardMaterial(rect, 16.0f, mat, state.settings.card_opacity_percent, theme_dark, accent,
+    const float tile_rad = TileCornerRadiusDip(tile_in, rect);
+    DrawCardMaterial(rect, tile_rad, mat, state.settings.card_opacity_percent, theme_dark, accent,
                      drop_target, hovered, 1.0f,
                      state.settings.glass_dispersion, press_amt,
-                     /*allow_lower_glass=*/(!active_drag && !jiggle),
+                     /*allow_lower_glass=*/(!active_drag && !springing && !jiggle),
                      /*is_group_card=*/false, tile_card_id, &state.settings);
 
+    // 小组件配色: 浅色 / 深色 / 着色 lay one veil over the material and fix the ink; 自动 keeps the ink that
+    // suits what is behind the card. A tile's own colour or picture (自定义磁贴) still wins.
+    if (const uint8_t scheme = state.settings.widgets.scheme;
+        scheme != 0 && look.background == model::TileBackground::Material && tile.kind != model::TileKind::Photos) {
+        const bool solid = mat == model::CardMaterial::Solid;
+        uint32_t veil = 0;
+        if (scheme == 1) { veil = solid ? 0xFFF7F7F5u : 0xE6F5F5F3u; dark = false; }
+        else if (scheme == 2) { veil = solid ? 0xFF1C1C1Eu : 0xB81C1C1Eu; dark = true; }
+        else {
+            const uint32_t tint = state.settings.widgets.tint_auto ? accent : state.settings.widgets.tint_argb;
+            veil = (tint & 0x00FFFFFFu) | (solid ? 0xFF000000u : 0xB3000000u);
+            dark = true;
+        }
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rect, tile_rad, tile_rad), Brush(veil));
+    }
     uint32_t text_pri = dark ? 0xFAFFFFFFu : 0xFA1B2028u;
     uint32_t text_sec = dark ? 0x99FFFFFFu : 0x99242C38u;
     // 自定义磁贴: a colour over the effect, or a picture; the text follows the background's lightness.
@@ -4389,11 +5673,11 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     if (look.background == model::TileBackground::Color && !is_photo_kind) {
         const float op = mat == model::CardMaterial::Solid ? 1.0f
                          : std::min(1.0f, 0.38f + 0.56f * static_cast<float>(state.settings.card_opacity_percent) / 100.0f);
-        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rect, 16.0f, 16.0f), Brush(look.color_argb | 0xFF000000u, op));
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rect, tile_rad, tile_rad), Brush(look.color_argb | 0xFF000000u, op));
         if (with_grain) {
             if (auto* nb = backdrop_.EnsureNoiseBrush(d2d_dc_.Get())) {
                 nb->SetOpacity(op);
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rect, 16.0f, 16.0f), nb);
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rect, tile_rad, tile_rad), nb);
                 nb->SetOpacity(1.0f);
             }
         }
@@ -4407,7 +5691,7 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         line_override = light_bg ? 0x14000000u : 0x24FFFFFFu;
     } else if (look.background == model::TileBackground::Image && !is_photo_kind && !look.image_path.empty()) {
         ComPtr<ID2D1RoundedRectangleGeometry> clip;
-        d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, 16.0f, 16.0f), &clip);
+        d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, tile_rad, tile_rad), &clip);
         if (auto* bmp = backdrop_.GetPhotoTileBitmap(d2d_dc_.Get(), look.image_path)) {
             if (clip) d2d_dc_->PushLayer(D2D1::LayerParameters1(rect, clip.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                                                 D2D1::IdentityMatrix(), 1.0f, nullptr, D2D1_LAYER_OPTIONS1_NONE), nullptr);
@@ -4440,7 +5724,7 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
 
     if (present_veil) {
         ComPtr<ID2D1RoundedRectangleGeometry> veil_geo;
-        d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, 16.0f, 16.0f), &veil_geo);
+        d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, tile_rad, tile_rad), &veil_geo);
         if (veil_geo) {
             d2d_dc_->PushLayer(
                 D2D1::LayerParameters1(rect, veil_geo.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -4476,32 +5760,60 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         return;
     }
 
-    const bool show_hover_edit = hovered && !interaction.tile_edit_mode;
+    const bool is_single_row_dock =
+        (tile.kind == model::TileKind::Apps) && (tile.size.cols >= 2) && ((rect.bottom - rect.top) < 145.0f || tile.size.rows == 1);
+    const bool show_hover_edit = hovered && !interaction.tile_edit_mode &&
+        (!is_single_row_dock || interaction.hovered_tile_edit_btn);
+    const bool glass_text_shadow = (mat == model::CardMaterial::LiquidGlass) && !band_override;
+    const float rw = rect.right - rect.left;
+    const float rh = rect.bottom - rect.top;
 
-    // Helper lambda to draw wide tile top bar (left HUE Fluent icon + HUE semibold title, right muted subtitle)
+    // Unified LumaText-backed text draw helper with crisp single-pass soft drop shadow over clear Liquid Glass.
+    auto draw_text = [&](const std::wstring& s, IDWriteTextFormat* fmt, const D2D1_RECT_F& r,
+                         uint32_t argb, float opacity = 1.0f,
+                         DWRITE_TEXT_ALIGNMENT align_override = static_cast<DWRITE_TEXT_ALIGNMENT>(-1)) {
+        if (s.empty() || !fmt || r.right <= r.left || r.bottom <= r.top) return;
+        widget_text_.Bind(dwrite_factory_.Get(), d2d_dc_.Get());
+        const DWRITE_TEXT_ALIGNMENT align =
+            (static_cast<int>(align_override) >= 0) ? align_override : fmt->GetTextAlignment();
+        auto* layout = widget_text_.Layout(dwrite_factory_.Get(), s, fmt,
+                                           r.right - r.left, r.bottom - r.top, true, align);
+        if (!layout) return;
+        if (glass_text_shadow && dark) {
+            widget_text_.DrawLayout(dwrite_factory_.Get(), d2d_dc_.Get(),
+                                    D2D1::Point2F(r.left, r.top + 1.0f), layout, Brush(0x52000000u, opacity));
+        }
+        widget_text_.DrawLayout(dwrite_factory_.Get(), d2d_dc_.Get(),
+                                D2D1::Point2F(r.left, r.top), layout, Brush(argb, opacity));
+    };
+
+    const WidgetTextDrawFn dial_num_fn = [&](const std::wstring& s, const D2D1_RECT_F& r,
+                                             uint32_t argb, float opacity, DWRITE_TEXT_ALIGNMENT align) {
+        draw_text(s, fmt_clock_num_.Get(), r, argb, opacity, align);
+    };
+
+    // macOS Tahoe semantic widget accent colors (calibrated for dark and light card ink).
+    const uint32_t col_cpu  = dark ? 0xFF33B8FFu : 0xFF0078D4u;
+    const uint32_t col_mem  = dark ? 0xFF38DB70u : 0xFF18984Au;
+    const uint32_t col_vram = dark ? 0xFFBF6BFAu : 0xFF8839D8u;
+    const uint32_t col_disk = dark ? 0xFFFFA629u : 0xFFD97706u;
+    const uint32_t col_down = dark ? 0xFF5CD6FFu : 0xFF0284C7u;
+    const uint32_t col_up   = dark ? 0xFFFFA629u : 0xFFD97706u;
+    const uint32_t col_red  = dark ? 0xFFFF453Au : 0xFFD93025u;
+
+    // Helper lambda to draw wide tile top bar (left tinted Apple-style icon badge + semibold title, right subtitle pill)
+    // The list tiles' top line: just the name and a quiet note on the right. No band, no badge (the content
+    // starts at the same 46 DIP the row hit-tests expect).
     auto draw_wide_header = [&](const std::wstring& title, const std::wstring& right_sub) {
         if (!show_title) return;
-        DrawHeaderBand(rect, rect.top + 40.0f, 16.0f, dark, state.settings.card_opacity_percent,
-                       band_override, line_override, with_grain, mat == model::CardMaterial::LiquidGlass);
-        const wchar_t gl[2] = {TileFluentGlyph(tile), 0};
-        DrawGlyph(d2d_dc_.Get(), gl, 1, fmt_fluent_12_.Get(),
-                          D2D1::RectF(rect.left + 13.0f, rect.top + 11.0f, rect.left + 28.0f, rect.top + 29.0f),
-                          Brush(hue));
         const float sub_right = show_hover_edit ? (rect.right - 42.0f) : (rect.right - 14.0f);
-        const float title_right = right_sub.empty() ? (show_hover_edit ? rect.right - 40.0f : rect.right - 10.0f)
+        const float title_right = right_sub.empty() ? (show_hover_edit ? rect.right - 40.0f : rect.right - 14.0f)
                                                     : (sub_right - 76.0f);
-        if (mat == model::CardMaterial::LiquidGlass && state.settings.glass_frost < 35 && !band_override) {
-            DrawWidgetText(title.c_str(), static_cast<UINT32>(title.size()), fmt_tile_hdr_.Get(),
-                              D2D1::RectF(rect.left + 31.0f, rect.top + 12.0f, title_right, rect.top + 30.0f),
-                              Brush(dark ? 0x5A000000u : 0x55FFFFFFu));
-        }
-        DrawWidgetText(title.c_str(), static_cast<UINT32>(title.size()), fmt_tile_hdr_.Get(),
-                          D2D1::RectF(rect.left + 31.0f, rect.top + 11.0f, title_right, rect.top + 29.0f),
-                          Brush(hue));
-        if (!right_sub.empty() && sub_right > rect.left + 94.0f) {
-            DrawWidgetText(right_sub.c_str(), static_cast<UINT32>(right_sub.size()), fmt_tile_sub_.Get(),
-                              D2D1::RectF(rect.left + 90.0f, rect.top + 11.0f, sub_right, rect.top + 29.0f),
-                              Brush(text_sec));
+        draw_text(title, FaceFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false),
+                  D2D1::RectF(rect.left + 14.0f, rect.top + 13.0f, title_right, rect.top + 33.0f), text_pri);
+        if (!right_sub.empty() && sub_right > rect.left + 98.0f) {
+            draw_text(right_sub, fmt_tile_sub_.Get(), D2D1::RectF(rect.left + 96.0f, rect.top + 15.0f, sub_right, rect.top + 33.0f),
+                      text_sec);
         }
     };
 
@@ -4512,68 +5824,32 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     const wchar_t* shell_icon_salt = tile.kind == model::TileKind::RecycleBin && live_data.recycle_bin.item_count == 0 ? L":empty" : L"";
 
     // Helper lambda to draw 1x1 46x46 rounded app badge + optional top-right count pill + bottom centered title
+    // 1×1: the item's icon at the top left, its name and a count at the bottom left. Explorer's own icons for
+    // 此电脑 and 回收站; a drawn outline for the rest. No halo, no plate.
     auto draw_small_app_tile = [&](const std::wstring& title, uint64_t badge_count, bool show_count) {
-        const float cx = (rect.left + rect.right) * 0.5f;
-        const float badge_top = show_title ? rect.top + 16.0f : (rect.top + rect.bottom - 46.0f) * 0.5f;
-        const D2D1_RECT_F brc = D2D1::RectF(cx - 23.0f, badge_top, cx + 23.0f, badge_top + 46.0f);
+        const float L0 = rect.left + 11.0f;
         ID2D1Bitmap1* sys_icon = shell_icon_item
-            ? backdrop_.GetItemBitmap(d2d_dc_.Get(), shell_icon_item, true, static_cast<uint32_t>(std::lround(48.0f * dip_scale_)), shell_icon_salt)
+            ? backdrop_.GetItemBitmap(d2d_dc_.Get(), shell_icon_item, true, static_cast<uint32_t>(std::lround(32.0f * dip_scale_)), shell_icon_salt)
             : nullptr;
         if (sys_icon) {
             const D2D1_SIZE_F bs = sys_icon->GetSize();
-            const float k = (bs.width > 0 && bs.height > 0) ? std::min(48.0f / bs.width, 48.0f / bs.height) : 1.0f;
-            const float dw = bs.width * k, dh = bs.height * k;
-            d2d_dc_->DrawBitmap(sys_icon, D2D1::RectF(cx - dw * 0.5f, badge_top - 1.0f + (48.0f - dh) * 0.5f,
-                                                      cx + dw * 0.5f, badge_top - 1.0f + (48.0f + dh) * 0.5f),
+            const float k = (bs.width > 0 && bs.height > 0) ? std::min(30.0f / bs.width, 30.0f / bs.height) : 1.0f;
+            d2d_dc_->DrawBitmap(sys_icon, D2D1::RectF(L0 - 2.0f, rect.top + 9.0f, L0 - 2.0f + bs.width * k, rect.top + 9.0f + bs.height * k),
                                 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        }
-
-        D2D1_GRADIENT_STOP gstops[3] = {
-            {0.00f, ColorFromArgb(MixArgb(hue, 0xFFFFFFFFu, 0.28f))},
-            {0.55f, ColorFromArgb(hue)},
-            {1.00f, ColorFromArgb(MixArgb(hue, 0xFF000000u, 0.24f))},
-        };
-        ComPtr<ID2D1GradientStopCollection> gcol;
-        if (sys_icon) {
-            // Explorer's icon replaces the badge.
-        } else if (SUCCEEDED(d2d_dc_->CreateGradientStopCollection(gstops, 3, &gcol)) && gcol) {
-            ComPtr<ID2D1LinearGradientBrush> gbr;
-            if (SUCCEEDED(d2d_dc_->CreateLinearGradientBrush(
-                    D2D1::LinearGradientBrushProperties(
-                        D2D1::Point2F(cx, brc.top), D2D1::Point2F(cx, brc.bottom)),
-                    gcol.Get(), &gbr)) && gbr) {
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(brc, 12.0f, 12.0f), gbr.Get());
-            }
         } else {
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(brc, 12.0f, 12.0f), Brush(hue));
-        }
-        if (!sys_icon) {
-            d2d_dc_->DrawLine(D2D1::Point2F(brc.left + 10.0f, brc.top + 1.0f),
-                              D2D1::Point2F(brc.right - 10.0f, brc.top + 1.0f),
-                              Brush(0x58FFFFFFu), 1.0f);
             const wchar_t gl[2] = {TileFluentGlyph(tile), 0};
-            DrawGlyph(d2d_dc_.Get(), gl, 1, fmt_fluent_21_.Get(), brc, Brush(0xFFFFFFFFu));
+            DrawVectorGlyph(d2d_dc_.Get(), gl[0], D2D1::RectF(L0, rect.top + 11.0f, L0 + 26.0f, rect.top + 37.0f), 24.0f, Brush(text_pri));
         }
-
+        if (!show_title) return;
+        draw_text(title, FaceFormat(12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false),
+                  D2D1::RectF(L0, rect.bottom - (show_count ? 42.0f : 30.0f), rect.right - 8.0f, rect.bottom - (show_count ? 24.0f : 12.0f)),
+                  text_pri);
         if (show_count) {
-            wchar_t cbuf[24]{};
-            std::swprintf(cbuf, ARRAYSIZE(cbuf), L"%llu", static_cast<unsigned long long>(badge_count));
-            const float cw = std::max(20.0f, MeasureSingleLineWidth(cbuf, fmt_pill_.Get(), 60.0f) + 10.0f);
-            // Hovered, the [✏] button takes the top-right corner: the count moves to the top-left.
-            const bool edit_corner = hovered && !interaction.tile_edit_mode;
-            const D2D1_RECT_F pill = edit_corner ? D2D1::RectF(rect.left + 8.0f, rect.top + 8.0f, rect.left + 8.0f + cw, rect.top + 26.0f)
-                                                 : D2D1::RectF(rect.right - 8.0f - cw, rect.top + 8.0f, rect.right - 8.0f, rect.top + 26.0f);
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(pill, 9.0f, 9.0f),
-                                          Brush(dark ? 0xD8202430u : 0xEAFFFFFFu));
-            d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(pill, 9.0f, 9.0f),
-                                          Brush(dark ? 0x2EFFFFFFu : 0x1E000000u), 1.0f);
-            DrawWidgetText(cbuf, static_cast<UINT32>(std::wcslen(cbuf)), fmt_pill_.Get(), pill, Brush(text_pri));
+            wchar_t cbuf[32]{};
+            std::swprintf(cbuf, ARRAYSIZE(cbuf), L"%llu 项", static_cast<unsigned long long>(badge_count));
+            draw_text(cbuf, FaceFormat(11.0f, DWRITE_FONT_WEIGHT_MEDIUM, false),
+                      D2D1::RectF(L0, rect.bottom - 25.0f, rect.right - 8.0f, rect.bottom - 9.0f), text_sec);
         }
-
-        if (show_title)
-            DrawWidgetText(title.c_str(), static_cast<UINT32>(title.size()), fmt_tile_small_title_.Get(),
-                              D2D1::RectF(rect.left + 6.0f, rect.bottom - 28.0f, rect.right - 6.0f, rect.bottom - 6.0f),
-                              Brush(text_pri));
     };
     // The dots on the right edge of a stack, hover/active resize cues, + the top-right hover [✏] (.tedit) button; drawn last over the widget.
     struct TilePostDecor {
@@ -4665,6 +5941,24 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
                  hovered ? interaction.hovered_tile_resize : TileResizeZone::None,
                  interaction.resizing_tile_id == tile_in.id};
 
+    // The redesigned widget faces (widget_faces.cpp). A picture or colour from 自定义磁贴 keeps the older
+    // drawing, which knows how to veil it.
+    if (HasWidgetFace(tile.kind) && !frosted_content) {
+        WidgetFaceInput face{};
+        face.tile = &tile;
+        face.tile_in = &tile_in;
+        face.rect = rect;
+        face.radius = tile_rad;
+        face.light_ink = dark;
+        face.glass_text_shadow = glass_text_shadow;
+        face.hovered = hovered;
+        face.accent = accent;
+        face.state = &state;
+        face.live = &live_data;
+        face.interaction = &interaction;
+        if (DrawWidgetFace(face)) return;
+    }
+
     // -----------------------------------------------------------------------
     // 1x1 Small Tile Renderers (when tile.size.cols == 1)
     // -----------------------------------------------------------------------
@@ -4672,7 +5966,9 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         tile.kind != model::TileKind::DiskRing && tile.kind != model::TileKind::PulseLauncher &&
         tile.kind != model::TileKind::Clock && tile.kind != model::TileKind::StickyNote &&
         tile.kind != model::TileKind::Weather && tile.kind != model::TileKind::Calendar &&
-        tile.kind != model::TileKind::Todo && tile.kind != model::TileKind::System) {
+        tile.kind != model::TileKind::Todo && tile.kind != model::TileKind::System &&
+        tile.kind != model::TileKind::Pomodoro && tile.kind != model::TileKind::MediaPlayer &&
+        tile.kind != model::TileKind::Countdown && tile.kind != model::TileKind::Battery) {
         std::wstring lbl = tile.title;
         uint64_t cnt = 0;
         bool has_cnt = false;
@@ -4699,7 +5995,7 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         }
         // 回收站 hovered with something in it: 清空 in place of its name.
         const bool bin_empty_button = tile.kind == model::TileKind::RecycleBin && hovered && cnt > 0 && !interaction.tile_edit_mode;
-        draw_small_app_tile(bin_empty_button ? std::wstring{} : lbl, cnt, has_cnt);
+        draw_small_app_tile(bin_empty_button ? std::wstring{} : lbl, cnt, has_cnt && !bin_empty_button);
         if (bin_empty_button) {
             const D2D1_RECT_F b = RecycleEmptyRect(rect);
             d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b, 10.0f, 10.0f), Brush(0xFFE5484Du, 0.92f));
@@ -4747,12 +6043,15 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         case model::TileKind::Weather: {
             LiveTileRuntimeData::WeatherView fallback = PreviewWeather(state.settings.weather_city);
             const auto& w = live_data.weather.valid || !live_data.weather.status.empty() ? live_data.weather : fallback;
+            if (w.valid && look.background == model::TileBackground::Material) {
+                DrawTahoeWeatherSkyWash(d2d_factory_.Get(), d2d_dc_.Get(), rect, tile_rad, w.code, w.is_day, dark);
+            }
             const std::wstring city = w.city.empty() ? (state.settings.weather_city.empty() ? L"北京" : state.settings.weather_city) : w.city;
             if (!w.valid) {
                 two_lines(left, rect.right - 12.0f, city, w.status.empty() ? std::wstring(L"正在获取天气…") : w.status);
                 break;
             }
-            DrawWeatherIcon(D2D1::RectF(left - 2.0f, cy - 17.0f, left + 32.0f, cy + 17.0f), w.code, dark);
+            DrawWeatherIcon(D2D1::RectF(left - 2.0f, cy - 18.0f, left + 34.0f, cy + 18.0f), w.code, dark, w.is_day);
             wchar_t tb[16]{};
             std::swprintf(tb, ARRAYSIZE(tb), L"%d°", w.temp_c);
             float x = left + 38.0f;
@@ -4762,18 +6061,21 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
             if (wide) std::swprintf(range, ARRAYSIZE(range), L"%ls · %d°/%d°", WeatherLabel(w.code), w.lo_c, w.hi_c);
             else std::swprintf(range, ARRAYSIZE(range), L"%ls", WeatherLabel(w.code));
             const float wx_right = wide ? std::min(rect.right - 14.0f, x + 108.0f) : main_right;
-            two_lines(x, wx_right, city, range);
+            const float cw = line(city, fmt_tile_hdr_.Get(), D2D1::RectF(x, cy - 20.0f, wx_right - 12.0f, cy), text_pri);
+            if (x + cw + 12.0f <= wx_right) {
+                DrawTahoeLocationArrow(d2d_factory_.Get(), d2d_dc_.Get(), Brush(text_pri), x + cw + 3.0f, cy - 10.0f, text_pri, 0.85f);
+            }
+            line(range, fmt_caption_.Get(), D2D1::RectF(x, cy, wx_right, cy + 19.0f), text_sec);
             if (wide) {
                 divider(wx_right + 6.0f);
                 const float hx0 = wx_right + 14.0f, hx1 = rect.right - 10.0f;
-                // As many hours as fit at 38 DIP each (up to five).
                 const size_t n = std::min<size_t>({w.hours.size(), size_t{5}, static_cast<size_t>(std::max(0.0f, (hx1 - hx0) / 38.0f))});
                 const float step = n ? (hx1 - hx0) / static_cast<float>(n) : 0.0f;
                 for (size_t i = 0; i < n; ++i) {
                     const auto& h = w.hours[i];
                     const float hcx = hx0 + step * (static_cast<float>(i) + 0.5f);
                     line(h.label, fmt_pill_.Get(), D2D1::RectF(hcx - 24.0f, rect.top + 8.0f, hcx + 24.0f, rect.top + 24.0f), text_sec, DWRITE_TEXT_ALIGNMENT_CENTER);
-                    DrawWeatherIcon(D2D1::RectF(hcx - 10.0f, cy - 10.0f, hcx + 10.0f, cy + 10.0f), h.code, dark);
+                    DrawWeatherIcon(D2D1::RectF(hcx - 11.0f, cy - 11.0f, hcx + 11.0f, cy + 11.0f), h.code, dark, h.is_day);
                     wchar_t hb[12]{};
                     std::swprintf(hb, ARRAYSIZE(hb), L"%d°", h.temp_c);
                     line(hb, fmt_disk_pct_.Get(), D2D1::RectF(hcx - 24.0f, rect.bottom - 26.0f, hcx + 24.0f, rect.bottom - 8.0f), text_pri, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -4785,13 +6087,13 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
             SYSTEMTIME st{};
             GetLocalTime(&st);
             static constexpr const wchar_t* kWd[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
-            // A small calendar page: weekday band over the date.
+            // Crisp Tahoe calendar badge: Apple Red header band over translucent crystal page.
             const D2D1_RECT_F page = D2D1::RectF(left, cy - 22.0f, left + 44.0f, cy + 22.0f);
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(page, 8.0f, 8.0f), Brush(dark ? 0x1FFFFFFFu : 0xD9FFFFFFu));
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(page.left, page.top, page.right, page.top + 14.0f), 8.0f, 8.0f), Brush(0xFFE5484Du));
-            d2d_dc_->FillRectangle(D2D1::RectF(page.left, page.top + 8.0f, page.right, page.top + 14.0f), Brush(0xFFE5484Du));
-            line(kWd[st.wDayOfWeek % 7], fmt_pill_.Get(), D2D1::RectF(page.left, page.top, page.right, page.top + 14.0f), 0xFFFFFFFFu, DWRITE_TEXT_ALIGNMENT_CENTER);
-            line(std::to_wstring(st.wDay), fmt_tile_hdr_.Get(), D2D1::RectF(page.left, page.top + 14.0f, page.right, page.bottom), dark ? 0xFFFFFFFFu : 0xFF1F2430u, DWRITE_TEXT_ALIGNMENT_CENTER);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), page, 9.0f, dark);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(page.left, page.top, page.right, page.top + 14.0f), 9.0f, 9.0f), Brush(col_red));
+            d2d_dc_->FillRectangle(D2D1::RectF(page.left, page.top + 8.0f, page.right, page.top + 14.0f), Brush(col_red));
+            line(kWd[st.wDayOfWeek % 7], fmt_clock_num_.Get(), D2D1::RectF(page.left, page.top, page.right, page.top + 14.0f), 0xFFFFFFFFu, DWRITE_TEXT_ALIGNMENT_CENTER);
+            line(std::to_wstring(st.wDay), fmt_group_title_.Get(), D2D1::RectF(page.left, page.top + 14.0f, page.right, page.bottom), text_pri, DWRITE_TEXT_ALIGNMENT_CENTER);
             wchar_t date[32]{};
             std::swprintf(date, ARRAYSIZE(date), L"%u月%u日 %ls", st.wMonth, st.wDay, kWd[st.wDayOfWeek % 7]);
             const std::wstring next = open_todos.empty() ? std::wstring(L"今天没有待办") : L"待办 · " + open_todos.front()->text;
@@ -4808,10 +6110,10 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         }
         case model::TileKind::Todo: {
             const size_t total = state.todos.size();
-            const float rcx = left + 18.0f, rad = 16.0f;
-            d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(rcx, cy), rad, rad), Brush(dark ? 0x24FFFFFFu : 0x16000000u), 3.6f);
-            if (total) DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(hue), rcx, cy, rad, -90.0f,
-                                       360.0f * static_cast<float>(done_todos) / static_cast<float>(total), 3.6f, round_stroke_.Get());
+            const float rcx = left + 18.0f, rad = 16.5f;
+            const float pct = total ? (100.0f * static_cast<float>(done_todos) / static_cast<float>(total)) : 0.0f;
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               rcx, cy, rad, 3.8f, pct, hue, dark);
             line(std::to_wstring(open_todos.size()), fmt_disk_pct_.Get(), D2D1::RectF(rcx - rad, cy - 10.0f, rcx + rad, cy + 10.0f), text_pri, DWRITE_TEXT_ALIGNMENT_CENTER);
             wchar_t head[40]{};
             std::swprintf(head, ARRAYSIZE(head), L"%ls · %zu/%zu", tile.title.empty() ? L"待办" : tile.title.c_str(), done_todos, total);
@@ -4830,23 +6132,33 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         }
         case model::TileKind::System: {
             const auto& sy = live_data.system;
-            const int mem_pct = sy.mem_total ? static_cast<int>(sy.mem_used * 100 / sy.mem_total) : 0;
-            const int net_pct = static_cast<int>(std::min<uint64_t>(100, sy.net_down_bps / (1024 * 1024 / 4)));
-            struct Meter { const wchar_t* label; int pct; uint32_t color; std::wstring value; };
-            std::vector<Meter> meters = {{L"CPU", sy.cpu_pct, hue, std::to_wstring(sy.cpu_pct) + L"%"},
-                                         {L"内存", mem_pct, 0xFF30A46Cu, std::to_wstring(mem_pct) + L"%"}};
+            const float mem_pct_f = sy.mem_total
+                ? std::clamp(static_cast<float>(static_cast<double>(sy.mem_used) * 100.0 / static_cast<double>(sy.mem_total)), 0.0f, 100.0f)
+                : sy.mem_pct_exact;
+            const int mem_pct = static_cast<int>(std::lround(mem_pct_f));
+            const int net_pct = static_cast<int>(std::min<uint64_t>(100, (sy.net_down_bps + sy.net_up_bps) / (1024 * 1024 / 4)));
+            struct Meter { const wchar_t* label; float pct; uint32_t color; std::wstring value; };
+            std::vector<Meter> meters = {
+                {L"CPU", static_cast<float>(sy.cpu_pct), col_cpu, std::to_wstring(sy.cpu_pct) + L"%"},
+                {L"内存", mem_pct_f, col_mem, std::to_wstring(mem_pct) + L"%"},
+            };
             if (wide) {
-                meters.push_back({L"C:", sy.disk_used_pct, 0xFFF5A524u, L"剩 " + FormatBytesCompact(sy.disk_free)});
-                meters.push_back({L"网络", net_pct, 0xFF8E6BE8u, L"↓ " + FormatBytesCompact(sy.net_down_bps) + L"/s"});
+                if (sy.has_vram) {
+                    wchar_t vb[24]{};
+                    std::swprintf(vb, ARRAYSIZE(vb), L"%.1f/%.1fG", sy.vram_used_gb, sy.vram_total_gb);
+                    meters.push_back({L"显存", sy.vram_pct, col_vram, vb});
+                } else {
+                    meters.push_back({L"C:", static_cast<float>(sy.disk_used_pct), col_disk, L"剩 " + FormatBytesCompact(sy.disk_free)});
+                }
+                meters.push_back({L"网络", static_cast<float>(net_pct), col_down, L"↓" + FormatSpeedCompact(sy.net_down_bps)});
             }
             const float slot = (rect.right - rect.left - 12.0f) / static_cast<float>(meters.size());
             for (size_t i = 0; i < meters.size(); ++i) {
                 const auto& m = meters[i];
                 const float x0 = rect.left + 8.0f + slot * static_cast<float>(i);
-                const float rcx = x0 + 22.0f, rad = 14.0f;
-                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(rcx, cy), rad, rad), Brush(dark ? 0x24FFFFFFu : 0x16000000u), 3.2f);
-                DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(m.color), rcx, cy, rad, -90.0f,
-                                3.6f * static_cast<float>(std::clamp(m.pct, 0, 100)), 3.2f, round_stroke_.Get());
+                const float rcx = x0 + 22.0f, rad = 15.0f;
+                DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                   rcx, cy, rad, 3.6f, m.pct, m.color, dark);
                 two_lines(rcx + rad + 8.0f, x0 + slot - 4.0f, m.label, m.value);
             }
             break;
@@ -4860,7 +6172,7 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     switch (tile.kind) {
     case model::TileKind::Photos: {
         ComPtr<ID2D1RoundedRectangleGeometry> clip_geo;
-        d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, 16.0f, 16.0f), &clip_geo);
+        d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, tile_rad, tile_rad), &clip_geo);
         if (clip_geo) {
             d2d_dc_->PushLayer(
                 D2D1::LayerParameters1(rect, clip_geo.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
@@ -4900,46 +6212,32 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
             WallpaperBackdrop::DrawPhotoTileScene(d2d_factory_.Get(), d2d_dc_.Get(), rect, sc_idx, dark);
         }
 
-        // Bottom 45%..100% linear dark scrim + crisp white labels
-        const D2D1_RECT_F scrim_rc = D2D1::RectF(rect.left, rect.top + (rect.bottom - rect.top) * 0.45f,
-                                                 rect.right, rect.bottom);
-        D2D1_GRADIENT_STOP sstops[2] = {
-            {0.0f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.00f)},
-            {1.0f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.62f)},
-        };
-        ComPtr<ID2D1GradientStopCollection> scol;
-        if (SUCCEEDED(d2d_dc_->CreateGradientStopCollection(sstops, 2, &scol)) && scol) {
-            ComPtr<ID2D1LinearGradientBrush> sbr;
-            if (SUCCEEDED(d2d_dc_->CreateLinearGradientBrush(
-                    D2D1::LinearGradientBrushProperties(
-                        D2D1::Point2F(rect.left, scrim_rc.top), D2D1::Point2F(rect.left, scrim_rc.bottom)),
-                    scol.Get(), &sbr)) && sbr) {
-                d2d_dc_->FillRectangle(scrim_rc, sbr.Get());
+        // Bottom 45%..100% linear dark scrim + crisp white labels (honors 小组件 › 照片 › 显示地点和日期)
+        if (state.settings.widgets.photo_caption && (tile.size.cols >= 2 || tile.size.rows >= 2)) {
+            const D2D1_RECT_F scrim_rc = D2D1::RectF(rect.left, rect.top + (rect.bottom - rect.top) * 0.6f,
+                                                     rect.right, rect.bottom);
+            D2D1_GRADIENT_STOP sstops[2] = {
+                {0.0f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.00f)},
+                {1.0f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.42f)},
+            };
+            ComPtr<ID2D1GradientStopCollection> scol;
+            if (SUCCEEDED(d2d_dc_->CreateGradientStopCollection(sstops, 2, &scol)) && scol) {
+                ComPtr<ID2D1LinearGradientBrush> sbr;
+                if (SUCCEEDED(d2d_dc_->CreateLinearGradientBrush(
+                        D2D1::LinearGradientBrushProperties(
+                            D2D1::Point2F(rect.left, scrim_rc.top), D2D1::Point2F(rect.left, scrim_rc.bottom)),
+                        scol.Get(), &sbr)) && sbr) {
+                    d2d_dc_->FillRectangle(scrim_rc, sbr.Get());
+                }
             }
-        }
 
-        const std::wstring cap = tile.title.empty() ? L"照片" : tile.title;
-        DrawWidgetText(cap.c_str(), static_cast<UINT32>(cap.size()), fmt_group_title_.Get(),
-                          D2D1::RectF(rect.left + 15.0f, rect.bottom - 32.0f, rect.right - 15.0f, rect.bottom - 8.0f),
-                          Brush(0xFAFFFFFFu));
-
-        if (tile.size.cols >= 2) {
-            const size_t n_photos = !live_data.photo_paths.empty()
-                                        ? live_data.photo_paths.size()
-                                        : live_data.photo_total_count;
-            wchar_t sub_buf[64]{};
-            if (state.settings.live_tiles_enabled && tile.live_content) {
-                // The tile's own slideshow setting (轮播间隔).
-                const int every = tile_in.photo_interval_s;
-                if (every <= 0) std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"%zu 项 · 手动切换", n_photos);
-                else if (every < 60) std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"%zu 项 · 每 %d 秒换一张", n_photos, every);
-                else std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"%zu 项 · 每 %d 分钟换一张", n_photos, every / 60);
-            } else {
-                std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"%zu 项", n_photos);
-            }
-            DrawWidgetText(sub_buf, static_cast<UINT32>(std::wcslen(sub_buf)), fmt_tile_sub_.Get(),
-                              D2D1::RectF(rect.left + 80.0f, rect.bottom - 32.0f, rect.right - 15.0f, rect.bottom - 8.0f),
-                              Brush(0xCCFFFFFFu));
+            // Only what the picture is: its date (the file's), or the tile's own name when it has one.
+            std::wstring cap = tile.title != L"照片" ? tile.title : std::wstring();
+            if (cap.empty() && !live_data.photo_paths.empty())
+                cap = PhotoDateLabel(live_data.photo_paths[live_data.active_photo_index % live_data.photo_paths.size()]);
+            if (cap.empty()) cap = L"照片";
+            draw_text(cap, FaceFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false),
+                      D2D1::RectF(rect.left + 14.0f, rect.bottom - 31.0f, rect.right - 14.0f, rect.bottom - 11.0f), 0xFAFFFFFFu);
         }
 
         // Hovered with more than one picture: frosted round buttons to step back and forth.
@@ -4959,112 +6257,47 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         // Crisp inner hairline border over photo scene
         d2d_dc_->DrawRoundedRectangle(
             D2D1::RoundedRect(D2D1::RectF(rect.left + 0.5f, rect.top + 0.5f, rect.right - 0.5f, rect.bottom - 0.5f),
-                              16.0f, 16.0f),
-            Brush(hovered ? 0x55FFFFFFu : 0x28FFFFFFu), 1.0f);
+                              tile_rad - 0.5f, tile_rad - 0.5f),
+            Brush(hovered ? 0x40FFFFFFu : 0x1FFFFFFFu), 1.0f);
         break;
     }
 
-    case model::TileKind::Downloads: {
-        const std::wstring title = tile.title.empty() ? L"下载" : tile.title;
-        wchar_t cnt_sub[32]{};
-        std::swprintf(cnt_sub, ARRAYSIZE(cnt_sub), L"%zu 项", live_data.download_items.size());
-        draw_wide_header(title, cnt_sub);
-
-        if (live_data.download_items.empty()) {
-            const wchar_t* empty_txt = L"最近没有新下载";
-            DrawWidgetText(empty_txt, static_cast<UINT32>(std::wcslen(empty_txt)), fmt_empty_hint_.Get(),
-                              D2D1::RectF(rect.left + 14.0f, rect.top + (show_title ? 46.0f : 12.0f), rect.right - 14.0f, rect.bottom - 10.0f),
-                              Brush(text_sec, 0.75f));
-            break;
-        }
-
-        // A hovered row offers 在文件夹中显示 where its time was.
-        auto row_action = [&](const D2D1_RECT_F& row) {
-            const D2D1_RECT_F b = ListRowActionRect(row);
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b, 7.0f, 7.0f), Brush(dark ? 0x22FFFFFFu : 0x12000000u));
-            DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
-                               D2D1::RectF(b.left + 5.0f, b.top + 4.0f, b.right - 5.0f, b.bottom - 4.0f), L"", true);
-        };
-        {
-            const auto& lead = live_data.download_items[0];
-            const D2D1_RECT_F lrc = ListRowRect(model::TileKind::Downloads, rect, 0, show_title);
-            const bool row_hot = hovered && interaction.hovered_tile_row == 0;
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(lrc, 10.0f, 10.0f),
-                                          Brush(dark ? (row_hot ? 0x24FFFFFFu : 0x16FFFFFFu)
-                                                     : (row_hot ? 0x16000000u : 0x0E000000u)));
-            DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
-                               D2D1::RectF(lrc.left + 8.0f, lrc.top + 7.0f, lrc.left + 26.0f, lrc.top + 25.0f),
-                               lead.extension.empty() ? std::wstring_view(lead.name) : std::wstring_view(lead.extension),
-                               lead.is_folder);
-            const std::wstring meta = FormatRelativeTimeOrSize(lead.modified_unix_ms, lead.size_bytes);
-            DrawWidgetText(lead.name.c_str(), static_cast<UINT32>(lead.name.size()), fmt_row_lead_.Get(),
-                              D2D1::RectF(lrc.left + 32.0f, lrc.top, lrc.right - 64.0f, lrc.bottom), Brush(text_pri));
-            if (row_hot) row_action(lrc);
-            else DrawWidgetText(meta.c_str(), static_cast<UINT32>(meta.size()), fmt_row_meta_.Get(),
-                                   D2D1::RectF(lrc.right - 64.0f, lrc.top, lrc.right - 8.0f, lrc.bottom), Brush(text_sec));
-        }
-
-        for (size_t i = 1; i < live_data.download_items.size(); ++i) {
-            const D2D1_RECT_F hrc = ListRowRect(model::TileKind::Downloads, rect, i, show_title);
-            if (hrc.bottom <= hrc.top) break;
-            const float ry = hrc.top;
-            const auto& row = live_data.download_items[i];
-            const bool row_hot = hovered && interaction.hovered_tile_row == static_cast<int>(i);
-            if (row_hot) {
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(hrc, 8.0f, 8.0f),
-                                              Brush(dark ? 0x16FFFFFFu : 0x0E000000u));
-            }
-            DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
-                               D2D1::RectF(rect.left + 16.0f, ry + 5.0f, rect.left + 32.0f, ry + 21.0f),
-                               row.extension.empty() ? std::wstring_view(row.name) : std::wstring_view(row.extension),
-                               row.is_folder);
-            const std::wstring meta = FormatRelativeTimeOrSize(row.modified_unix_ms, row.size_bytes);
-            DrawWidgetText(row.name.c_str(), static_cast<UINT32>(row.name.size()), fmt_row_name_.Get(),
-                              D2D1::RectF(rect.left + 38.0f, ry, rect.right - 68.0f, ry + 26.0f), Brush(text_pri));
-            if (row_hot) row_action(hrc);
-            else DrawWidgetText(meta.c_str(), static_cast<UINT32>(meta.size()), fmt_row_meta_.Get(),
-                                   D2D1::RectF(rect.right - 68.0f, ry, rect.right - 14.0f, ry + 26.0f), Brush(text_sec));
-        }
-        break;
-    }
-
+    case model::TileKind::Downloads:
     case model::TileKind::Recent: {
-        const std::wstring title = tile.title.empty() ? L"最近使用" : tile.title;
-        draw_wide_header(title, L"Pulse 和应用");
-
-        if (live_data.recent_items.empty()) {
-            const wchar_t* empty_txt = L"暂无最近打开的文件";
-            DrawWidgetText(empty_txt, static_cast<UINT32>(std::wcslen(empty_txt)), fmt_empty_hint_.Get(),
-                              D2D1::RectF(rect.left + 14.0f, rect.top + (show_title ? 46.0f : 12.0f), rect.right - 14.0f, rect.bottom - 10.0f),
-                              Brush(text_sec, 0.75f));
+        const bool is_dl = tile.kind == model::TileKind::Downloads;
+        const auto& items = is_dl ? live_data.download_items : live_data.recent_items;
+        const std::wstring title = !tile.title.empty() ? tile.title : is_dl ? L"下载" : L"最近使用";
+        wchar_t cnt_sub[32]{};
+        if (is_dl && !items.empty()) std::swprintf(cnt_sub, ARRAYSIZE(cnt_sub), L"%zu 项", items.size());
+        draw_wide_header(title, cnt_sub);
+        if (items.empty()) {
+            const std::wstring empty_txt = is_dl ? L"下载文件夹是空的" : L"还没有最近打开的文件";
+            draw_text(empty_txt, FaceFormat(12.5f, DWRITE_FONT_WEIGHT_MEDIUM, false),
+                      D2D1::RectF(rect.left + 14.0f, (rect.top + rect.bottom) * 0.5f - 8.0f, rect.right - 14.0f, (rect.top + rect.bottom) * 0.5f + 12.0f),
+                      text_sec, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
             break;
         }
-
-        for (size_t i = 0; i < live_data.recent_items.size(); ++i) {
-            const D2D1_RECT_F hrc = ListRowRect(model::TileKind::Recent, rect, i, show_title);
-            if (hrc.bottom <= hrc.top) break;
-            const float ry = hrc.top;
-            const auto& row = live_data.recent_items[i];
+        for (size_t i = 0; i < items.size(); ++i) {
+            const D2D1_RECT_F row = ListRowRect(tile.kind, rect, i, show_title);
+            if (row.bottom <= row.top) break;
+            const auto& it = items[i];
             const bool row_hot = hovered && interaction.hovered_tile_row == static_cast<int>(i);
-            if (row_hot) {
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(hrc, 8.0f, 8.0f),
-                                              Brush(dark ? 0x16FFFFFFu : 0x0E000000u));
-            }
+            if (row_hot) d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(row, 9.0f, 9.0f), Brush(dark ? 0x1CFFFFFFu : 0x10000000u));
+            const float cy = (row.top + row.bottom) * 0.5f;
             DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
-                               D2D1::RectF(rect.left + 15.0f, ry + 5.0f, rect.left + 31.0f, ry + 21.0f),
-                               row.extension.empty() ? std::wstring_view(row.name) : std::wstring_view(row.extension),
-                               row.is_folder);
-            const std::wstring meta = FormatRelativeTimeOrSize(row.modified_unix_ms, row.size_bytes);
-            DrawWidgetText(row.name.c_str(), static_cast<UINT32>(row.name.size()), fmt_row_name_.Get(),
-                              D2D1::RectF(rect.left + 37.0f, ry, rect.right - 68.0f, ry + 26.0f), Brush(text_pri));
+                               D2D1::RectF(row.left + 6.0f, cy - 12.0f, row.left + 30.0f, cy + 12.0f),
+                               it.extension.empty() ? std::wstring_view(it.name) : std::wstring_view(it.extension), it.is_folder);
+            const float tr = row.right - (row_hot ? 34.0f : 6.0f);
+            draw_text(it.name, FaceFormat(12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false),
+                      D2D1::RectF(row.left + 38.0f, row.top + 3.0f, tr, row.top + 21.0f), text_pri);
+            draw_text(FormatRelativeTimeOrSize(it.modified_unix_ms, it.size_bytes), FaceFormat(11.0f, DWRITE_FONT_WEIGHT_MEDIUM, false),
+                      D2D1::RectF(row.left + 38.0f, row.top + 21.0f, tr, row.top + 37.0f), text_sec);
             if (row_hot) {
-                const D2D1_RECT_F b = ListRowActionRect(hrc);
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b, 7.0f, 7.0f), Brush(dark ? 0x22FFFFFFu : 0x12000000u));
+                // 在文件夹中显示 at the row's right end.
+                const D2D1_RECT_F bx = ListRowActionRect(row);
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(bx, 7.0f, 7.0f), Brush(dark ? 0x22FFFFFFu : 0x12000000u));
                 DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
-                                   D2D1::RectF(b.left + 5.0f, b.top + 4.0f, b.right - 5.0f, b.bottom - 4.0f), L"", true);
-            } else {
-                DrawWidgetText(meta.c_str(), static_cast<UINT32>(meta.size()), fmt_row_meta_.Get(),
-                                  D2D1::RectF(rect.right - 68.0f, ry, rect.right - 14.0f, ry + 26.0f), Brush(text_sec));
+                                   D2D1::RectF(bx.left + 5.0f, bx.top + 4.0f, bx.right - 5.0f, bx.bottom - 4.0f), L"", true);
             }
         }
         break;
@@ -5184,52 +6417,49 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
                                                 : L'C');
         const std::wstring free_compact = ds.total_bytes > 0 ? FormatBytesCompact(ds.free_bytes) : L"140 GB";
 
+        const uint32_t disk_col = (ratio >= 0.86f) ? col_red : ((ratio >= 0.72f) ? col_disk : col_mem);
         if (tile.size.cols == 1) {
             const float cx = (rect.left + rect.right) * 0.5f;
-            const float cy = rect.top + 38.0f;
+            const float cy = rect.top + 37.0f;
             const float rad = 22.0f;
-            d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad),
-                                 Brush(dark ? 0x24FFFFFFu : 0x16000000u), 4.2f);
-            DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(),
-                            Brush(ratio > 0.90f ? 0xFFE5484Du : hue),
-                            cx, cy, rad, -90.0f, ratio * 360.0f, 4.2f, round_stroke_.Get());
+            DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, 30.0f, disk_col, dark);
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, rad, 4.6f, ratio * 100.0f, disk_col, dark);
 
             wchar_t pct_buf[16]{};
             std::swprintf(pct_buf, ARRAYSIZE(pct_buf), L"%d%%", static_cast<int>(std::round(ratio * 100.0f)));
-            DrawWidgetText(pct_buf, static_cast<UINT32>(std::wcslen(pct_buf)), fmt_disk_pct_.Get(),
-                              D2D1::RectF(cx - rad, cy - 11.0f, cx + rad, cy + 11.0f), Brush(text_pri));
+            draw_text(pct_buf, fmt_disk_pct_.Get(),
+                      D2D1::RectF(cx - rad, cy - 11.0f, cx + rad, cy + 11.0f), text_pri);
 
             wchar_t foot_buf[48]{};
             std::swprintf(foot_buf, ARRAYSIZE(foot_buf), L"%lc: 剩 %ls", drive_letter, free_compact.c_str());
-            DrawWidgetText(foot_buf, static_cast<UINT32>(std::wcslen(foot_buf)), fmt_tile_small_title_.Get(),
-                              D2D1::RectF(rect.left + 4.0f, rect.bottom - 26.0f, rect.right - 4.0f, rect.bottom - 6.0f),
-                              Brush(text_pri));
+            const D2D1_RECT_F foot_pill = D2D1::RectF(rect.left + 8.0f, rect.bottom - 26.0f, rect.right - 8.0f, rect.bottom - 7.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), foot_pill, 9.5f, dark);
+            draw_text(foot_buf, fmt_clock_num_.Get(), foot_pill, text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
         } else {
             wchar_t hdr_t[32]{};
             std::swprintf(hdr_t, ARRAYSIZE(hdr_t), L"本地磁盘 (%lc:)", drive_letter);
             draw_wide_header(hdr_t, L"剩 " + free_compact);
-            const float cx = rect.left + 42.0f;
-            const float cy = rect.top + 70.0f;
-            d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 22.0f, 22.0f),
-                                 Brush(dark ? 0x24FFFFFFu : 0x16000000u), 4.2f);
-            DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(ratio > 0.90f ? 0xFFE5484Du : hue),
-                            cx, cy, 22.0f, -90.0f, ratio * 360.0f, 4.2f, round_stroke_.Get());
+            const float cx = rect.left + 44.0f;
+            const float cy = rect.top + 72.0f;
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, 23.0f, 4.6f, ratio * 100.0f, disk_col, dark);
             wchar_t pct_buf[16]{};
             std::swprintf(pct_buf, ARRAYSIZE(pct_buf), L"%d%%", static_cast<int>(std::round(ratio * 100.0f)));
-            DrawWidgetText(pct_buf, static_cast<UINT32>(std::wcslen(pct_buf)), fmt_disk_pct_.Get(),
-                              D2D1::RectF(cx - 22.0f, cy - 10.0f, cx + 22.0f, cy + 10.0f), Brush(text_pri));
+            draw_text(pct_buf, fmt_disk_pct_.Get(),
+                      D2D1::RectF(cx - 22.0f, cy - 10.0f, cx + 22.0f, cy + 10.0f), text_pri);
             if (ds.total_bytes > 0) {
                 const std::wstring used_line = L"已用 " + FormatBytesCompact(used);
                 const std::wstring total_line = L"共 " + FormatBytesCompact(ds.total_bytes) + L" · 可用 " + free_compact;
-                DrawWidgetText(used_line.c_str(), static_cast<UINT32>(used_line.size()), fmt_row_lead_.Get(),
-                                  D2D1::RectF(rect.left + 76.0f, rect.top + 50.0f, rect.right - 12.0f, rect.top + 70.0f),
-                                  Brush(text_pri));
-                DrawWidgetText(total_line.c_str(), static_cast<UINT32>(total_line.size()), fmt_caption_.Get(),
-                                  D2D1::RectF(rect.left + 76.0f, rect.top + 70.0f, rect.right - 12.0f, rect.top + 90.0f),
-                                  Brush(text_sec));
+                draw_text(used_line, fmt_row_lead_.Get(),
+                          D2D1::RectF(rect.left + 78.0f, rect.top + 52.0f, rect.right - 12.0f, rect.top + 72.0f),
+                          text_pri);
+                draw_text(total_line, fmt_caption_.Get(),
+                          D2D1::RectF(rect.left + 78.0f, rect.top + 72.0f, rect.right - 12.0f, rect.top + 92.0f),
+                          text_sec);
             }
             if (tile.size.rows >= 2 && live_data.drives.size() > 1) {
-                float dy = rect.top + 108.0f;
+                float dy = rect.top + 110.0f;
                 for (size_t di = 1; di < live_data.drives.size() && dy + 24.0f <= rect.bottom - 8.0f; ++di) {
                     const auto& drv = live_data.drives[di];
                     const uint64_t du = drv.total_bytes > drv.free_bytes ? (drv.total_bytes - drv.free_bytes) : 0;
@@ -5237,17 +6467,17 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
                         ? std::clamp(static_cast<float>(static_cast<double>(du) / static_cast<double>(drv.total_bytes)), 0.0f, 1.0f)
                         : 0.0f;
                     const std::wstring dlbl = drv.root_path.size() >= 2 ? drv.root_path.substr(0, 2) : L"D:";
-                    DrawWidgetText(dlbl.c_str(), static_cast<UINT32>(dlbl.size()), fmt_row_meta_.Get(),
-                                      D2D1::RectF(rect.left + 16.0f, dy, rect.left + 44.0f, dy + 20.0f), Brush(text_pri));
+                    draw_text(dlbl, fmt_row_meta_.Get(),
+                              D2D1::RectF(rect.left + 14.0f, dy, rect.left + 42.0f, dy + 20.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
                     const float bx0 = rect.left + 46.0f, bx1 = rect.right - 76.0f;
                     d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, dy + 7.0f, bx1, dy + 13.0f), 3.0f, 3.0f),
-                                                  Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
+                                                  Brush(dark ? 0x1EFFFFFFu : 0x14000000u));
                     d2d_dc_->FillRoundedRectangle(
                         D2D1::RoundedRect(D2D1::RectF(bx0, dy + 7.0f, bx0 + (bx1 - bx0) * dr, dy + 13.0f), 3.0f, 3.0f),
-                        Brush(dr > 0.90f ? 0xFFE5484Du : hue));
+                        Brush(dr > 0.90f ? col_red : (dr > 0.75f ? col_disk : col_cpu)));
                     const std::wstring dfree = L"剩 " + FormatBytesCompact(drv.free_bytes);
-                    DrawWidgetText(dfree.c_str(), static_cast<UINT32>(dfree.size()), fmt_row_meta_.Get(),
-                                      D2D1::RectF(rect.right - 72.0f, dy, rect.right - 12.0f, dy + 20.0f), Brush(text_sec));
+                    draw_text(dfree, fmt_row_meta_.Get(),
+                              D2D1::RectF(rect.right - 72.0f, dy, rect.right - 12.0f, dy + 20.0f), text_sec);
                     dy += 26.0f;
                 }
             }
@@ -5259,7 +6489,10 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         if (tile.size.cols == 1) {
             const float cx = (rect.left + rect.right) * 0.5f;
             const float btop = rect.top + 17.0f;
-            const D2D1_RECT_F brc = D2D1::RectF(cx - 24.0f, btop - 2.0f, cx + 24.0f, btop + 46.0f);
+            DrawTahoeIconAura(d2d_dc_.Get(), cx, btop + 22.0f, 34.0f, 0xFF7B68FFu, dark);
+            const D2D1_RECT_F plate = D2D1::RectF(cx - 26.0f, btop - 4.0f, cx + 26.0f, btop + 48.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), plate, 13.0f, dark);
+            const D2D1_RECT_F brc = D2D1::RectF(cx - 21.0f, btop + 1.0f, cx + 21.0f, btop + 43.0f);
             DrawPulseLogo(d2d_dc_.Get(), brc);
 
             const wchar_t* lbl = L"Pulse";
@@ -5284,104 +6517,227 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     case model::TileKind::Clock: {
         SYSTEMTIME st{};
         GetLocalTime(&st);
-        static constexpr const wchar_t* kWeekdays[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
+        static constexpr const wchar_t* kWeekdays[7] = {L"星期日", L"星期一", L"星期二", L"星期三", L"星期四", L"星期五", L"星期六"};
+        static constexpr const wchar_t* kWeekShort[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
 
-        auto draw_analog_dial = [&](float cx, float cy, float rad) {
-            d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad),
-                                 Brush(dark ? 0x12FFFFFFu : 0x0C000000u));
-            d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad),
-                                 Brush(dark ? 0x30FFFFFFu : 0x24000000u), 1.2f);
-            for (int i = 0; i < 12; ++i) {
-                const float ang = static_cast<float>(i * 30 - 90) * (kPi / 180.0f);
-                const bool major = (i % 3 == 0);
-                const float r_in = rad - (major ? (rad * 0.20f) : (rad * 0.12f));
-                const float r_out = rad - 1.8f;
-                d2d_dc_->DrawLine(
-                    D2D1::Point2F(cx + std::cos(ang) * r_in, cy + std::sin(ang) * r_in),
-                    D2D1::Point2F(cx + std::cos(ang) * r_out, cy + std::sin(ang) * r_out),
-                    Brush(major ? text_pri : text_sec, major ? 0.78f : 0.45f),
-                    major ? 1.5f : 1.0f, round_stroke_.Get());
+        auto draw_world_row = [&](const D2D1_RECT_F& area, size_t max_cities, float dial_r, bool compact_diff) {
+            const auto cities = QueryWorldClocks();
+            const size_t n = std::min(max_cities, cities.size());
+            if (n == 0) return;
+            const float col_w = (area.right - area.left) / static_cast<float>(n);
+            const float dcy = area.top + dial_r + 2.0f;
+            for (size_t i = 0; i < n; ++i) {
+                const auto& c = cities[i];
+                const float dcx = area.left + col_w * (static_cast<float>(i) + 0.5f);
+                DrawTahoeAnalogDial(d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                    dcx, dcy, dial_r, c.local_time, dark, c.is_night,
+                                    false, dial_r >= 26.0f, dial_num_fn);
+                const float ly = dcy + dial_r + 4.0f;
+                draw_text(c.label, fmt_tile_small_title_.Get(),
+                          D2D1::RectF(dcx - col_w * 0.5f, ly, dcx + col_w * 0.5f, ly + 16.0f),
+                          text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                if (compact_diff) {
+                    const std::wstring diff = c.day_label + L" " + c.offset_label;
+                    draw_text(diff, fmt_clock_num_.Get(),
+                              D2D1::RectF(dcx - col_w * 0.5f, ly + 15.0f, dcx + col_w * 0.5f, ly + 29.0f),
+                              text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                } else {
+                    draw_text(c.offset_label, fmt_clock_num_.Get(),
+                              D2D1::RectF(dcx - col_w * 0.5f, ly + 15.0f, dcx + col_w * 0.5f, ly + 28.0f),
+                              text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
             }
-            const float hr_ang = (((st.wHour % 12) + st.wMinute / 60.0f) * 30.0f - 90.0f) * (kPi / 180.0f);
-            const float mn_ang = ((st.wMinute + st.wSecond / 60.0f) * 6.0f - 90.0f) * (kPi / 180.0f);
-            const float sc_ang = (st.wSecond * 6.0f - 90.0f) * (kPi / 180.0f);
-            d2d_dc_->DrawLine(D2D1::Point2F(cx, cy),
-                              D2D1::Point2F(cx + std::cos(hr_ang) * rad * 0.50f, cy + std::sin(hr_ang) * rad * 0.50f),
-                              Brush(text_pri), rad >= 40.0f ? 3.2f : 2.8f, round_stroke_.Get());
-            d2d_dc_->DrawLine(D2D1::Point2F(cx, cy),
-                              D2D1::Point2F(cx + std::cos(mn_ang) * rad * 0.72f, cy + std::sin(mn_ang) * rad * 0.72f),
-                              Brush(text_pri, 0.90f), rad >= 40.0f ? 2.2f : 1.9f, round_stroke_.Get());
-            d2d_dc_->DrawLine(D2D1::Point2F(cx - std::cos(sc_ang) * 4.5f, cy - std::sin(sc_ang) * 4.5f),
-                              D2D1::Point2F(cx + std::cos(sc_ang) * rad * 0.78f, cy + std::sin(sc_ang) * rad * 0.78f),
-                              Brush(0xFFFF9F5Au), 1.1f, round_stroke_.Get());
-            d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 2.4f, 2.4f), Brush(0xFFFF9F5Au));
         };
 
         if (tile.analog_clock) {
             if (tile.size.cols == 1) {
-                draw_analog_dial((rect.left + rect.right) * 0.5f, rect.top + 40.0f, 29.5f);
-                const wchar_t* wk = kWeekdays[st.wDayOfWeek % 7];
-                DrawWidgetText(wk, static_cast<UINT32>(std::wcslen(wk)), fmt_pill_.Get(),
-                                  D2D1::RectF(rect.left + 4.0f, rect.bottom - 24.0f, rect.right - 4.0f, rect.bottom - 5.0f),
-                                  Brush(text_sec));
+                const float rad = std::clamp(std::min(rw - 20.0f, rh - 30.0f) * 0.5f, 22.0f, 36.0f);
+                DrawTahoeAnalogDial(d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                    (rect.left + rect.right) * 0.5f, rect.top + rad + 8.0f,
+                                    rad, st, dark, false, true, true, dial_num_fn);
+                draw_text(kWeekShort[st.wDayOfWeek % 7], fmt_pill_.Get(),
+                          D2D1::RectF(rect.left + 4.0f, rect.bottom - 22.0f, rect.right - 4.0f, rect.bottom - 4.0f),
+                          text_sec);
             } else if (tile.size.rows == 1) {
-                draw_analog_dial(rect.left + 48.0f, (rect.top + rect.bottom) * 0.5f, 33.0f);
+                const float rad = std::clamp((rh - 18.0f) * 0.5f, 24.0f, 38.0f);
+                const float dcx = rect.left + 14.0f + rad;
+                const float dcy = (rect.top + rect.bottom) * 0.5f;
+                DrawTahoeAnalogDial(d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                    dcx, dcy, rad, st, dark, false, true, true, dial_num_fn);
                 wchar_t time_buf[16]{};
                 std::swprintf(time_buf, ARRAYSIZE(time_buf), L"%02u:%02u", st.wHour, st.wMinute);
-                DrawWidgetText(time_buf, static_cast<UINT32>(std::wcslen(time_buf)), fmt_clock_big_.Get(),
-                                  D2D1::RectF(rect.left + 94.0f, rect.top + 12.0f, rect.right - 12.0f, rect.top + 60.0f),
-                                  Brush(text_pri));
+                const float tx = dcx + rad + 12.0f;
+                const bool show_world = (tile.size.cols >= 4 && rw >= 340.0f);
+                const float tright = show_world ? (rect.left + rw * 0.54f) : (rect.right - 12.0f);
+                draw_text(time_buf, fmt_clock_big_.Get(),
+                          D2D1::RectF(tx, rect.top + 8.0f, tright, rect.top + 58.0f), text_pri);
                 wchar_t date_buf[48]{};
                 std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u月%u日 %ls",
                               st.wMonth, st.wDay, kWeekdays[st.wDayOfWeek % 7]);
-                DrawWidgetText(date_buf, static_cast<UINT32>(std::wcslen(date_buf)), fmt_caption_.Get(),
-                                  D2D1::RectF(rect.left + 96.0f, rect.bottom - 30.0f, rect.right - 12.0f, rect.bottom - 8.0f),
-                                  Brush(text_sec));
+                draw_text(date_buf, fmt_caption_.Get(),
+                          D2D1::RectF(tx + 2.0f, rect.bottom - 30.0f, tright, rect.bottom - 8.0f), text_sec);
+                if (show_world) {
+                    const D2D1_RECT_F world_card = D2D1::RectF(tright + 6.0f, rect.top + 8.0f, rect.right - 10.0f, rect.bottom - 8.0f);
+                    DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), world_card, 11.0f, dark);
+                    const auto cities = QueryWorldClocks();
+                    // Show 2 international cities (Tokyo & New York) when wide 4x1.
+                    const size_t pick[2] = {1, 3};
+                    const float w0 = world_card.left + 4.0f;
+                    const float col_w = (world_card.right - 4.0f - w0) * 0.5f;
+                    const float mr = std::clamp((rh - 40.0f) * 0.42f, 17.0f, 22.0f);
+                    for (int k = 0; k < 2; ++k) {
+                        if (pick[k] >= cities.size()) continue;
+                        const auto& c = cities[pick[k]];
+                        const float mcx = w0 + col_w * (static_cast<float>(k) + 0.5f);
+                        const float mcy = world_card.top + 6.0f + mr;
+                        DrawTahoeAnalogDial(d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                            mcx, mcy, mr, c.local_time, dark, c.is_night, false, false);
+                        draw_text(c.label + L" " + c.offset_label, fmt_clock_num_.Get(),
+                                  D2D1::RectF(mcx - col_w * 0.5f, mcy + mr + 3.0f, mcx + col_w * 0.5f, world_card.bottom - 3.0f),
+                                  text_sec, 0.95f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                    }
+                }
+            } else if (tile.size.cols >= 4) {
+                // 4x2 / 4x4: Left Tahoe crystal analog dial + Right digital time, full date & world clocks.
+                const bool tall = (rh >= 300.0f);
+                const float top_h = tall ? (rh * 0.50f) : rh;
+                const float rad = std::clamp(std::min(rw * 0.38f, top_h - 24.0f) * 0.5f, 44.0f, 82.0f);
+                const float dcx = rect.left + 20.0f + rad;
+                const float dcy = rect.top + top_h * 0.5f;
+                DrawTahoeAnalogDial(d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                    dcx, dcy, rad, st, dark, false, true, true, dial_num_fn);
+
+                const float rx = dcx + rad + 22.0f;
+                const float rr = rect.right - 16.0f;
+                wchar_t time_buf[16]{};
+                std::swprintf(time_buf, ARRAYSIZE(time_buf), L"%02u:%02u", st.wHour, st.wMinute);
+                const float ty = rect.top + std::max(18.0f, (top_h - 122.0f) * 0.42f);
+                draw_text(time_buf, fmt_hero_num_.Get(), D2D1::RectF(rx - 2.0f, ty, rr, ty + 58.0f), text_pri);
+                draw_text(kWeekdays[st.wDayOfWeek % 7], fmt_group_title_.Get(),
+                          D2D1::RectF(rx, ty + 62.0f, rr, ty + 82.0f), text_pri, 0.92f);
+                wchar_t date_buf[48]{};
+                std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u年%u月%u日", st.wYear, st.wMonth, st.wDay);
+                draw_text(date_buf, fmt_caption_.Get(),
+                          D2D1::RectF(rx, ty + 84.0f, rr, ty + 102.0f), text_sec);
+
+                if (tall) {
+                    const float hy = rect.top + top_h + 2.0f;
+                    d2d_dc_->FillRectangle(D2D1::RectF(rect.left + 16.0f, hy, rect.right - 16.0f, hy + 1.0f),
+                                           Brush(dark ? 0x20FFFFFFu : 0x14000000u));
+                    const float wr = std::clamp((rect.bottom - hy - 60.0f) * 0.45f, 26.0f, 44.0f);
+                    draw_world_row(D2D1::RectF(rect.left + 12.0f, hy + 14.0f, rect.right - 12.0f, rect.bottom - 10.0f),
+                                   4, wr, true);
+                } else if (rect.bottom - (ty + 108.0f) >= 34.0f) {
+                    // Sleek bottom-right glass pill with live world city clocks.
+                    const D2D1_RECT_F wpill = D2D1::RectF(rx, rect.bottom - 42.0f, rr, rect.bottom - 14.0f);
+                    DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), wpill, 10.0f, dark);
+                    const auto cities = QueryWorldClocks();
+                    std::wstring strip;
+                    for (size_t idx : {size_t{1}, size_t{2}, size_t{3}}) {
+                        if (idx >= cities.size()) continue;
+                        if (!strip.empty()) strip += L"  ·  ";
+                        wchar_t cb[24]{};
+                        std::swprintf(cb, ARRAYSIZE(cb), L"%ls %02u:%02u",
+                                      cities[idx].label.c_str(), cities[idx].local_time.wHour, cities[idx].local_time.wMinute);
+                        strip += cb;
+                    }
+                    if (!strip.empty()) {
+                        draw_text(strip, fmt_clock_num_.Get(),
+                                  D2D1::RectF(wpill.left + 8.0f, wpill.top + 2.0f, wpill.right - 8.0f, wpill.bottom - 2.0f),
+                                  text_sec, 0.96f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                    }
+                }
             } else {
-                const float rw = rect.right - rect.left;
-                const float rh = rect.bottom - rect.top;
+                // 2x2: Full luxury Tahoe analog dial + sleek bottom glass date pill.
                 const float footer_h = 34.0f;
-                const float rad = std::clamp(std::min(rw - 28.0f, rh - footer_h - 18.0f) * 0.5f, 24.0f, 120.0f);
-                const float dial_cy = rect.top + (rh - footer_h) * 0.5f;
-                draw_analog_dial((rect.left + rect.right) * 0.5f, dial_cy, rad);
-                wchar_t date_buf[64]{};
-                std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%02u:%02u:%02u · %u月%u日 %ls",
-                              st.wHour, st.wMinute, st.wSecond, st.wMonth, st.wDay, kWeekdays[st.wDayOfWeek % 7]);
-                DrawWidgetText(date_buf, static_cast<UINT32>(std::wcslen(date_buf)), fmt_tile_small_title_.Get(),
-                                  D2D1::RectF(rect.left + 12.0f, rect.bottom - 34.0f, rect.right - 12.0f, rect.bottom - 10.0f),
-                                  Brush(text_sec));
+                const float rad = std::clamp(std::min(rw - 24.0f, rh - footer_h - 18.0f) * 0.5f, 34.0f, 110.0f);
+                const float dial_cy = rect.top + (rh - footer_h) * 0.5f + 2.0f;
+                DrawTahoeAnalogDial(d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                    (rect.left + rect.right) * 0.5f, dial_cy,
+                                    rad, st, dark, false, true, true, dial_num_fn);
+                wchar_t date_buf[48]{};
+                std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u月%u日 %ls",
+                              st.wMonth, st.wDay, kWeekdays[st.wDayOfWeek % 7]);
+                const float pw = std::min(rw - 24.0f, MeasureSingleLineWidth(date_buf, fmt_pill_.Get(), rw - 32.0f) + 22.0f);
+                const float cx = (rect.left + rect.right) * 0.5f;
+                const D2D1_RECT_F pill = D2D1::RectF(cx - pw * 0.5f, rect.bottom - 31.0f, cx + pw * 0.5f, rect.bottom - 10.0f);
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), pill, 10.5f, dark);
+                draw_text(date_buf, fmt_pill_.Get(), pill, text_pri, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
             }
         } else {
             wchar_t time_buf[16]{};
             std::swprintf(time_buf, ARRAYSIZE(time_buf), L"%02u:%02u", st.wHour, st.wMinute);
-            const float pad_x = tile.size.cols == 1 ? 8.0f : 16.0f;
-            const float time_top = tile.size.cols == 1
-                ? rect.top + 22.0f
-                : rect.top + std::max(12.0f, (rect.bottom - rect.top - 72.0f) * 0.35f);
-            DrawWidgetText(time_buf, static_cast<UINT32>(std::wcslen(time_buf)),
-                              tile.size.cols == 1 ? fmt_group_title_.Get() : fmt_clock_big_.Get(),
-                              D2D1::RectF(rect.left + pad_x, time_top,
-                                          rect.right - pad_x, time_top + 50.0f),
-                              Brush(text_pri));
-            wchar_t date_buf[48]{};
-            std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u月%u日 %ls",
-                          st.wMonth, st.wDay, kWeekdays[st.wDayOfWeek % 7]);
-            DrawWidgetText(date_buf, static_cast<UINT32>(std::wcslen(date_buf)),
-                              tile.size.cols == 1 ? fmt_pill_.Get() : fmt_caption_.Get(),
+            if (tile.size.cols == 1) {
+                draw_text(time_buf, fmt_group_title_.Get(),
+                          D2D1::RectF(rect.left + 6.0f, rect.top + 18.0f, rect.right - 6.0f, rect.top + 48.0f),
+                          text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                wchar_t date_buf[32]{};
+                std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u月%u日", st.wMonth, st.wDay);
+                draw_text(date_buf, fmt_pill_.Get(),
+                          D2D1::RectF(rect.left + 4.0f, rect.bottom - 40.0f, rect.right - 4.0f, rect.bottom - 22.0f),
+                          text_sec);
+                draw_text(kWeekShort[st.wDayOfWeek % 7], fmt_pill_.Get(),
+                          D2D1::RectF(rect.left + 4.0f, rect.bottom - 24.0f, rect.right - 4.0f, rect.bottom - 6.0f),
+                          text_sec, 0.85f);
+            } else if (tile.size.cols >= 4 && tile.size.rows >= 2) {
+                // 4x2 / 4x4 digital: crisp Tahoe header time + 4-city World Clock dial strip!
+                const float top_h = (rh >= 300.0f) ? 104.0f : 72.0f;
+                draw_text(time_buf, rh >= 300.0f ? fmt_hero_num_.Get() : fmt_clock_big_.Get(),
+                          D2D1::RectF(rect.left + 18.0f, rect.top + 10.0f, rect.left + 190.0f, rect.top + top_h - 6.0f),
+                          text_pri);
+                wchar_t date_buf[48]{};
+                std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u年%u月%u日", st.wYear, st.wMonth, st.wDay);
+                draw_text(kWeekdays[st.wDayOfWeek % 7], fmt_group_title_.Get(),
+                          D2D1::RectF(rect.left + 180.0f, rect.top + 16.0f, rect.right - 18.0f, rect.top + 38.0f),
+                          text_pri, 0.95f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                draw_text(date_buf, fmt_caption_.Get(),
+                          D2D1::RectF(rect.left + 180.0f, rect.top + 38.0f, rect.right - 18.0f, rect.top + 58.0f),
+                          text_sec, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                const float hy = rect.top + top_h;
+                d2d_dc_->FillRectangle(D2D1::RectF(rect.left + 16.0f, hy, rect.right - 16.0f, hy + 1.0f),
+                                       Brush(dark ? 0x20FFFFFFu : 0x14000000u));
+                const float wr = std::clamp((rect.bottom - hy - 48.0f) * 0.44f, 22.0f, 44.0f);
+                draw_world_row(D2D1::RectF(rect.left + 10.0f, hy + 10.0f, rect.right - 10.0f, rect.bottom - 8.0f),
+                               4, wr, rh >= 240.0f);
+            } else {
+                const float pad_x = 16.0f;
+                const float time_top = rect.top + std::max(14.0f, (rh - 84.0f) * 0.36f);
+                draw_text(time_buf, tile.size.rows >= 2 ? fmt_hero_num_.Get() : fmt_clock_big_.Get(),
+                          D2D1::RectF(rect.left + pad_x, time_top, rect.right - pad_x, time_top + 56.0f),
+                          text_pri);
+                wchar_t date_buf[48]{};
+                if (tile.size.rows >= 2) {
+                    draw_text(kWeekdays[st.wDayOfWeek % 7], fmt_group_title_.Get(),
+                              D2D1::RectF(rect.left + pad_x, rect.bottom - 52.0f, rect.right - pad_x, rect.bottom - 32.0f),
+                              text_pri, 0.90f);
+                    std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u年%u月%u日", st.wYear, st.wMonth, st.wDay);
+                    draw_text(date_buf, fmt_caption_.Get(),
+                              D2D1::RectF(rect.left + pad_x, rect.bottom - 30.0f, rect.right - pad_x, rect.bottom - 10.0f),
+                              text_sec);
+                } else {
+                    std::swprintf(date_buf, ARRAYSIZE(date_buf), L"%u月%u日 %ls",
+                                  st.wMonth, st.wDay, kWeekdays[st.wDayOfWeek % 7]);
+                    draw_text(date_buf, fmt_caption_.Get(),
                               D2D1::RectF(rect.left + pad_x, rect.bottom - 30.0f, rect.right - pad_x, rect.bottom - 8.0f),
-                              Brush(text_sec));
+                              text_sec);
+                }
+            }
         }
         break;
     }
 
     case model::TileKind::StickyNote: {
-        // Paper and ink per colour (便笺颜色): dark theme keeps a deep tint, light theme a pastel.
-        static constexpr uint32_t kNoteDark[6] = {0x6676621Eu, 0x5C2F6B3Eu, 0x5C2C5A86u, 0x5C7A3256u, 0x5C523A86u, 0x5C4A4F5Au};
-        static constexpr uint32_t kNoteLight[6] = {0xB4FCE178u, 0xB4C8EFB4u, 0xB4BFDDF8u, 0xB4F8C9DCu, 0xB4DCCDF8u, 0xB4E3E6EBu};
-        static constexpr uint32_t kInkLight[6] = {0xF23A2A0Du, 0xF2173A22u, 0xF2133250u, 0xF24A1733u, 0xF22E1F55u, 0xF2262A30u};
-        static constexpr uint32_t kInkDark[6] = {0xF2FFF6D6u, 0xF2E3FFE8u, 0xF2E0F0FFu, 0xF2FFE3F0u, 0xF2EEE6FFu, 0xF2F0F2F5u};
+        // Authentic Apple Notes aesthetic: pastel/warm tinted paper, rich top gradient header ribbon,
+        // subtle dashed tear hairline, and delicate notebook guide rules.
+        static constexpr uint32_t kNoteDark[6]   = {0x5A6E5918u, 0x52265E35u, 0x52244F78u, 0x526D2A4Bu, 0x5248337Au, 0x523F4450u};
+        static constexpr uint32_t kNoteLight[6]  = {0xBCFFF0B5u, 0xBCD8F6DAu, 0xBCD0E8FFu, 0xBCFFD9E8u, 0xBCE8DCFFu, 0xBCEEF0F4u};
+        static constexpr uint32_t kHeadDark[6]   = {0xCC8A6712u, 0xCC266D3Bu, 0xCC235D94u, 0xCC8A2D5Au, 0xCC5B3C9Cu, 0xCC4B5260u};
+        static constexpr uint32_t kHeadLight[6]  = {0xECF6C84Au, 0xEC77CE86u, 0xEC6AB4F5u, 0xECF08CB8u, 0xECB297F5u, 0xECB8C0CCu};
+        static constexpr uint32_t kInkLight[6]   = {0xF23A2A0Du, 0xF2173A22u, 0xF2133250u, 0xF24A1733u, 0xF22E1F55u, 0xF2262A30u};
+        static constexpr uint32_t kInkDark[6]    = {0xF5FFF6D6u, 0xF5E3FFE8u, 0xF5E0F0FFu, 0xF5FFE3F0u, 0xF5EEE6FFu, 0xF5F0F2F5u};
         const int nc = std::clamp(tile_in.note_color, 0, 5);
         const uint32_t note_tint = dark ? kNoteDark[nc] : kNoteLight[nc];
+        const uint32_t head_tint = dark ? kHeadDark[nc] : kHeadLight[nc];
         d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rect, 16.0f, 16.0f), Brush(note_tint));
         if (with_grain) {
             if (auto* nb = backdrop_.EnsureNoiseBrush(d2d_dc_.Get())) {
@@ -5391,13 +6747,61 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
             }
         }
         const std::wstring title = tile.title.empty() ? L"便笺" : tile.title;
-        if (tile.size.cols >= 2) {
-            draw_wide_header(title, L"自动保存");
+        if (tile.size.cols >= 2 && show_title) {
+            ComPtr<ID2D1RoundedRectangleGeometry> note_clip;
+            d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, 16.0f, 16.0f), &note_clip);
+            if (note_clip) {
+                d2d_dc_->PushLayer(D2D1::LayerParameters1(rect, note_clip.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                          D2D1::IdentityMatrix(), 1.0f, nullptr, D2D1_LAYER_OPTIONS1_NONE),
+                                   nullptr);
+            }
+            const D2D1_RECT_F hband = D2D1::RectF(rect.left, rect.top, rect.right, rect.top + 38.0f);
+            const D2D1_GRADIENT_STOP hstops[2] = {
+                {0.0f, ColorFromArgb(MixArgb(head_tint, 0xFFFFFFFFu, dark ? 0.10f : 0.16f))},
+                {1.0f, ColorFromArgb(head_tint)},
+            };
+            ComPtr<ID2D1GradientStopCollection> hsc;
+            ComPtr<ID2D1LinearGradientBrush> hlg;
+            if (SUCCEEDED(d2d_dc_->CreateGradientStopCollection(hstops, 2, &hsc)) && hsc &&
+                SUCCEEDED(d2d_dc_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(hband.left, hband.top), D2D1::Point2F(hband.left, hband.bottom)),
+                    hsc.Get(), &hlg)) && hlg) {
+                d2d_dc_->FillRectangle(hband, hlg.Get());
+            } else {
+                d2d_dc_->FillRectangle(hband, Brush(head_tint));
+            }
+            // Subtle dashed notebook divider under header ribbon
+            d2d_dc_->DrawLine(D2D1::Point2F(rect.left + 12.0f, rect.top + 38.5f),
+                              D2D1::Point2F(rect.right - 12.0f, rect.top + 38.5f),
+                              Brush(dark ? 0x30FFFFFFu : 0x28000000u), 1.0f, dashed_stroke_.Get());
+            // Delicate ruled paper lines across body
+            const uint32_t rule_col = dark ? 0x12FFFFFFu : 0x12000000u;
+            for (float ly = rect.top + 66.0f; ly < rect.bottom - 12.0f; ly += 22.0f) {
+                d2d_dc_->DrawLine(D2D1::Point2F(rect.left + 14.0f, ly),
+                                  D2D1::Point2F(rect.right - 14.0f, ly), Brush(rule_col), 0.7f);
+            }
+            if (note_clip) d2d_dc_->PopLayer();
+
+            const uint32_t hdr_ink = dark ? 0xFAFFF9E5u : kInkLight[nc];
+            const wchar_t gl[2] = {L'\xE70F', 0};
+            DrawGlyph(d2d_dc_.Get(), gl, 1, fmt_fluent_12_.Get(),
+                      D2D1::RectF(rect.left + 13.0f, rect.top + 10.0f, rect.left + 29.0f, rect.top + 28.0f),
+                      Brush(hdr_ink));
+            const float sub_right = show_hover_edit ? (rect.right - 42.0f) : (rect.right - 14.0f);
+            DrawWidgetText(title.c_str(), static_cast<UINT32>(title.size()), fmt_tile_hdr_.Get(),
+                           D2D1::RectF(rect.left + 32.0f, rect.top + 10.0f, sub_right - 56.0f, rect.top + 28.0f),
+                           Brush(hdr_ink));
+            if (sub_right > rect.left + 96.0f) {
+                const wchar_t* as = L"自动保存";
+                DrawWidgetText(as, static_cast<UINT32>(std::wcslen(as)), fmt_tile_sub_.Get(),
+                               D2D1::RectF(rect.left + 90.0f, rect.top + 10.0f, sub_right, rect.top + 28.0f),
+                               Brush(hdr_ink, 0.72f));
+            }
         }
 
         const std::wstring body = tile.note_body.empty() ? L"单击写下待办与灵感…" : tile.note_body;
         const D2D1_RECT_F body_rc = D2D1::RectF(rect.left + 14.0f,
-                                                rect.top + (tile.size.cols >= 2 ? 48.0f : 12.0f),
+                                                rect.top + (tile.size.cols >= 2 ? 46.0f : 12.0f),
                                                 rect.right - 14.0f,
                                                 rect.bottom - (tile.size.cols >= 2 ? 10.0f : 26.0f));
         DrawWidgetText(body.c_str(), static_cast<UINT32>(body.size()), fmt_note_body_.Get(),
@@ -5412,53 +6816,65 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
 
     case model::TileKind::StagingTray: {
         const std::wstring title = tile.title.empty() ? L"暂存区" : tile.title;
-        wchar_t sub_buf[48]{};
         if (live_data.tray_entries.empty()) {
-            std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"和 Pulse 同步");
-        } else {
-            std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"%zu 项 · 单击展开", live_data.tray_entries.size());
-        }
-        draw_wide_header(title, sub_buf);
-
-        if (live_data.tray_entries.empty()) {
-            const std::wstring drop = L"把文件拖到这里，";
-            const std::wstring press = L"或选中后按 ";
-            const std::wstring kbd_txt = L"Ctrl+Shift+S";
-            const float left = rect.left + 14.0f, room = rect.right - 12.0f - left;
-            const float dw = MeasureSingleLineWidth(drop, fmt_caption_.Get(), 2000.0f);
-            const float pw = MeasureSingleLineWidth(press, fmt_caption_.Get(), 2000.0f);
-            const float kw = MeasureSingleLineWidth(kbd_txt, fmt_pill_.Get(), 400.0f) + 12.0f;
-            const bool one_line = dw + pw + kw + 2.0f <= room;
-            const bool with_key = pw + kw + 2.0f <= room;
-            const float mid = (rect.top + (show_title ? 42.0f : 8.0f) + rect.bottom) * 0.5f;
-            const float cy = one_line || !with_key ? mid : mid + 11.0f;  // the line that carries the key
-            const auto caption = [&](const std::wstring& t, float x, float y, float w) {
-                DrawWidgetText(t.c_str(), static_cast<UINT32>(t.size()), fmt_caption_.Get(),
-                                  D2D1::RectF(x, y - 11.0f, x + w + 4.0f, y + 11.0f), Brush(text_sec, 0.85f));
+            // Empty (the mockup): one dashed drop well over the whole card, the tray mark, its name and how to
+            // put something in. Everything is measured so a one-row card never spills past its bottom.
+            static constexpr const char* kTrayBody =
+                "M3.5 13.5 6 5.8c.2-.6.7-.9 1.3-.9h9.4c.6 0 1.1.3 1.3.9l2.5 7.7v4.3c0 .9-.7 1.6-1.6 1.6H5.1c-.9 0-1.6-.7-1.6-1.6v-4.3z";
+            static constexpr const char* kTrayLip = "M3.5 13.5h4.6l1.2 2.2h5.4l1.2-2.2h4.6";
+            const D2D1_RECT_F well = D2D1::RectF(rect.left + 9.0f, rect.top + 9.0f, rect.right - 9.0f, rect.bottom - 9.0f);
+            const float well_r = std::max(6.0f, tile_rad - 9.0f);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(well, well_r, well_r), Brush(dark ? 0x0AFFFFFFu : 0x08000000u));
+            d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(well, well_r, well_r), Brush(dark ? 0x40FFFFFFu : 0x2E000000u), 1.2f,
+                                          dashed_stroke_.Get());
+            IDWriteTextFormat* f_title = FaceFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false);
+            IDWriteTextFormat* f_cap = FaceFormat(11.5f, DWRITE_FONT_WEIGHT_MEDIUM, false);
+            IDWriteTextFormat* f_key = FaceFormat(10.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, false);
+            const std::wstring key = L"Ctrl+Shift+S";
+            const float key_w = MeasureSingleLineWidth(key, f_key, 400.0f) + 10.0f;
+            auto keycap = [&](float x, float cy) {
+                const D2D1_RECT_F k = D2D1::RectF(x, cy - 8.5f, x + key_w, cy + 8.5f);
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(k, 4.0f, 4.0f), Brush(dark ? 0x22FFFFFFu : 0x12000000u));
+                draw_text(key, f_key, D2D1::RectF(k.left, k.top + 2.0f, k.right, k.bottom), text_sec, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
             };
-            float kx = left;
-            if (one_line) {
-                caption(drop, left, cy, dw);
-                caption(press, left + dw, cy, pw);
-                kx = left + dw + pw + 1.0f;
-            } else if (with_key) {
-                caption(drop.substr(0, drop.size() - 1), left, cy - 22.0f, dw);
-                caption(press, left, cy, pw);
-                kx = left + pw + 1.0f;
+            auto tray_mark = [&](const D2D1_RECT_F& box) {
+                DrawSvgPath(d2d_dc_.Get(), kTrayBody, box, 24.0f, Brush(text_sec), false, 1.7f);
+                DrawSvgPath(d2d_dc_.Get(), kTrayLip, box, 24.0f, Brush(text_sec), false, 1.7f);
+            };
+            if (tile.size.rows == 1 || rh < 150.0f) {
+                // One row: mark | name over "拖到这里，或按 [key]" (the key goes when it does not fit).
+                const float cy = (rect.top + rect.bottom) * 0.5f;
+                tray_mark(D2D1::RectF(well.left + 10.0f, cy - 11.0f, well.left + 32.0f, cy + 11.0f));
+                const float x = well.left + 42.0f, room = well.right - 10.0f - x;
+                draw_text(title, f_title, D2D1::RectF(x, cy - 19.0f, well.right - 10.0f, cy - 1.0f), text_pri);
+                const std::wstring lead = L"拖到这里，或按 ";
+                const float lead_w = MeasureSingleLineWidth(lead, f_cap, 400.0f);
+                if (lead_w + key_w <= room) {
+                    draw_text(lead, f_cap, D2D1::RectF(x, cy + 1.0f, x + lead_w + 2.0f, cy + 17.0f), text_sec);
+                    keycap(x + lead_w, cy + 9.0f);
+                } else {
+                    draw_text(L"把文件拖到这里", f_cap, D2D1::RectF(x, cy + 1.0f, well.right - 10.0f, cy + 17.0f), text_sec);
+                }
             } else {
-                caption(drop.substr(0, drop.size() - 1), left, cy, room);
-            }
-            if (with_key) {
-                const D2D1_RECT_F kbd_rc = D2D1::RectF(kx, cy - 9.5f, kx + kw, cy + 9.5f);
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(kbd_rc, 4.5f, 4.5f),
-                                              Brush(dark ? 0x1EFFFFFFu : 0x10000000u));
-                d2d_dc_->DrawRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(kbd_rc.left + 0.5f, kbd_rc.top + 0.5f, kbd_rc.right - 0.5f, kbd_rc.bottom - 0.5f), 4.0f, 4.0f),
-                    Brush(dark ? 0x2EFFFFFFu : 0x1C000000u), 1.0f);
-                DrawWidgetText(kbd_txt.c_str(), static_cast<UINT32>(kbd_txt.size()), fmt_pill_.Get(),
-                                  kbd_rc, Brush(text_sec));
+                const float cx = (rect.left + rect.right) * 0.5f, cy = (rect.top + rect.bottom) * 0.5f;
+                tray_mark(D2D1::RectF(cx - 14.0f, cy - 44.0f, cx + 14.0f, cy - 16.0f));
+                draw_text(title, f_title, D2D1::RectF(well.left + 8.0f, cy - 10.0f, well.right - 8.0f, cy + 8.0f), text_pri, 1.0f,
+                          DWRITE_TEXT_ALIGNMENT_CENTER);
+                draw_text(L"把文件拖到这里", f_cap, D2D1::RectF(well.left + 8.0f, cy + 10.0f, well.right - 8.0f, cy + 26.0f), text_sec, 1.0f,
+                          DWRITE_TEXT_ALIGNMENT_CENTER);
+                const std::wstring lead = L"或选中后按 ";
+                const float lead_w = MeasureSingleLineWidth(lead, f_cap, 400.0f);
+                const float total = lead_w + key_w;
+                if (total <= well.right - well.left - 16.0f) {
+                    const float x0 = cx - total * 0.5f;
+                    draw_text(lead, f_cap, D2D1::RectF(x0, cy + 29.0f, x0 + lead_w + 2.0f, cy + 45.0f), text_sec);
+                    keycap(x0 + lead_w, cy + 37.0f);
+                }
             }
         } else {
+            wchar_t sub_buf[32]{};
+            std::swprintf(sub_buf, ARRAYSIZE(sub_buf), L"%zu 项", live_data.tray_entries.size());
+            draw_wide_header(title, sub_buf);
             const bool grid = tile.size.rows >= 2;
             const size_t room = TrayChipCapacity(tile_in, rect);
             // Keep the last cell for "+N" when the entries do not all fit.
@@ -5501,70 +6917,179 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     }
 
     case model::TileKind::Apps: {
+        // macOS 26 Tahoe Liquid Glass Dock ("应用坞"): pure glass capsule + top specular sheen,
+        // raised-cosine fisheye hover magnification wave, contact shadows, live running-app
+        // indicator dots, 3-hop launch bounce, and floating frosted tooltip pill.
+        DrawDockTopSheen(d2d_dc_.Get(), rect, tile_rad, dark);
+
         std::vector<const model::DesktopItem*> apps;
         for (const auto& it : state.items) if (it.in_apps_tile) apps.push_back(&it);
         std::sort(apps.begin(), apps.end(), [](const auto* a, const auto* b) { return a->name < b->name; });
-        wchar_t sub[32]{};
-        if (!apps.empty()) std::swprintf(sub, ARRAYSIZE(sub), L"%zu 个快捷方式", apps.size());
-        draw_wide_header(tile.title.empty() ? L"应用" : tile.title, sub);
-        const float top = show_title ? rect.top + 48.0f : rect.top + 12.0f;
+
         if (apps.empty()) {
-            const wchar_t* hint = L"把桌面上的应用快捷方式拖到这里";
+            const wchar_t* hint = L"把桌面上的应用快捷方式拖入程序坞";
             DrawWidgetText(hint, static_cast<UINT32>(std::wcslen(hint)), fmt_empty_hint_.Get(),
-                              D2D1::RectF(rect.left + 14.0f, top, rect.right - 14.0f, rect.bottom - 10.0f), Brush(text_sec, 0.8f));
+                           D2D1::RectF(rect.left + 14.0f, rect.top + 10.0f, rect.right - 14.0f, rect.bottom - 10.0f),
+                           Brush(text_sec, 0.82f));
             break;
         }
-        // Pages, as on a phone's home screen: the wheel turns them, dots at the bottom say where you are.
-        const auto pg = AppsTilePaging(tile_in, rect, apps.size());
-        const int cols = pg.cols;
-        const float cell_w = (rect.right - rect.left - 16.0f) / static_cast<float>(cols);
-        const float cell_h = pg.cell_h;
-        const size_t first = static_cast<size_t>(std::min(interaction.apps_page, pg.pages - 1)) * pg.room;
-        const size_t shown = std::min(pg.room, apps.size() - first);
-        if (pg.pages > 1) {
-            const float dot_y = rect.bottom - 11.0f;
-            const int cur = std::min(interaction.apps_page, pg.pages - 1);
-            float dx = (rect.left + rect.right) * 0.5f - (static_cast<float>(pg.pages) * 10.0f + 6.0f) * 0.5f;
-            for (int p = 0; p < pg.pages; ++p) {
-                const float w = p == cur ? 16.0f : 6.0f;
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(dx, dot_y - 3.0f, dx + w, dot_y + 3.0f), 3.0f, 3.0f),
-                                              Brush(text_pri, p == cur ? 0.85f : 0.30f));
-                dx += w + 4.0f;
+
+        DockLayoutInput d_in{};
+        d_in.apps_page = interaction.apps_page;
+        d_in.pressed_app_index = interaction.pressed_app_index;
+        const bool anim_this_dock = (interaction.dock_anim_tile_id == tile_in.id);
+        if (anim_this_dock && interaction.dock_hover_presence > 0.001f) {
+            d_in.hover_presence = interaction.dock_hover_presence;
+            d_in.smooth_cursor_x = interaction.dock_smooth_cursor_x;
+            d_in.cursor_y = interaction.dock_cursor_y;
+        }
+        if (!interaction.dock_bounce_path.empty() &&
+            IsDockBounceActive(interaction.dock_bounce_start_ms, interaction.dock_now_ms)) {
+            for (size_t i = 0; i < apps.size(); ++i) {
+                if (apps[i]->path == interaction.dock_bounce_path) {
+                    d_in.bouncing_app_index = static_cast<int>(i);
+                    d_in.bounce_offset_dip = EvaluateDockBounceDip(interaction.dock_bounce_start_ms, interaction.dock_now_ms);
+                    break;
+                }
             }
         }
-        for (size_t k = 0; k < shown; ++k) {
-            const size_t i = first + k;
-            const float cx = rect.left + 8.0f + cell_w * (static_cast<float>(k % cols) + 0.5f);
-            // Icon and label sit centred in the cell, whatever height the page gave it.
-            const float cy = top + cell_h * static_cast<float>(k / cols) + (cell_h - 62.0f) * 0.5f;
-            const float row_top = top + cell_h * static_cast<float>(k / cols);
-            const D2D1_RECT_F cell = D2D1::RectF(cx - cell_w * 0.5f + 2.0f, row_top + 1.0f, cx + cell_w * 0.5f - 2.0f, row_top + cell_h - 1.0f);
-            const bool pressed_cell = interaction.pressed_app_index == static_cast<int>(i);
-            if (pressed_cell)
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(cell, 10.0f, 10.0f), Brush(dark ? 0x26FFFFFFu : 0x18000000u));
-            else if (hovered && interaction.hovered_path == apps[i]->path)
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(cell, 10.0f, 10.0f), Brush(dark ? 0x16FFFFFFu : 0x0E000000u));
-            // Pressed, the icon shrinks a little about its centre, as a phone's app icon does under a finger.
-            const float dim = pressed_cell ? 32.0f : 36.0f;
-            const float icon_dy = pressed_cell ? 2.0f : 0.0f;
-            if (ID2D1Bitmap1* bmp = backdrop_.GetItemBitmap(d2d_dc_.Get(), apps[i]->path, false,
-                                                            static_cast<uint32_t>(std::lround(dim * dip_scale_)))) {
-                d2d_dc_->DrawBitmap(bmp, D2D1::RectF(cx - dim * 0.5f, cy + 4.0f + icon_dy, cx + dim * 0.5f, cy + 4.0f + icon_dy + dim), 1.0f,
-                                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+
+        const DockTileLayout layout = ComputeDockTileLayout(tile_in, rect, apps.size(), d_in);
+
+        // Pagination controls:
+        // - Single-row Dock: subtle left/right glass chevrons so the entire bottom channel stays pure for running dots.
+        // - Multi-row Dock: sleek minimal page pills at bottom-center.
+        if (layout.pages > 1) {
+            if (layout.single_row) {
+                DrawDockPagerChevron(d2d_dc_.Get(), DockPagerArrowRect(rect, false), false,
+                                     layout.active_page > 0, dark);
+                DrawDockPagerChevron(d2d_dc_.Get(), DockPagerArrowRect(rect, true), true,
+                                     layout.active_page + 1 < layout.pages, dark);
             } else {
-                DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
-                                   D2D1::RectF(cx - dim * 0.5f + 2.0f, cy + 6.0f + icon_dy, cx + dim * 0.5f - 2.0f, cy + 2.0f + icon_dy + dim), L".lnk", false);
+                const float dot_y = layout.pager_dot_y;
+                float total_pw = 0.0f;
+                for (int p = 0; p < layout.pages; ++p) {
+                    total_pw += (p == layout.active_page ? 14.0f : 5.0f) + (p + 1 < layout.pages ? 4.0f : 0.0f);
+                }
+                float dx = (rect.left + rect.right - total_pw) * 0.5f;
+                for (int p = 0; p < layout.pages; ++p) {
+                    const bool cur = (p == layout.active_page);
+                    const float pw = cur ? 14.0f : 5.0f;
+                    d2d_dc_->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(dx, dot_y - 2.5f, dx + pw, dot_y + 2.5f), 2.5f, 2.5f),
+                        Brush(text_pri, cur ? 0.82f : 0.28f));
+                    dx += pw + 4.0f;
+                }
             }
-            std::wstring nm = apps[i]->name;
-            if (nm.size() > 4 && _wcsicmp(nm.c_str() + nm.size() - 4, L".lnk") == 0) nm.resize(nm.size() - 4);
-            const bool label_revealed = (hovered && interaction.hovered_path == apps[i]->path) ||
-                interaction.selected_paths.contains(apps[i]->path) ||
-                (!interaction.search_highlight_query.empty() &&
-                 ContainsCaseInsensitive(apps[i]->name, interaction.search_highlight_query));
-            const auto label_rect = D2D1::RectF(cell.left + 2.0f, cy + 42.0f, cell.right - 2.0f, cy + 60.0f);
-            const auto background = TileBackgroundSamples(tile_in, rect, label_rect, mat, state.settings);
-            DrawIconLabel(nm, label_rect, fmt_tile_small_title_.Get(), state.settings.label_style,
-                          dark, true, label_revealed, 1.0f, &background);
+        }
+
+        // Resolve tooltip target slot (either animated live hover or static hovered_path fallback).
+        int tooltip_slot = -1;
+        float tooltip_alpha = 0.0f;
+        if (anim_this_dock && interaction.dock_tooltip_alpha > 0.02f && interaction.dock_tooltip_index >= 0) {
+            for (size_t si = 0; si < layout.slots.size(); ++si) {
+                if (static_cast<int>(layout.slots[si].app_index) == interaction.dock_tooltip_index) {
+                    tooltip_slot = static_cast<int>(si);
+                    tooltip_alpha = interaction.dock_tooltip_alpha;
+                    break;
+                }
+            }
+        } else if (hovered && !interaction.hovered_path.empty() && !anim_this_dock) {
+            for (size_t si = 0; si < layout.slots.size(); ++si) {
+                if (apps[layout.slots[si].app_index]->path == interaction.hovered_path) {
+                    tooltip_slot = static_cast<int>(si);
+                    tooltip_alpha = 1.0f;
+                    break;
+                }
+            }
+        }
+
+        // Draw slots back-to-front by magnification scale so the focused icon always rises cleanly above neighbors.
+        std::vector<size_t> draw_order(layout.slots.size());
+        for (size_t si = 0; si < draw_order.size(); ++si) draw_order[si] = si;
+        std::stable_sort(draw_order.begin(), draw_order.end(), [&](size_t a, size_t b) {
+            return layout.slots[a].scale < layout.slots[b].scale;
+        });
+
+        auto strip_lnk = [](std::wstring nm) {
+            if (nm.size() > 4 && _wcsicmp(nm.c_str() + nm.size() - 4, L".lnk") == 0) {
+                nm.resize(nm.size() - 4);
+            }
+            return nm;
+        };
+
+        for (const size_t si : draw_order) {
+            const auto& s = layout.slots[si];
+            const auto* app = apps[s.app_index];
+            const bool is_tooltip_target = (static_cast<int>(si) == tooltip_slot && tooltip_alpha > 0.35f);
+            const bool pressed_cell = (interaction.pressed_app_index == static_cast<int>(s.app_index));
+
+            // 1. Soft contact shadow under icon.
+            const float shadow_y = s.rest_cy + s.base_size * 0.48f;
+            DrawDockContactShadow(d2d_dc_.Get(), s.draw_cx, shadow_y, s.draw_size, s.lift_y);
+
+            // 2. Crisp app icon centered at (draw_cx, draw_cy), lifted smoothly above the Dock rim on hover/bounce.
+            const uint32_t req_px = static_cast<uint32_t>(std::lround(std::max(s.base_size, s.draw_size) * dip_scale_));
+            const float half = s.draw_size * 0.5f;
+            const D2D1_RECT_F icon_rc = D2D1::RectF(s.draw_cx - half, s.draw_cy - half,
+                                                    s.draw_cx + half, s.draw_cy + half);
+            const float icon_op = pressed_cell ? 0.88f : 1.0f;
+            if (ID2D1Bitmap1* bmp = backdrop_.GetItemBitmap(d2d_dc_.Get(), app->path, false, req_px)) {
+                d2d_dc_->DrawBitmap(bmp, icon_rc, icon_op, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            } else {
+                const D2D1_RECT_F vec_rc = D2D1::RectF(icon_rc.left + 2.0f, icon_rc.top + 2.0f,
+                                                       icon_rc.right - 2.0f, icon_rc.bottom - 2.0f);
+                DrawVectorFileIcon(d2d_factory_.Get(), d2d_dc_.Get(), dwrite_factory_.Get(),
+                                   vec_rc, L".lnk", false, icon_op);
+            }
+
+            // 3. Live running-app indicator dot (cyan active foreground halo or glowing running dot).
+            bool is_running = false;
+            bool is_active = false;
+            if (auto it = live_data.app_exe_basenames.find(app->path);
+                it != live_data.app_exe_basenames.end() && !it->second.empty()) {
+                is_active = (!live_data.active_app_exe.empty() && live_data.active_app_exe == it->second);
+                is_running = is_active || live_data.running_app_exes.contains(it->second);
+            }
+            DrawDockRunningDot(d2d_dc_.Get(), s.draw_cx, s.dot_y, is_running, is_active, dark);
+
+            // 4. Multi-row shelf mode keeps compact crisp labels underneath when unhovered
+            //    (hidden on the hovered icon where the floating macOS tooltip pill takes over).
+            if (!layout.single_row && !is_tooltip_target && s.label_rect.bottom > s.label_rect.top) {
+                const std::wstring nm = strip_lnk(app->name);
+                const bool label_revealed = interaction.selected_paths.contains(app->path) ||
+                    (!interaction.search_highlight_query.empty() &&
+                     ContainsCaseInsensitive(app->name, interaction.search_highlight_query));
+                const auto background = (mat == model::CardMaterial::LiquidGlass &&
+                                         tile_in.look.background == model::TileBackground::Material &&
+                                         state.settings.card_opacity_percent >= 30u)
+                                            ? text_contrast::Fill(dark ? 0xFF141820u : 0xFFF4F6FAu)
+                                            : TileBackgroundSamples(tile_in, rect, s.label_rect, mat, state.settings);
+                DrawIconLabel(nm, s.label_rect, fmt_tile_small_title_.Get(), state.settings.label_style,
+                              dark, true, label_revealed, 1.0f, &background);
+            }
+        }
+
+        // 5. Floating frosted macOS tooltip pill with downward pointer notch above hovered icon.
+        if (tooltip_slot >= 0 && static_cast<size_t>(tooltip_slot) < layout.slots.size()) {
+            const auto& ts = layout.slots[static_cast<size_t>(tooltip_slot)];
+            const std::wstring tip = strip_lnk(apps[ts.app_index]->name);
+            const float text_w = MeasureSingleLineWidth(tip, fmt_tile_small_title_.Get(), 200.0f);
+            const float icon_top = ts.draw_cy - ts.draw_size * 0.5f;
+            const DockTooltipTextFn tip_draw = [&](const std::wstring& s, const D2D1_RECT_F& r,
+                                                   uint32_t argb, float op) {
+                widget_text_.Bind(dwrite_factory_.Get(), d2d_dc_.Get());
+                if (auto* tl = widget_text_.Layout(dwrite_factory_.Get(), s, fmt_tile_small_title_.Get(),
+                                                   r.right - r.left, r.bottom - r.top, true,
+                                                   DWRITE_TEXT_ALIGNMENT_CENTER)) {
+                    widget_text_.DrawLayout(dwrite_factory_.Get(), d2d_dc_.Get(),
+                                            D2D1::Point2F(r.left, r.top), tl, Brush(argb, op));
+                }
+            };
+            DrawDockTooltipPill(d2d_factory_.Get(), d2d_dc_.Get(), tip,
+                                ts.draw_cx, icon_top,
+                                rect.left - 32.0f, rect.right + 32.0f,
+                                text_w, tooltip_alpha, tip_draw);
         }
         break;
     }
@@ -5583,99 +7108,165 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
             const std::wstring msg = !w.status.empty()
                 ? w.status
                 : (city.empty() ? L"单击设置城市 · 查看实时天气" : L"正在获取天气…");
-            DrawWidgetText(msg.c_str(), static_cast<UINT32>(msg.size()), tile.size.cols == 1 ? fmt_pill_.Get() : fmt_empty_hint_.Get(),
-                              D2D1::RectF(rect.left + 12.0f, rect.top + (tile.size.cols == 1 ? 30.0f : 46.0f), rect.right - 12.0f, rect.bottom - 10.0f),
-                              Brush(text_sec, 0.85f));
+            draw_text(msg, tile.size.cols == 1 ? fmt_pill_.Get() : fmt_empty_hint_.Get(),
+                      D2D1::RectF(rect.left + 12.0f, rect.top + (tile.size.cols == 1 ? 30.0f : 46.0f), rect.right - 12.0f, rect.bottom - 10.0f),
+                      text_sec, 0.88f);
             break;
+        }
+        if (look.background == model::TileBackground::Material) {
+            DrawTahoeWeatherSkyWash(d2d_factory_.Get(), d2d_dc_.Get(), rect, tile_rad, w.code, w.is_day, dark);
         }
         wchar_t tbuf[16]{};
         std::swprintf(tbuf, ARRAYSIZE(tbuf), L"%d°", w.temp_c);
         const wchar_t* cond_name = WeatherLabel(w.code);
         if (tile.size.cols == 1) {
-            DrawWidgetText(city.c_str(), static_cast<UINT32>(city.size()), fmt_tile_hdr_.Get(),
-                              D2D1::RectF(rect.left + 12.0f, rect.top + 8.0f, rect.right - 8.0f, rect.top + 26.0f), Brush(text_pri));
-            DrawWeatherIcon(D2D1::RectF(rect.left + 10.0f, rect.top + 27.0f, rect.left + 34.0f, rect.top + 51.0f), w.code, dark);
-            DrawWidgetText(cond_name, static_cast<UINT32>(std::wcslen(cond_name)), fmt_pill_.Get(),
-                              D2D1::RectF(rect.left + 36.0f, rect.top + 31.0f, rect.right - 6.0f, rect.top + 49.0f), Brush(text_sec));
-            DrawWidgetText(tbuf, static_cast<UINT32>(std::wcslen(tbuf)), fmt_clock_big_.Get(),
-                              D2D1::RectF(rect.left + 12.0f, rect.top + 50.0f, rect.right - 6.0f, rect.bottom - 2.0f), Brush(text_pri));
+            const float cw = MeasureSingleLineWidth(city, fmt_tile_hdr_.Get(), rw - 32.0f);
+            draw_text(city, fmt_tile_hdr_.Get(),
+                      D2D1::RectF(rect.left + 12.0f, rect.top + 8.0f, rect.right - 18.0f, rect.top + 26.0f), text_pri);
+            DrawTahoeLocationArrow(d2d_factory_.Get(), d2d_dc_.Get(), Brush(text_pri),
+                                   rect.left + 12.0f + cw + 3.0f, rect.top + 17.0f, text_pri, 0.85f);
+            DrawWeatherIcon(D2D1::RectF(rect.left + 10.0f, rect.top + 27.0f, rect.left + 34.0f, rect.top + 51.0f), w.code, dark, w.is_day);
+            draw_text(cond_name, fmt_pill_.Get(),
+                      D2D1::RectF(rect.left + 36.0f, rect.top + 31.0f, rect.right - 6.0f, rect.top + 49.0f), text_sec, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+            draw_text(tbuf, fmt_clock_big_.Get(),
+                      D2D1::RectF(rect.left + 12.0f, rect.top + 48.0f, rect.right - 6.0f, rect.bottom - 2.0f), text_pri);
             break;
         }
-        const float left_w = tile.size.cols >= 4 ? 160.0f : (rect.right - rect.left);
-        const wchar_t pin_g[2] = {L'\xE707', 0};
-        DrawGlyph(d2d_dc_.Get(), pin_g, 1, fmt_fluent_12_.Get(),
-                  D2D1::RectF(rect.left + 13.0f, rect.top + 12.0f, rect.left + 27.0f, rect.top + 29.0f),
-                  Brush(text_sec));
-        DrawWidgetText(city.c_str(), static_cast<UINT32>(city.size()), fmt_tile_hdr_.Get(),
-                          D2D1::RectF(rect.left + 29.0f, rect.top + 11.0f, rect.left + left_w - 8.0f, rect.top + 29.0f), Brush(text_pri));
+
+        auto draw_temp_range_bar = [&](float bx0, float bx1, float bar_y, int d_lo, int d_hi, int w_lo, float w_span, bool show_cur_dot) {
+            if (bx1 <= bx0 + 12.0f) return;
+            const float a = bx0 + (bx1 - bx0) * static_cast<float>(d_lo - w_lo) / w_span;
+            const float b = bx0 + (bx1 - bx0) * static_cast<float>(d_hi - w_lo) / w_span;
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, bar_y, bx1, bar_y + 4.5f), 2.25f, 2.25f),
+                                          Brush(dark ? 0x22FFFFFFu : 0x18000000u));
+            const D2D1_GRADIENT_STOP stops[3] = {
+                {0.0f, D2D1::ColorF(0.24f, 0.72f, 1.00f, 0.98f)},
+                {0.55f, D2D1::ColorF(1.00f, 0.78f, 0.22f, 0.98f)},
+                {1.0f, D2D1::ColorF(1.00f, 0.44f, 0.16f, 0.98f)},
+            };
+            ComPtr<ID2D1GradientStopCollection> sc;
+            ComPtr<ID2D1LinearGradientBrush> lg;
+            const D2D1_RECT_F fill_rc = D2D1::RectF(a, bar_y, std::max(a + 6.0f, b), bar_y + 4.5f);
+            if (SUCCEEDED(d2d_dc_->CreateGradientStopCollection(stops, 3, &sc)) && sc &&
+                SUCCEEDED(d2d_dc_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(bx0, 0.0f), D2D1::Point2F(bx1, 0.0f)), sc.Get(), &lg)) && lg) {
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(fill_rc, 2.25f, 2.25f), lg.Get());
+            } else {
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(fill_rc, 2.25f, 2.25f), Brush(0xFFF5B84Au, 0.94f));
+            }
+            if (show_cur_dot) {
+                const float cur_x = std::clamp(bx0 + (bx1 - bx0) * static_cast<float>(w.temp_c - w_lo) / w_span, fill_rc.left + 2.5f, fill_rc.right - 2.5f);
+                const float cur_y = bar_y + 2.25f;
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cur_x, cur_y), 3.8f, 3.8f), Brush(0x44000000u));
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cur_x, cur_y), 2.6f, 2.6f), Brush(0xFFFFFFFFu));
+            }
+        };
+
+        const bool wide_wx = (tile.size.cols >= 4);
+        const float stack_rpad = (tile_in.stack.size() >= 2) ? 22.0f : 14.0f;
+        const float left_w = wide_wx ? std::min(166.0f, rw * 0.42f) : rw;
+        const float city_w = MeasureSingleLineWidth(city, fmt_group_title_.Get(), left_w - 36.0f);
+        draw_text(city, fmt_group_title_.Get(),
+                  D2D1::RectF(rect.left + 15.0f, rect.top + 11.0f, rect.left + left_w - 20.0f, rect.top + 31.0f), text_pri);
+        DrawTahoeLocationArrow(d2d_factory_.Get(), d2d_dc_.Get(), Brush(text_pri),
+                               rect.left + 15.0f + city_w + 4.0f, rect.top + 21.0f, text_pri, 0.90f);
+
         const float temp_w = MeasureSingleLineWidth(tbuf, fmt_clock_big_.Get(), 110.0f);
-        DrawWidgetText(tbuf, static_cast<UINT32>(std::wcslen(tbuf)), fmt_clock_big_.Get(),
-                          D2D1::RectF(rect.left + 14.0f, rect.top + 30.0f, rect.left + 14.0f + temp_w + 8.0f, rect.top + 82.0f), Brush(text_pri));
-        const float wx_ic_x = rect.left + 14.0f + temp_w + 6.0f;
-        DrawWeatherIcon(D2D1::RectF(wx_ic_x, rect.top + 36.0f, wx_ic_x + 32.0f, rect.top + 68.0f), w.code, dark);
+        draw_text(tbuf, fmt_clock_big_.Get(),
+                  D2D1::RectF(rect.left + 14.0f, rect.top + 30.0f, rect.left + 14.0f + temp_w + 8.0f, rect.top + 82.0f), text_pri);
 
-        const std::wstring cond_str(cond_name);
-        const float cond_w = MeasureSingleLineWidth(cond_str, fmt_row_lead_.Get(), 96.0f);
-        DrawWidgetText(cond_str.c_str(), static_cast<UINT32>(cond_str.size()), fmt_row_lead_.Get(),
-                          D2D1::RectF(rect.left + 14.0f, rect.top + 83.0f, rect.left + 14.0f + cond_w + 4.0f, rect.top + 101.0f),
-                          Brush(text_pri));
-        wchar_t range_buf[64]{};
-        if (tile.size.cols >= 4) {
-            std::swprintf(range_buf, ARRAYSIZE(range_buf), L" · 最高 %d° 最低 %d°", w.hi_c, w.lo_c);
+        if (!wide_wx) {
+            // 2x2 Apple Weather header: right-aligned SF icon + condition + high/low (clear of stack dots!)
+            DrawWeatherIcon(D2D1::RectF(rect.right - stack_rpad - 30.0f, rect.top + 12.0f, rect.right - stack_rpad, rect.top + 42.0f), w.code, dark, w.is_day);
+            draw_text(cond_name, fmt_row_lead_.Get(),
+                      D2D1::RectF(rect.left + left_w * 0.45f, rect.top + 46.0f, rect.right - stack_rpad, rect.top + 64.0f),
+                      text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            wchar_t range_buf[48]{};
+            std::swprintf(range_buf, ARRAYSIZE(range_buf), L"最高%d° 最低%d°", w.hi_c, w.lo_c);
+            draw_text(range_buf, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, rect.top + 65.0f, rect.right - stack_rpad, rect.top + 83.0f),
+                      text_sec, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
         } else {
-            std::swprintf(range_buf, ARRAYSIZE(range_buf), L" · %d°/%d°", w.lo_c, w.hi_c);
-        }
-        DrawWidgetText(range_buf, static_cast<UINT32>(std::wcslen(range_buf)), fmt_caption_.Get(),
-                          D2D1::RectF(rect.left + 14.0f + cond_w, rect.top + 83.0f, rect.left + left_w, rect.top + 101.0f),
-                          Brush(text_sec));
+            const float wx_ic_x = std::min(rect.left + left_w - 38.0f, rect.left + 14.0f + temp_w + 6.0f);
+            DrawWeatherIcon(D2D1::RectF(wx_ic_x, rect.top + 36.0f, wx_ic_x + 32.0f, rect.top + 68.0f), w.code, dark, w.is_day);
+            draw_text(cond_name, fmt_row_lead_.Get(),
+                      D2D1::RectF(rect.left + 15.0f, rect.top + 82.0f, rect.left + left_w - 6.0f, rect.top + 100.0f), text_pri);
+            wchar_t range_buf[64]{};
+            std::swprintf(range_buf, ARRAYSIZE(range_buf), L"最高 %d°  最低 %d°", w.hi_c, w.lo_c);
+            draw_text(range_buf, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + 15.0f, rect.top + 100.0f, rect.left + left_w - 6.0f, rect.top + 118.0f), text_sec);
 
-        // Hours along the bottom (medium) or the right (wide).
-        const size_t nh = std::min<size_t>(w.hours.size(), tile.size.cols >= 4 ? 5 : 4);
+            // Compact Sunrise/Sunset solar elevation glass card in left-bottom!
+            if (rect.bottom - (rect.top + 124.0f) >= 58.0f) {
+                const D2D1_RECT_F sun_box = D2D1::RectF(rect.left + 14.0f, rect.top + 124.0f,
+                                                        rect.left + left_w - 6.0f, rect.bottom - 14.0f);
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), sun_box, 11.0f, dark);
+                SYSTEMTIME lnow{};
+                GetLocalTime(&lnow);
+                const int now_min = lnow.wHour * 60 + lnow.wMinute;
+                const int sr = w.has_sun ? w.sunrise_min : (6 * 60 + 24);
+                const int ss = w.has_sun ? w.sunset_min : (18 * 60 + 12);
+                const bool before_sunset = (now_min >= sr && now_min < ss);
+                wchar_t sun_lbl[32]{};
+                const int next_m = before_sunset ? ss : sr;
+                std::swprintf(sun_lbl, ARRAYSIZE(sun_lbl), L"%ls %02d:%02d",
+                              before_sunset ? L"日落" : L"日出", next_m / 60, next_m % 60);
+                draw_text(sun_lbl, fmt_clock_num_.Get(),
+                          D2D1::RectF(sun_box.left + 8.0f, sun_box.top + 4.0f, sun_box.right - 8.0f, sun_box.top + 18.0f),
+                          text_sec, 0.95f, DWRITE_TEXT_ALIGNMENT_LEADING);
+                DrawTahoeSolarArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                  D2D1::RectF(sun_box.left + 6.0f, sun_box.top + 19.0f, sun_box.right - 6.0f, sun_box.bottom - 6.0f),
+                                  sr, ss, now_min, dark);
+            }
+            // Subtle vertical hairline separating left summary from right forecasts
+            d2d_dc_->FillRectangle(D2D1::RectF(rect.left + left_w + 1.0f, rect.top + 14.0f, rect.left + left_w + 2.0f, rect.bottom - 14.0f),
+                                   Brush(dark ? 0x1EFFFFFFu : 0x14000000u));
+        }
+
+        // Hours along the bottom (2x2 glass sub-tray) or right-top (4x2/4x4).
+        const size_t nh = std::min<size_t>(w.hours.size(), wide_wx ? 5 : 4);
         if (nh) {
-            const float hx0 = tile.size.cols >= 4 ? rect.left + 170.0f : rect.left + 12.0f;
-            const float hx1 = rect.right - 14.0f;
-            const float hy = tile.size.cols >= 4 ? rect.top + 14.0f : rect.bottom - 72.0f;
-            if (tile.size.cols < 4)
-                d2d_dc_->FillRectangle(D2D1::RectF(rect.left + 14.0f, hy - 8.0f, rect.right - 14.0f, hy - 7.0f), Brush(dark ? 0x1CFFFFFFu : 0x12000000u));
+            const float hx0 = wide_wx ? (rect.left + left_w + 10.0f) : (rect.left + 11.0f);
+            const float hx1 = wide_wx ? (rect.right - 14.0f) : (rect.right - 11.0f);
+            const float hy = wide_wx ? (rect.top + 14.0f) : (rect.bottom - 72.0f);
+            if (!wide_wx) {
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu),
+                                   D2D1::RectF(hx0, hy - 5.0f, hx1, rect.bottom - 10.0f), 11.0f, dark);
+            }
             const float step = (hx1 - hx0) / static_cast<float>(nh);
             for (size_t i = 0; i < nh; ++i) {
                 const auto& h = w.hours[i];
                 const float cx = hx0 + step * (static_cast<float>(i) + 0.5f);
-                DrawWidgetText(h.label.c_str(), static_cast<UINT32>(h.label.size()), fmt_pill_.Get(),
-                                  D2D1::RectF(cx - 24.0f, hy, cx + 24.0f, hy + 16.0f), Brush(text_sec));
-                DrawWeatherIcon(D2D1::RectF(cx - 10.0f, hy + 18.0f, cx + 10.0f, hy + 38.0f), h.code, dark);
+                draw_text(h.label, fmt_pill_.Get(),
+                          D2D1::RectF(cx - 24.0f, hy, cx + 24.0f, hy + 16.0f), text_sec);
+                DrawWeatherIcon(D2D1::RectF(cx - 11.0f, hy + 17.0f, cx + 11.0f, hy + 39.0f), h.code, dark, h.is_day);
                 wchar_t hb[12]{};
                 std::swprintf(hb, ARRAYSIZE(hb), L"%d°", h.temp_c);
-                DrawWidgetText(hb, static_cast<UINT32>(std::wcslen(hb)), fmt_disk_pct_.Get(),
-                                  D2D1::RectF(cx - 24.0f, hy + 41.0f, cx + 24.0f, hy + 59.0f), Brush(text_pri));
+                draw_text(hb, fmt_disk_pct_.Get(),
+                          D2D1::RectF(cx - 24.0f, hy + 41.0f, cx + 24.0f, hy + 59.0f), text_pri);
             }
         }
-        if ((tile.size.cols >= 4 && tile.size.rows >= 2) ||
-            (tile.size.cols >= 2 && tile.size.cols < 4 && (rect.bottom - rect.top) >= 248.0f)) {
-            const float x0 = tile.size.cols >= 4 ? (rect.left + 170.0f) : (rect.left + 14.0f);
-            float dy = tile.size.cols >= 4 ? (rect.top + 92.0f) : (rect.top + 112.0f);
-            const float max_dy = tile.size.cols >= 4 ? (rect.bottom - 6.0f) : (rect.bottom - 84.0f);
+        if (!w.days.empty() && ((wide_wx && tile.size.rows >= 2) ||
+            (tile.size.cols >= 2 && !wide_wx && rh >= 248.0f))) {
+            const float x0 = wide_wx ? (rect.left + left_w + 12.0f) : (rect.left + 14.0f);
+            float dy = wide_wx ? (rect.top + 90.0f) : (rect.top + 98.0f);
+            const float max_dy = wide_wx ? (rect.bottom - 8.0f) : (rect.bottom - 84.0f);
             int lo = 100, hi = -100;
             for (const auto& d : w.days) { lo = std::min(lo, d.lo_c); hi = std::max(hi, d.hi_c); }
             const float span = static_cast<float>(std::max(1, hi - lo));
-            d2d_dc_->FillRectangle(D2D1::RectF(x0, dy - 6.0f, rect.right - 14.0f, dy - 5.0f), Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
+            d2d_dc_->FillRectangle(D2D1::RectF(x0, dy - 7.0f, rect.right - 14.0f, dy - 6.0f), Brush(dark ? 0x1EFFFFFFu : 0x14000000u));
             for (size_t i = 0; i < w.days.size() && dy + 20.0f <= max_dy; ++i) {
                 const auto& d = w.days[i];
-                DrawWidgetText(d.label.c_str(), static_cast<UINT32>(d.label.size()), fmt_row_meta_.Get(),
-                                  D2D1::RectF(x0, dy, x0 + 40.0f, dy + 20.0f), Brush(text_pri));
-                DrawWeatherIcon(D2D1::RectF(x0 + 40.0f, dy + 1.0f, x0 + 58.0f, dy + 19.0f), d.code, dark);
-                const float bx0 = x0 + 66.0f, bx1 = rect.right - 60.0f;
-                if (bx1 > bx0 + 12.0f) {
-                    const float a = bx0 + (bx1 - bx0) * static_cast<float>(d.lo_c - lo) / span;
-                    const float b = bx0 + (bx1 - bx0) * static_cast<float>(d.hi_c - lo) / span;
-                    d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, dy + 8.0f, bx1, dy + 12.0f), 2.0f, 2.0f), Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
-                    d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(a, dy + 8.0f, std::max(a + 4.0f, b), dy + 12.0f), 2.0f, 2.0f), Brush(0xFFF5B84Au, 0.9f));
-                }
+                draw_text(d.label, fmt_row_meta_.Get(),
+                          D2D1::RectF(x0, dy, x0 + 38.0f, dy + 20.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+                DrawWeatherIcon(D2D1::RectF(x0 + 40.0f, dy + 1.0f, x0 + 58.0f, dy + 19.0f), d.code, dark, true);
+                const float bx0 = x0 + 66.0f, bx1 = rect.right - 62.0f;
+                draw_temp_range_bar(bx0, bx1, dy + 8.0f, d.lo_c, d.hi_c, lo, span, i == 0);
                 wchar_t db[24]{};
                 std::swprintf(db, ARRAYSIZE(db), L"%d°/%d°", d.lo_c, d.hi_c);
-                DrawWidgetText(db, static_cast<UINT32>(std::wcslen(db)), fmt_row_meta_.Get(),
-                                  D2D1::RectF(rect.right - 58.0f, dy, rect.right - 12.0f, dy + 20.0f), Brush(text_sec));
-                dy += 24.0f;
+                draw_text(db, fmt_row_meta_.Get(),
+                          D2D1::RectF(rect.right - 58.0f, dy, rect.right - 14.0f, dy + 20.0f), text_sec);
+                dy += 25.0f;
             }
         }
         break;
@@ -5684,121 +7275,184 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
     case model::TileKind::Calendar: {
         SYSTEMTIME st{};
         GetLocalTime(&st);
-        static constexpr const wchar_t* kWd[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
+        static constexpr const wchar_t* kWdFull[7] = {L"星期日", L"星期一", L"星期二", L"星期三", L"星期四", L"星期五", L"星期六"};
+        static constexpr const wchar_t* kMonths[12] = {
+            L"一月", L"二月", L"三月", L"四月", L"五月", L"六月",
+            L"七月", L"八月", L"九月", L"十月", L"十一月", L"十二月"};
         wchar_t day[8]{};
         std::swprintf(day, ARRAYSIZE(day), L"%u", st.wDay);
-        const wchar_t* wd = kWd[st.wDayOfWeek % 7];
+        const wchar_t* wd_full = kWdFull[st.wDayOfWeek % 7];
         std::vector<const model::TodoItem*> open_todos;
         for (const auto& td : state.todos) {
             if (!td.done && !td.text.empty()) open_todos.push_back(&td);
         }
-        static constexpr uint32_t kEvBarColors[3] = {0xFF4CA6FFu, 0xFF30A46Cu, 0xFFF5A524u};
+        const uint32_t ev_bar_colors[3] = {col_cpu, col_mem, col_disk};
 
         if (tile.size.cols == 1) {
-            DrawWidgetText(wd, static_cast<UINT32>(std::wcslen(wd)), fmt_tile_hdr_.Get(),
-                              D2D1::RectF(rect.left + 12.0f, rect.top + 10.0f, rect.right - 8.0f, rect.top + 26.0f), Brush(hue));
-            DrawWidgetText(day, static_cast<UINT32>(std::wcslen(day)), fmt_clock_big_.Get(),
-                              D2D1::RectF(rect.left + 12.0f, rect.top + 25.0f, rect.right - 8.0f, rect.top + 74.0f), Brush(text_pri));
+            // Iconic Apple Calendar 1x1 card: coral-red top header banner + bold centered date + frosted event footer pill
+            ComPtr<ID2D1RoundedRectangleGeometry> cal_clip;
+            d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(rect, tile_rad, tile_rad), &cal_clip);
+            if (cal_clip) {
+                d2d_dc_->PushLayer(D2D1::LayerParameters1(rect, cal_clip.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                          D2D1::IdentityMatrix(), 1.0f, nullptr, D2D1_LAYER_OPTIONS1_NONE),
+                                   nullptr);
+            }
+            const D2D1_RECT_F top_bar = D2D1::RectF(rect.left, rect.top, rect.right, rect.top + 25.0f);
+            const D2D1_GRADIENT_STOP rstops[2] = {
+                {0.0f, D2D1::ColorF(1.00f, 0.36f, 0.31f, 0.94f)},
+                {1.0f, D2D1::ColorF(0.88f, 0.21f, 0.18f, 0.92f)},
+            };
+            ComPtr<ID2D1GradientStopCollection> rsc;
+            ComPtr<ID2D1LinearGradientBrush> rlg;
+            if (SUCCEEDED(d2d_dc_->CreateGradientStopCollection(rstops, 2, &rsc)) && rsc &&
+                SUCCEEDED(d2d_dc_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(top_bar.left, top_bar.top), D2D1::Point2F(top_bar.left, top_bar.bottom)),
+                    rsc.Get(), &rlg)) && rlg) {
+                d2d_dc_->FillRectangle(top_bar, rlg.Get());
+            } else {
+                d2d_dc_->FillRectangle(top_bar, Brush(col_red, 0.92f));
+            }
+            if (cal_clip) d2d_dc_->PopLayer();
+
+            draw_text(wd_full, fmt_pill_.Get(),
+                      D2D1::RectF(rect.left + 6.0f, rect.top + 3.0f, rect.right - 6.0f, rect.top + 23.0f),
+                      0xFFFFFFFFu, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(day, fmt_clock_big_.Get(),
+                      D2D1::RectF(rect.left + 4.0f, rect.top + 26.0f, rect.right - 4.0f, rect.bottom - 24.0f),
+                      text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            const D2D1_RECT_F foot_pill = D2D1::RectF(rect.left + 8.0f, rect.bottom - 24.0f, rect.right - 8.0f, rect.bottom - 6.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), foot_pill, 9.0f, dark);
             if (!open_todos.empty()) {
-                DrawWidgetText(open_todos[0]->text.c_str(), static_cast<UINT32>(open_todos[0]->text.size()),
-                                  fmt_caption_.Get(),
-                                  D2D1::RectF(rect.left + 12.0f, rect.bottom - 24.0f, rect.right - 8.0f, rect.bottom - 8.0f),
-                                  Brush(text_sec));
+                const float dcy = (foot_pill.top + foot_pill.bottom) * 0.5f;
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(foot_pill.left + 8.0f, dcy), 2.6f, 2.6f), Brush(col_cpu));
+                draw_text(open_todos[0]->text, fmt_clock_num_.Get(),
+                          D2D1::RectF(foot_pill.left + 14.0f, foot_pill.top + 1.0f, foot_pill.right - 6.0f, foot_pill.bottom - 1.0f),
+                          text_pri, 0.92f, DWRITE_TEXT_ALIGNMENT_LEADING);
             } else {
                 wchar_t md[32]{};
                 std::swprintf(md, ARRAYSIZE(md), L"%u月%u日", st.wMonth, st.wDay);
-                DrawWidgetText(md, static_cast<UINT32>(std::wcslen(md)), fmt_caption_.Get(),
-                                  D2D1::RectF(rect.left + 12.0f, rect.bottom - 24.0f, rect.right - 8.0f, rect.bottom - 8.0f),
-                                  Brush(text_sec));
+                draw_text(md, fmt_clock_num_.Get(), foot_pill, text_sec, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
             }
             break;
         }
+
+        // Helper: renders authentic macOS Tahoe month calendar grid inside `area`.
+        auto draw_month_grid = [&](const D2D1_RECT_F& area, bool show_weekday_right) {
+            const float aw = area.right - area.left;
+            const float ah = area.bottom - area.top;
+            draw_text(kMonths[(st.wMonth - 1) % 12], fmt_tile_hdr_.Get(),
+                      D2D1::RectF(area.left + 4.0f, area.top, area.left + 96.0f, area.top + 18.0f), col_red);
+            if (show_weekday_right) {
+                draw_text(wd_full, fmt_caption_.Get(),
+                          D2D1::RectF(area.left + 72.0f, area.top, area.right - 4.0f, area.top + 18.0f),
+                          text_sec, 0.90f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
+
+            SYSTEMTIME first = st;
+            first.wDay = 1;
+            first.wHour = 12;
+            FILETIME ft{};
+            SystemTimeToFileTime(&first, &ft);
+            FileTimeToSystemTime(&ft, &first);
+            const int lead = (first.wDayOfWeek + 6) % 7;  // Monday first
+            static constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+            int mdays = kDays[(st.wMonth - 1) % 12];
+            if (st.wMonth == 2 && ((st.wYear % 4 == 0 && st.wYear % 100 != 0) || st.wYear % 400 == 0)) mdays = 29;
+            const int row_cnt = std::max(5, (lead + mdays + 6) / 7);
+
+            const float cw = aw / 7.0f;
+            const float head_y = area.top + 20.0f;
+            const float grid_y = head_y + 18.0f;
+            const float ch = std::clamp((area.bottom - grid_y) / static_cast<float>(row_cnt), 15.5f, 34.0f);
+            static constexpr const wchar_t* kHd[7] = {L"一", L"二", L"三", L"四", L"五", L"六", L"日"};
+            for (int c = 0; c < 7; ++c) {
+                const bool wknd = (c >= 5);
+                draw_text(kHd[c], fmt_clock_num_.Get(),
+                          D2D1::RectF(area.left + c * cw, head_y, area.left + (c + 1) * cw, head_y + 15.0f),
+                          text_sec, wknd ? 0.56f : 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+            d2d_dc_->FillRectangle(D2D1::RectF(area.left + 4.0f, grid_y - 2.0f, area.right - 4.0f, grid_y - 1.2f),
+                                   Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
+            const float badge_r = std::clamp(std::min(cw, ch) * 0.44f, 7.2f, 12.0f);
+            for (int d = 1; d <= mdays; ++d) {
+                const int cell = lead + d - 1, c = cell % 7, r = cell / 7;
+                const D2D1_RECT_F rc = D2D1::RectF(area.left + c * cw, grid_y + r * ch,
+                                                   area.left + (c + 1) * cw, grid_y + (r + 1) * ch);
+                wchar_t db[4]{};
+                std::swprintf(db, ARRAYSIZE(db), L"%d", d);
+                const bool today = (d == st.wDay);
+                const bool wknd = (c >= 5);
+                if (today) {
+                    const float cx = (rc.left + rc.right) * 0.5f, cy = (rc.top + rc.bottom) * 0.5f;
+                    d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), badge_r + 2.5f, badge_r + 2.5f), Brush(col_red, 0.24f));
+                    d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), badge_r, badge_r), Brush(col_red));
+                    draw_text(db, fmt_pill_.Get(), rc, 0xFFFFFFFFu, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                } else {
+                    draw_text(db, ah >= 170.0f ? fmt_pill_.Get() : fmt_clock_num_.Get(), rc,
+                              text_pri, wknd ? 0.48f : 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
+            }
+        };
+
         if (tile.size.cols < 4) {
-            wchar_t md_wd[48]{};
-            std::swprintf(md_wd, ARRAYSIZE(md_wd), L"%u月%u日 %ls", st.wMonth, st.wDay, wd);
-            DrawWidgetText(md_wd, static_cast<UINT32>(std::wcslen(md_wd)), fmt_tile_hdr_.Get(),
-                              D2D1::RectF(rect.left + 14.0f, rect.top + 12.0f, rect.right - 12.0f, rect.top + 30.0f), Brush(hue));
-            if (!open_todos.empty()) {
-                float ey = rect.top + 40.0f;
-                size_t shown = 0;
-                for (size_t i = 0; i < open_todos.size() && ey + 36.0f <= rect.bottom - 26.0f; ++i) {
-                    d2d_dc_->FillRoundedRectangle(
-                        D2D1::RoundedRect(D2D1::RectF(rect.left + 14.0f, ey + 2.0f, rect.left + 17.0f, ey + 34.0f), 1.5f, 1.5f),
-                        Brush(kEvBarColors[i % 3]));
-                    DrawWidgetText(open_todos[i]->text.c_str(), static_cast<UINT32>(open_todos[i]->text.size()),
-                                      fmt_row_lead_.Get(),
-                                      D2D1::RectF(rect.left + 24.0f, ey, rect.right - 12.0f, ey + 18.0f), Brush(text_pri));
-                    DrawWidgetText(L"今日待办", 4, fmt_row_meta_.Get(),
-                                      D2D1::RectF(rect.left + 24.0f, ey + 18.0f, rect.right - 12.0f, ey + 34.0f), Brush(text_sec));
-                    ey += 44.0f;
-                    ++shown;
+            // 2x2: Full macOS Tahoe month calendar grid + optional sleek bottom next-todo glass pill!
+            const bool show_pill = (rh >= 190.0f);
+            const float grid_bottom = show_pill ? (rect.bottom - 36.0f) : (rect.bottom - 10.0f);
+            draw_month_grid(D2D1::RectF(rect.left + 12.0f, rect.top + 11.0f, rect.right - 12.0f, grid_bottom), true);
+            if (show_pill) {
+                const D2D1_RECT_F pill = D2D1::RectF(rect.left + 12.0f, rect.bottom - 32.0f, rect.right - 12.0f, rect.bottom - 10.0f);
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), pill, 8.0f, dark);
+                if (!open_todos.empty()) {
+                    d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(pill.left + 7.0f, pill.top + 5.0f, pill.left + 9.5f, pill.bottom - 5.0f), 1.25f, 1.25f),
+                                                  Brush(col_cpu));
+                    draw_text(open_todos.front()->text, fmt_clock_num_.Get(),
+                              D2D1::RectF(pill.left + 15.0f, pill.top + 2.0f, pill.right - 8.0f, pill.bottom - 2.0f),
+                              text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_LEADING);
+                } else {
+                    wchar_t ymd[32]{};
+                    std::swprintf(ymd, ARRAYSIZE(ymd), L"%u年%u月%u日 · 今日无待办", st.wYear, st.wMonth, st.wDay);
+                    draw_text(ymd, fmt_clock_num_.Get(),
+                              D2D1::RectF(pill.left + 8.0f, pill.top + 2.0f, pill.right - 8.0f, pill.bottom - 2.0f),
+                              text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
                 }
-                if (open_todos.size() > shown) {
-                    wchar_t more_buf[32]{};
-                    std::swprintf(more_buf, ARRAYSIZE(more_buf), L"还有 %zu 项待办", open_todos.size() - shown);
-                    DrawWidgetText(more_buf, static_cast<UINT32>(std::wcslen(more_buf)), fmt_caption_.Get(),
-                                      D2D1::RectF(rect.left + 14.0f, rect.bottom - 26.0f, rect.right - 12.0f, rect.bottom - 8.0f),
-                                      Brush(text_sec));
-                }
-            } else {
-                DrawWidgetText(day, static_cast<UINT32>(std::wcslen(day)), fmt_clock_big_.Get(),
-                                  D2D1::RectF(rect.left + 14.0f, rect.top + 38.0f, rect.right - 12.0f, rect.top + 96.0f), Brush(text_pri));
-                DrawWidgetText(L"今天暂无待办事项", 8, fmt_caption_.Get(),
-                                  D2D1::RectF(rect.left + 14.0f, rect.bottom - 28.0f, rect.right - 12.0f, rect.bottom - 10.0f),
-                                  Brush(text_sec));
             }
             break;
         }
-        // Wide: the month on the left, today & events on the right.
-        const float gx = rect.left + 14.0f, gy = rect.top + 12.0f, cw = 26.0f, ch = 21.0f;
-        wchar_t mt[16]{};
-        std::swprintf(mt, ARRAYSIZE(mt), L"%u月", st.wMonth);
-        DrawWidgetText(mt, static_cast<UINT32>(std::wcslen(mt)), fmt_tile_hdr_.Get(), D2D1::RectF(gx + 4.0f, gy, gx + 100.0f, gy + 18.0f), Brush(hue));
-        static constexpr const wchar_t* kHd[7] = {L"一", L"二", L"三", L"四", L"五", L"六", L"日"};
-        for (int c = 0; c < 7; ++c)
-            DrawWidgetText(kHd[c], 1, fmt_pill_.Get(), D2D1::RectF(gx + c * cw, gy + 20.0f, gx + (c + 1) * cw, gy + 36.0f), Brush(text_sec));
-        SYSTEMTIME first = st; first.wDay = 1;
-        FILETIME ft{}; SystemTimeToFileTime(&first, &ft); FileTimeToSystemTime(&ft, &first);
-        const int lead = (first.wDayOfWeek + 6) % 7;  // Monday first
-        static constexpr int kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-        int mdays = kDays[(st.wMonth - 1) % 12];
-        if (st.wMonth == 2 && ((st.wYear % 4 == 0 && st.wYear % 100 != 0) || st.wYear % 400 == 0)) mdays = 29;
-        for (int d = 1; d <= mdays; ++d) {
-            const int cell = lead + d - 1, c = cell % 7, r = cell / 7;
-            const D2D1_RECT_F rc = D2D1::RectF(gx + c * cw, gy + 38.0f + r * ch, gx + (c + 1) * cw, gy + 38.0f + (r + 1) * ch);
-            wchar_t db[4]{};
-            std::swprintf(db, ARRAYSIZE(db), L"%d", d);
-            if (d == st.wDay) {
-                const float cx = (rc.left + rc.right) * 0.5f, cy = (rc.top + rc.bottom) * 0.5f;
-                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 9.5f, 9.5f), Brush(hue));
-                DrawWidgetText(db, static_cast<UINT32>(std::wcslen(db)), fmt_pill_.Get(), rc, Brush(0xFFFFFFFFu));
-            } else {
-                DrawWidgetText(db, static_cast<UINT32>(std::wcslen(db)), fmt_pill_.Get(), rc, Brush(text_pri, 0.9f));
-            }
-        }
-        const float rx = gx + 7 * cw + 18.0f;
-        wchar_t today_hdr[32]{};
-        std::swprintf(today_hdr, ARRAYSIZE(today_hdr), L"今天 · %ls", wd);
-        DrawWidgetText(today_hdr, static_cast<UINT32>(std::wcslen(today_hdr)), fmt_tile_hdr_.Get(),
-                          D2D1::RectF(rx, gy, rect.right - 12.0f, gy + 18.0f), Brush(hue));
+
+        // Wide 4x2 / 4x4: Left Tahoe month grid | vertical divider | Right hero date + glass todo cards!
+        const float grid_w = std::min(212.0f, rw * 0.50f);
+        draw_month_grid(D2D1::RectF(rect.left + 14.0f, rect.top + 12.0f, rect.left + 14.0f + grid_w, rect.bottom - 12.0f), false);
+        const float div_x = rect.left + 14.0f + grid_w + 10.0f;
+        d2d_dc_->FillRectangle(D2D1::RectF(div_x, rect.top + 16.0f, div_x + 1.0f, rect.bottom - 16.0f),
+                               Brush(dark ? 0x20FFFFFFu : 0x14000000u));
+        const float rx = div_x + 12.0f;
+        const float rr = rect.right - 14.0f;
+        draw_text(wd_full, fmt_tile_hdr_.Get(), D2D1::RectF(rx, rect.top + 12.0f, rr, rect.top + 30.0f), col_red);
         if (!open_todos.empty()) {
-            float ey = gy + 28.0f;
-            for (size_t i = 0; i < open_todos.size() && ey + 36.0f <= rect.bottom - 8.0f; ++i) {
+            float ey = rect.top + 34.0f;
+            if (rh >= 280.0f) {
+                draw_text(day, fmt_hero_num_.Get(), D2D1::RectF(rx - 2.0f, rect.top + 30.0f, rr, rect.top + 90.0f), text_pri);
+                ey = rect.top + 96.0f;
+            }
+            for (size_t i = 0; i < open_todos.size() && ey + 38.0f <= rect.bottom - 10.0f; ++i) {
+                const D2D1_RECT_F card = D2D1::RectF(rx, ey, rr, ey + 36.0f);
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), card, 9.0f, dark);
                 d2d_dc_->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(rx, ey + 2.0f, rx + 3.0f, ey + 34.0f), 1.5f, 1.5f),
-                    Brush(kEvBarColors[i % 3]));
-                DrawWidgetText(open_todos[i]->text.c_str(), static_cast<UINT32>(open_todos[i]->text.size()),
-                                  fmt_row_lead_.Get(),
-                                  D2D1::RectF(rx + 10.0f, ey, rect.right - 12.0f, ey + 18.0f), Brush(text_pri));
-                DrawWidgetText(L"待办事项", 4, fmt_row_meta_.Get(),
-                                  D2D1::RectF(rx + 10.0f, ey + 18.0f, rect.right - 12.0f, ey + 34.0f), Brush(text_sec));
-                ey += 44.0f;
+                    D2D1::RoundedRect(D2D1::RectF(card.left + 6.0f, card.top + 6.0f, card.left + 9.0f, card.bottom - 6.0f), 1.5f, 1.5f),
+                    Brush(ev_bar_colors[i % 3]));
+                draw_text(open_todos[i]->text, fmt_row_lead_.Get(),
+                          D2D1::RectF(card.left + 15.0f, card.top + 3.0f, card.right - 8.0f, card.top + 20.0f), text_pri);
+                draw_text(L"今日待办", fmt_clock_num_.Get(),
+                          D2D1::RectF(card.left + 15.0f, card.top + 19.0f, card.right - 8.0f, card.bottom - 3.0f),
+                          text_sec, 0.90f, DWRITE_TEXT_ALIGNMENT_LEADING);
+                ey += 42.0f;
             }
         } else {
-            DrawWidgetText(day, static_cast<UINT32>(std::wcslen(day)), fmt_clock_big_.Get(), D2D1::RectF(rx, gy + 22.0f, rect.right - 12.0f, gy + 76.0f), Brush(text_pri));
+            draw_text(day, fmt_hero_num_.Get(), D2D1::RectF(rx - 2.0f, rect.top + 34.0f, rr, rect.top + 104.0f), text_pri);
             wchar_t ymd[32]{};
-            std::swprintf(ymd, ARRAYSIZE(ymd), L"%u年%u月", st.wYear, st.wMonth);
-            DrawWidgetText(ymd, static_cast<UINT32>(std::wcslen(ymd)), fmt_caption_.Get(), D2D1::RectF(rx, gy + 78.0f, rect.right - 12.0f, gy + 96.0f), Brush(text_sec));
+            std::swprintf(ymd, ARRAYSIZE(ymd), L"%u年 %ls", st.wYear, kMonths[(st.wMonth - 1) % 12]);
+            draw_text(ymd, fmt_caption_.Get(), D2D1::RectF(rx, rect.top + 108.0f, rr, rect.top + 128.0f), text_sec);
+            draw_text(L"今天暂无待办事项", fmt_caption_.Get(), D2D1::RectF(rx, rect.bottom - 32.0f, rr, rect.bottom - 12.0f), text_sec, 0.80f);
         }
         break;
     }
@@ -5809,43 +7463,55 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
         const size_t total = state.todos.size();
         if (tile.size.cols == 1) {
             const float cx = (rect.left + rect.right) * 0.5f, cy = rect.top + 38.0f, rad = 22.0f;
-            d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad), Brush(dark ? 0x24FFFFFFu : 0x16000000u), 4.2f);
-            if (total) DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(hue), cx, cy, rad, -90.0f,
-                                       360.0f * static_cast<float>(done) / static_cast<float>(total), 4.2f, round_stroke_.Get());
+            const float pct = total ? (100.0f * static_cast<float>(done) / static_cast<float>(total)) : 0.0f;
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, rad, 4.4f, pct, col_mem, dark);
             wchar_t b[16]{};
             std::swprintf(b, ARRAYSIZE(b), L"%zu/%zu", done, total);
-            DrawWidgetText(b, static_cast<UINT32>(std::wcslen(b)), fmt_disk_pct_.Get(), D2D1::RectF(cx - rad, cy - 10.0f, cx + rad, cy + 10.0f), Brush(text_pri));
+            draw_text(b, fmt_disk_pct_.Get(), D2D1::RectF(cx - rad, cy - 10.0f, cx + rad, cy + 10.0f), text_pri);
             if (show_title) {
                 const std::wstring t = tile.title.empty() ? L"待办" : tile.title;
-                DrawWidgetText(t.c_str(), static_cast<UINT32>(t.size()), fmt_tile_small_title_.Get(),
-                                  D2D1::RectF(rect.left + 4.0f, rect.bottom - 26.0f, rect.right - 4.0f, rect.bottom - 6.0f), Brush(text_pri));
+                draw_text(t, fmt_tile_small_title_.Get(),
+                          D2D1::RectF(rect.left + 4.0f, rect.bottom - 26.0f, rect.right - 4.0f, rect.bottom - 6.0f), text_pri);
             }
             break;
         }
         wchar_t sub[24]{};
         std::swprintf(sub, ARRAYSIZE(sub), L"%zu/%zu 完成", done, total);
         draw_wide_header(tile.title.empty() ? L"待办" : tile.title, sub);
+        if (show_title && total > 0 && !show_hover_edit) {
+            const float pct_hdr = 100.0f * static_cast<float>(done) / static_cast<float>(total);
+            const float sub_w = MeasureSingleLineWidth(sub, fmt_tile_sub_.Get(), 96.0f);
+            const float rcx = rect.right - 14.0f - sub_w - 12.0f;
+            if (rcx > rect.left + 84.0f) {
+                DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                   rcx, rect.top + 20.0f, 6.2f, 2.0f, pct_hdr, hue, dark);
+            }
+        }
         float ry = show_title ? rect.top + 46.0f : rect.top + 12.0f;
         for (size_t i = 0; i < state.todos.size() && ry + 26.0f <= rect.bottom - 6.0f; ++i) {
             const auto& td = state.todos[i];
             const D2D1_RECT_F row = D2D1::RectF(rect.left + 8.0f, ry, rect.right - 8.0f, ry + 27.0f);
-            if (interaction.hovered_tile_id == tile_in.id && interaction.hovered_todo_index == static_cast<int>(i))
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), Brush(dark ? 0x14FFFFFFu : 0x0C000000u));
+            const bool row_hot = interaction.hovered_tile_id == tile_in.id && interaction.hovered_todo_index == static_cast<int>(i);
+            if (row_hot) {
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), row, 8.0f, dark);
+            } else if (i > 0) {
+                d2d_dc_->FillRectangle(D2D1::RectF(row.left + 30.0f, ry - 1.0f, row.right - 8.0f, ry - 0.3f),
+                                       Brush(dark ? 0x14FFFFFFu : 0x0E000000u));
+            }
             const float cx = row.left + 14.0f, cy = (row.top + row.bottom) * 0.5f;
             if (td.done) {
-                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 8.0f, 8.0f), Brush(hue));
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 9.5f, 9.5f), Brush(hue, 0.22f));
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 7.6f, 7.6f), Brush(hue));
                 const wchar_t ck[2] = {L'\xE73E', 0};
-                // On a coloured tile the circle takes the text colour, so the tick takes the tile's colour.
                 const uint32_t tick = look.background == model::TileBackground::Color ? (look.color_argb | 0xFF000000u) : 0xFFFFFFFFu;
                 DrawGlyph(d2d_dc_.Get(), ck, 1, fmt_fluent_12_.Get(), D2D1::RectF(cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f), Brush(tick));
             } else {
-                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 7.5f, 7.5f), Brush(text_sec), 1.5f);
+                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 7.5f, 7.5f), Brush(hue, 0.72f), 1.5f);
             }
-            const bool row_hot = interaction.hovered_tile_id == tile_in.id && interaction.hovered_todo_index == static_cast<int>(i);
-            DrawWidgetText(td.text.c_str(), static_cast<UINT32>(td.text.size()), fmt_row_name_.Get(),
-                              D2D1::RectF(row.left + 30.0f, row.top, row.right - (row_hot ? 34.0f : 6.0f), row.bottom), Brush(td.done ? text_sec : text_pri));
+            draw_text(td.text, fmt_row_name_.Get(),
+                      D2D1::RectF(row.left + 30.0f, row.top, row.right - (row_hot ? 34.0f : 6.0f), row.bottom), td.done ? text_sec : text_pri);
             if (row_hot) {
-                // Hovered: × removes it (undoable), as a swipe would on a phone.
                 const D2D1_RECT_F xb = TodoDeleteRect(tile_in, rect, i);
                 const float xc = (xb.left + xb.right) * 0.5f, yc = (xb.top + xb.bottom) * 0.5f;
                 d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(xc, yc), 9.0f, 9.0f), Brush(dark ? 0x26FFFFFFu : 0x14000000u));
@@ -5859,93 +7525,978 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
             ry += 29.0f;
         }
         if (ry + 25.0f <= rect.bottom - 6.0f) {
-            const D2D1_RECT_F add_row = D2D1::RectF(rect.left + 8.0f, ry, rect.right - 8.0f, ry + 26.0f);
+            const D2D1_RECT_F add_row = D2D1::RectF(rect.left + 10.0f, ry + 1.0f, rect.right - 10.0f, ry + 26.0f);
             const bool add_hot = interaction.hovered_tile_id == tile_in.id && interaction.hovered_tile_action;
-            if (add_hot) {
-                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(add_row, 8.0f, 8.0f),
-                                              Brush(dark ? 0x16FFFFFFu : 0x0E000000u));
-            }
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), add_row, 9.0f, dark);
             const wchar_t plus_g[2] = {L'\xE710', 0};
             const float cx = add_row.left + 14.0f, cy = (add_row.top + add_row.bottom) * 0.5f;
             DrawGlyph(d2d_dc_.Get(), plus_g, 1, fmt_fluent_12_.Get(),
                       D2D1::RectF(cx - 7.0f, cy - 7.0f, cx + 7.0f, cy + 7.0f), Brush(hue));
-            const wchar_t* add_txt = L"添加待办…";
-            DrawWidgetText(add_txt, static_cast<UINT32>(std::wcslen(add_txt)), fmt_row_name_.Get(),
-                              D2D1::RectF(add_row.left + 30.0f, add_row.top, add_row.right - 6.0f, add_row.bottom),
-                              Brush(add_hot ? text_pri : text_sec));
+            draw_text(L"添加待办…", fmt_row_name_.Get(),
+                      D2D1::RectF(add_row.left + 28.0f, add_row.top, add_row.right - 6.0f, add_row.bottom),
+                      add_hot ? text_pri : text_sec);
         } else if (state.todos.empty()) {
-            const wchar_t* hint = L"单击添加待办事项…";
-            DrawWidgetText(hint, static_cast<UINT32>(std::wcslen(hint)), fmt_empty_hint_.Get(),
-                              D2D1::RectF(rect.left + 14.0f, ry, rect.right - 14.0f, rect.bottom - 8.0f), Brush(text_sec, 0.8f));
+            draw_text(L"单击添加待办事项…", fmt_empty_hint_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, ry, rect.right - 14.0f, rect.bottom - 8.0f), text_sec, 0.82f);
         }
         break;
     }
 
     case model::TileKind::System: {
         const auto& sy = live_data.system;
-        const int mem_pct = sy.mem_total ? static_cast<int>(sy.mem_used * 100 / sy.mem_total) : 0;
+        const float mem_pct = sy.mem_total
+            ? std::clamp(static_cast<float>(static_cast<double>(sy.mem_used) * 100.0 / static_cast<double>(sy.mem_total)), 0.0f, 100.0f)
+            : 0.0f;
+        const float mem_used_gb = static_cast<float>(static_cast<double>(sy.mem_used) / (1024.0 * 1024.0 * 1024.0));
+        const float mem_total_gb = static_cast<float>(static_cast<double>(sy.mem_total) / (1024.0 * 1024.0 * 1024.0));
+
+        auto draw_labeled_ring = [&](float cx, float cy, float rad, float stroke, float pct, uint32_t col,
+                                     const wchar_t* label, const std::wstring& sub) {
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, rad, stroke, pct, col, dark);
+            wchar_t pb[16]{};
+            std::swprintf(pb, ARRAYSIZE(pb), L"%ld%%", std::lround(std::clamp(pct, 0.0f, 100.0f)));
+            draw_text(pb, fmt_disk_pct_.Get(),
+                      D2D1::RectF(cx - rad, cy - 10.0f, cx + rad, cy + 10.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(label, fmt_tile_small_title_.Get(),
+                      D2D1::RectF(cx - rad - 12.0f, cy + rad + 5.0f, cx + rad + 12.0f, cy + rad + 21.0f),
+                      text_pri, 0.90f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            if (!sub.empty()) {
+                draw_text(sub, fmt_clock_num_.Get(),
+                          D2D1::RectF(cx - rad - 22.0f, cy + rad + 20.0f, cx + rad + 22.0f, cy + rad + 34.0f),
+                          text_sec, 0.86f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            }
+        };
+
         if (tile.size.cols == 1) {
-            constexpr float r = 14.0f, stroke = 3.2f;
-            auto ring = [&](float cy, int pct, uint32_t c, const wchar_t* lbl) {
+            constexpr float r = 14.5f, stroke = 3.4f;
+            auto mini_ring = [&](float cy, float pct, uint32_t c, const wchar_t* lbl) {
                 const float cx = rect.left + 12.0f + r;
-                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), r, r), Brush(dark ? 0x24FFFFFFu : 0x16000000u), stroke);
-                DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(c), cx, cy, r, -90.0f, 3.6f * static_cast<float>(std::clamp(pct, 0, 100)), stroke, round_stroke_.Get());
+                DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                   cx, cy, r, stroke, pct, c, dark);
                 wchar_t b[8]{};
-                std::swprintf(b, ARRAYSIZE(b), L"%d", pct);
-                DrawWidgetText(b, static_cast<UINT32>(std::wcslen(b)), fmt_pill_.Get(), D2D1::RectF(cx - r, cy - 8.0f, cx + r, cy + 8.0f), Brush(text_pri));
-                // Label beside the ring; the right edge leaves room for a stack's page dots.
-                DrawWidgetText(lbl, static_cast<UINT32>(std::wcslen(lbl)), fmt_pill_.Get(),
-                                  D2D1::RectF(cx + r + 6.0f, cy - 8.0f, rect.right - 14.0f, cy + 8.0f), Brush(text_sec));
+                std::swprintf(b, ARRAYSIZE(b), L"%ld", std::lround(pct));
+                draw_text(b, fmt_pill_.Get(), D2D1::RectF(cx - r, cy - 8.0f, cx + r, cy + 8.0f), text_pri);
+                draw_text(lbl, fmt_pill_.Get(), D2D1::RectF(cx + r + 6.0f, cy - 8.0f, rect.right - 12.0f, cy + 8.0f),
+                          text_sec, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
             };
             const float mid = (rect.top + rect.bottom) * 0.5f;
-            const float gap = std::min(21.0f, (rect.bottom - rect.top) * 0.5f - r - 6.0f);
-            ring(mid - gap, sy.cpu_pct, hue, L"CPU");
-            ring(mid + gap, mem_pct, 0xFF30A46Cu, L"内存");
+            const float gap = std::min(21.0f, rh * 0.5f - r - 6.0f);
+            mini_ring(mid - gap, static_cast<float>(sy.cpu_pct), col_cpu, L"CPU");
+            mini_ring(mid + gap, mem_pct, col_mem, L"内存");
             break;
         }
-        draw_wide_header(tile.title.empty() ? L"系统" : tile.title, sy.valid ? L"" : L"读取中");
-        if (tile.size.cols == 2 && tile.size.rows >= 2) {
-            // 2x2: four gauges in a grid — the value inside each ring, its name below — as a phone's battery widget.
-            const int net_pct = static_cast<int>(std::min<uint64_t>(100, sy.net_down_bps / (1024 * 1024 / 4)));
-            struct Gauge { const wchar_t* label; int pct; uint32_t color; std::wstring inside; };
-            const Gauge gauges[4] = {{L"CPU", sy.cpu_pct, hue, std::to_wstring(sy.cpu_pct) + L"%"},
-                                     {L"内存", mem_pct, 0xFF30A46Cu, std::to_wstring(mem_pct) + L"%"},
-                                     {L"C: 盘", sy.disk_used_pct, 0xFFF5A524u, std::to_wstring(sy.disk_used_pct) + L"%"},
-                                     {L"网络 ↓", net_pct, 0xFF8E6BE8u, FormatBytesCompact(sy.net_down_bps)}};
-            const float gtop = show_title ? rect.top + 44.0f : rect.top + 8.0f;
-            const float cell_w = (rect.right - rect.left - 16.0f) * 0.5f, cell_h = (rect.bottom - 6.0f - gtop) * 0.5f;
-            const float rad = std::max(10.0f, std::min(cell_w, cell_h - 16.0f) * 0.5f - 6.0f);
-            for (int i = 0; i < 4; ++i) {
-                const auto& g = gauges[i];
-                const float cx = rect.left + 8.0f + cell_w * (static_cast<float>(i % 2) + 0.5f);
-                const float cy = gtop + cell_h * static_cast<float>(i / 2) + rad + 4.0f;
-                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad), Brush(dark ? 0x24FFFFFFu : 0x16000000u), 4.0f);
-                DrawCircularArc(d2d_factory_.Get(), d2d_dc_.Get(), Brush(g.color), cx, cy, rad, -90.0f,
-                                3.6f * static_cast<float>(std::clamp(g.pct, 0, 100)), 4.0f, round_stroke_.Get());
-                DrawWidgetText(g.inside.c_str(), static_cast<UINT32>(g.inside.size()), i == 3 ? fmt_pill_.Get() : fmt_disk_pct_.Get(),
-                                  D2D1::RectF(cx - rad, cy - 9.0f, cx + rad, cy + 9.0f), Brush(text_pri));
-                DrawWidgetText(g.label, static_cast<UINT32>(std::wcslen(g.label)), fmt_pill_.Get(),
-                                  D2D1::RectF(cx - cell_w * 0.5f, cy + rad + 3.0f, cx + cell_w * 0.5f, cy + rad + 19.0f), Brush(text_sec));
+
+        const std::wstring cpu_sub = (sy.physical_cores > 0 && sy.logical_cores > sy.physical_cores)
+            ? (std::to_wstring(sy.physical_cores) + L"核" + std::to_wstring(sy.logical_cores) + L"线程")
+            : (sy.logical_cores > 0 ? (std::to_wstring(sy.logical_cores) + L" 线程") : L"总负载");
+        wchar_t mem_sub_buf[32]{};
+        if (mem_total_gb > 0.1f) std::swprintf(mem_sub_buf, ARRAYSIZE(mem_sub_buf), L"%.1f/%.1fG", mem_used_gb, mem_total_gb);
+        const std::wstring mem_sub = mem_sub_buf;
+
+        // Build safe 1-point fallback slices when history hasn't accumulated yet (e.g., first paint / snapshots).
+        const float cpu_single = static_cast<float>(sy.cpu_pct);
+        const float net_single = static_cast<float>(static_cast<double>(sy.net_down_bps + sy.net_up_bps) / 1024.0);
+        const std::span<const float> cpu_span = sy.cpu_history.empty()
+            ? std::span<const float>(&cpu_single, 1)
+            : std::span<const float>(sy.cpu_history);
+        const std::span<const float> mem_span = sy.mem_history.empty()
+            ? std::span<const float>(&mem_pct, 1)
+            : std::span<const float>(sy.mem_history);
+        const std::span<const float> net_span = sy.net_history.empty()
+            ? std::span<const float>(&net_single, 1)
+            : std::span<const float>(sy.net_history);
+
+        if (tile.size.cols < 4) {
+            // 2x2: macOS Tahoe Small Monitor — Dual glowing rings (CPU + RAM) + bottom live Net speed glass card!
+            draw_text(tile.title.empty() ? L"性能监控" : tile.title, fmt_tile_hdr_.Get(),
+                      D2D1::RectF(rect.left + 15.0f, rect.top + 11.0f, rect.right - 88.0f, rect.top + 28.0f),
+                      text_sec, 0.96f);
+            if (!sy.valid) {
+                draw_text(L"读取中", fmt_clock_num_.Get(),
+                          D2D1::RectF(rect.right - 86.0f, rect.top + 11.0f, rect.right - 14.0f, rect.top + 28.0f),
+                          text_sec, 0.85f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            } else if (sy.logical_cores > 0) {
+                const std::wstring cores_badge = (sy.physical_cores > 0 && sy.logical_cores > sy.physical_cores)
+                    ? (std::to_wstring(sy.physical_cores) + L"核" + std::to_wstring(sy.logical_cores) + L"线程")
+                    : (std::to_wstring(sy.logical_cores) + L"线程");
+                draw_text(cores_badge, fmt_clock_num_.Get(),
+                          D2D1::RectF(rect.right - 86.0f, rect.top + 11.0f, rect.right - 14.0f, rect.top + 28.0f),
+                          text_sec, 0.82f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            }
+
+            const bool extra_row = (rh >= 234.0f);
+            const float net_h = 30.0f;
+            const float vram_h = extra_row ? 26.0f : 0.0f;
+            const float bottom_cards_h = net_h + (extra_row ? (vram_h + 7.0f) : 0.0f) + 14.0f;
+            const float ring_area_top = rect.top + 32.0f;
+            const float ring_area_bot = rect.bottom - bottom_cards_h - 4.0f;
+            const float ring_rad = std::clamp(std::min(rw * 0.165f, (ring_area_bot - ring_area_top - 32.0f) * 0.48f), 20.0f, 34.0f);
+            const float ring_cy = ring_area_top + ring_rad + 6.0f;
+            const bool show_sub = (ring_area_bot - (ring_cy + ring_rad) >= 34.0f);
+            draw_labeled_ring(rect.left + rw * 0.28f, ring_cy, ring_rad, 4.8f, static_cast<float>(sy.cpu_pct), col_cpu,
+                              L"CPU", show_sub ? cpu_sub : L"");
+            draw_labeled_ring(rect.left + rw * 0.72f, ring_cy, ring_rad, 4.8f, mem_pct, col_mem,
+                              L"内存", show_sub ? mem_sub : L"");
+
+            if (extra_row) {
+                const D2D1_RECT_F vram_box = D2D1::RectF(rect.left + 13.0f, rect.bottom - 14.0f - net_h - 7.0f - vram_h,
+                                                         rect.right - 13.0f, rect.bottom - 14.0f - net_h - 7.0f);
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), vram_box, 9.0f, dark);
+                const float vcy = (vram_box.top + vram_box.bottom) * 0.5f;
+                if (sy.has_vram) {
+                    d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(vram_box.left + 11.0f, vcy), 3.0f, 3.0f), Brush(col_vram));
+                    wchar_t vb[48]{};
+                    std::swprintf(vb, ARRAYSIZE(vb), L"显存  %.1f/%.1fG  %ld%%", sy.vram_used_gb, sy.vram_total_gb, std::lround(sy.vram_pct));
+                    draw_text(vb, fmt_clock_num_.Get(),
+                              D2D1::RectF(vram_box.left + 19.0f, vram_box.top + 2.0f, vram_box.right - 8.0f, vram_box.bottom - 2.0f),
+                              text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_LEADING);
+                } else {
+                    d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(vram_box.left + 11.0f, vcy), 3.0f, 3.0f), Brush(col_disk));
+                    const std::wstring db = L"C: 盘  " + std::to_wstring(sy.disk_used_pct) + L"%  ·  剩 " + FormatBytesCompact(sy.disk_free);
+                    draw_text(db, fmt_clock_num_.Get(),
+                              D2D1::RectF(vram_box.left + 19.0f, vram_box.top + 2.0f, vram_box.right - 8.0f, vram_box.bottom - 2.0f),
+                              text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_LEADING);
+                }
+            }
+
+            const D2D1_RECT_F net_box = D2D1::RectF(rect.left + 13.0f, rect.bottom - 14.0f - net_h,
+                                                    rect.right - 13.0f, rect.bottom - 14.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), net_box, 10.0f, dark);
+            const std::wstring dn = L"↓" + FormatSpeedCompact(sy.net_down_bps);
+            const std::wstring up = L"↑" + FormatSpeedCompact(sy.net_up_bps);
+            draw_text(dn, fmt_clock_num_.Get(),
+                      D2D1::RectF(net_box.left + 9.0f, net_box.top + 2.0f, (net_box.left + net_box.right) * 0.5f, net_box.bottom - 2.0f),
+                      col_down, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+            draw_text(up, fmt_clock_num_.Get(),
+                      D2D1::RectF((net_box.left + net_box.right) * 0.5f, net_box.top + 2.0f, net_box.right - 9.0f, net_box.bottom - 2.0f),
+                      col_up, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            break;
+        }
+
+        if (rh < 300.0f) {
+            // 4x2: macOS Tahoe Medium Monitor — Left (CPU + RAM rings + VRAM/Disk pill) | Right (CPU/RAM Sparkline + Net Speed)!
+            const float split_x = rect.left + rw * 0.48f;
+            draw_text(tile.title.empty() ? L"性能监控" : tile.title, fmt_tile_hdr_.Get(),
+                      D2D1::RectF(rect.left + 16.0f, rect.top + 11.0f, split_x - 8.0f, rect.top + 28.0f), text_sec, 0.96f);
+
+            const float ring_rad = std::clamp(std::min((split_x - rect.left) * 0.16f, (rh - 96.0f) * 0.34f), 22.0f, 30.0f);
+            const float ring_cy = rect.top + 38.0f + ring_rad;
+            const float left_span = split_x - rect.left - 16.0f;
+            draw_labeled_ring(rect.left + 12.0f + left_span * 0.27f, ring_cy, ring_rad, 4.8f,
+                              static_cast<float>(sy.cpu_pct), col_cpu, L"CPU", cpu_sub);
+            draw_labeled_ring(rect.left + 12.0f + left_span * 0.76f, ring_cy, ring_rad, 4.8f,
+                              mem_pct, col_mem, L"内存", mem_sub);
+
+            // Bottom-left VRAM (or Disk) glass pill
+            const D2D1_RECT_F vram_box = D2D1::RectF(rect.left + 14.0f, rect.bottom - 41.0f, split_x - 8.0f, rect.bottom - 14.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), vram_box, 10.0f, dark);
+            const float vcy = (vram_box.top + vram_box.bottom) * 0.5f;
+            if (sy.has_vram) {
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(vram_box.left + 11.0f, vcy), 3.2f, 3.2f), Brush(col_vram));
+                wchar_t vb[48]{};
+                std::swprintf(vb, ARRAYSIZE(vb), L"显存  %.1f/%.1fG  %ld%%", sy.vram_used_gb, sy.vram_total_gb, std::lround(sy.vram_pct));
+                draw_text(vb, fmt_clock_num_.Get(),
+                          D2D1::RectF(vram_box.left + 19.0f, vram_box.top + 2.0f, vram_box.right - 6.0f, vram_box.bottom - 2.0f),
+                          text_pri, 0.96f, DWRITE_TEXT_ALIGNMENT_LEADING);
+            } else {
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(vram_box.left + 11.0f, vcy), 3.2f, 3.2f), Brush(col_disk));
+                const std::wstring db = L"C: 盘  " + std::to_wstring(sy.disk_used_pct) + L"%  ·  剩 " + FormatBytesCompact(sy.disk_free);
+                draw_text(db, fmt_clock_num_.Get(),
+                          D2D1::RectF(vram_box.left + 19.0f, vram_box.top + 2.0f, vram_box.right - 6.0f, vram_box.bottom - 2.0f),
+                          text_pri, 0.96f, DWRITE_TEXT_ALIGNMENT_LEADING);
+            }
+
+            // Right-top: Split dual-track glass card — upper CPU (0-100%) + lower RAM (auto-zoomed local range)
+            const float right_l = split_x + 4.0f;
+            const float right_r = rect.right - 14.0f;
+            const float net_card_h = 46.0f;
+            const D2D1_RECT_F wave_box = D2D1::RectF(right_l, rect.top + 13.0f, right_r, rect.bottom - 14.0f - net_card_h - 8.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), wave_box, 12.0f, dark);
+
+            const SparklineRange mem_range = ComputeMemoryZoomRange(mem_span, mem_total_gb);
+            const std::wstring mem_rng_lbl = FormatMemoryZoomLabel(mem_range);
+            const float mid_y = (wave_box.top + wave_box.bottom) * 0.5f;
+            const float hdr_split = wave_box.left + (wave_box.right - wave_box.left) * 0.56f;
+            wchar_t cbuf[24]{}, mbuf[28]{};
+            std::swprintf(cbuf, ARRAYSIZE(cbuf), L"● CPU %d%%", sy.cpu_pct);
+            std::swprintf(mbuf, ARRAYSIZE(mbuf), L"● 内存 %.1f%%", mem_pct);
+
+            // Top lane: CPU (0-100% absolute scale)
+            draw_text(cbuf, fmt_clock_num_.Get(),
+                      D2D1::RectF(wave_box.left + 8.0f, wave_box.top + 4.0f, hdr_split, wave_box.top + 18.0f),
+                      col_cpu, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+            draw_text(L"0–100%", fmt_clock_num_.Get(),
+                      D2D1::RectF(hdr_split, wave_box.top + 4.0f, wave_box.right - 8.0f, wave_box.top + 18.0f),
+                      text_sec, 0.72f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            const D2D1_RECT_F cpu_plot = D2D1::RectF(wave_box.left + 8.0f, wave_box.top + 20.0f, wave_box.right - 8.0f, mid_y - 5.0f);
+            if (cpu_plot.bottom > cpu_plot.top + 4.0f) {
+                const float cy_mid = (cpu_plot.top + cpu_plot.bottom) * 0.5f;
+                d2d_dc_->DrawLine(D2D1::Point2F(cpu_plot.left, cy_mid), D2D1::Point2F(cpu_plot.right, cy_mid),
+                                  Brush(dark ? 0x16FFFFFFu : 0x10000000u), 0.7f);
+                DrawTahoeSparkline(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                   cpu_span, 100.0f, cpu_plot, col_cpu, true, dark);
+            }
+
+            // Hairline separator between CPU and RAM tracks
+            d2d_dc_->DrawLine(D2D1::Point2F(wave_box.left + 8.0f, mid_y), D2D1::Point2F(wave_box.right - 8.0f, mid_y),
+                              Brush(dark ? 0x22FFFFFFu : 0x18000000u), 0.8f);
+
+            // Bottom lane: RAM (auto-zoomed local range so real tens-of-MB trends stay crisp)
+            draw_text(mbuf, fmt_clock_num_.Get(),
+                      D2D1::RectF(wave_box.left + 8.0f, mid_y + 4.0f, hdr_split, mid_y + 18.0f),
+                      col_mem, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+            draw_text(mem_rng_lbl, fmt_clock_num_.Get(),
+                      D2D1::RectF(hdr_split, mid_y + 4.0f, wave_box.right - 8.0f, mid_y + 18.0f),
+                      text_sec, 0.72f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            const D2D1_RECT_F mem_plot = D2D1::RectF(wave_box.left + 8.0f, mid_y + 20.0f, wave_box.right - 8.0f, wave_box.bottom - 6.0f);
+            if (mem_plot.bottom > mem_plot.top + 4.0f) {
+                const float my_mid = (mem_plot.top + mem_plot.bottom) * 0.5f;
+                d2d_dc_->DrawLine(D2D1::Point2F(mem_plot.left, my_mid), D2D1::Point2F(mem_plot.right, my_mid),
+                                  Brush(dark ? 0x16FFFFFFu : 0x10000000u), 0.7f);
+                DrawTahoeSparkline(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                   mem_span, mem_range.max_val, mem_plot, col_mem, true, dark, 48, mem_range.min_val);
+            }
+
+            // Right-bottom: Live network throughput glass card
+            const D2D1_RECT_F net_box = D2D1::RectF(right_l, rect.bottom - 14.0f - net_card_h, right_r, rect.bottom - 14.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), net_box, 12.0f, dark);
+            draw_text(L"↓ " + FormatSpeedPerSec(sy.net_down_bps), fmt_row_lead_.Get(),
+                      D2D1::RectF(net_box.left + 10.0f, net_box.top + 3.0f, net_box.right - 10.0f, net_box.top + 23.0f),
+                      col_down);
+            draw_text(L"↑ " + FormatSpeedPerSec(sy.net_up_bps), fmt_row_lead_.Get(),
+                      D2D1::RectF(net_box.left + 10.0f, net_box.top + 23.0f, net_box.right - 10.0f, net_box.bottom - 3.0f),
+                      col_up);
+            break;
+        }
+
+        // 4x4 Large: 3 Glowing Rings (CPU / RAM / VRAM or Disk) + Split CPU/RAM Sparklines + Network Throughput Sparkline!
+        draw_text(tile.title.empty() ? L"系统性能监控" : tile.title, fmt_group_title_.Get(),
+                  D2D1::RectF(rect.left + 18.0f, rect.top + 12.0f, rect.left + rw * 0.52f, rect.top + 32.0f), text_pri);
+        if (!sy.gpu_name.empty()) {
+            draw_text(sy.gpu_name, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + rw * 0.45f, rect.top + 14.0f, rect.right - 18.0f, rect.top + 32.0f),
+                      text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        }
+
+        const float ring_rad = std::clamp(rw * 0.088f, 28.0f, 38.0f);
+        const float ring_cy = rect.top + 44.0f + ring_rad;
+        wchar_t msub[32]{}, vsub[32]{};
+        if (mem_total_gb > 0.1f) std::swprintf(msub, ARRAYSIZE(msub), L"%.1f / %.1f GB", mem_used_gb, mem_total_gb);
+        draw_labeled_ring(rect.left + rw * 0.18f, ring_cy, ring_rad, 5.6f, static_cast<float>(sy.cpu_pct), col_cpu, L"CPU", cpu_sub);
+        draw_labeled_ring(rect.left + rw * 0.50f, ring_cy, ring_rad, 5.6f, mem_pct, col_mem, L"内存", msub);
+        if (sy.has_vram) {
+            std::swprintf(vsub, ARRAYSIZE(vsub), L"%.1f / %.1f GB", sy.vram_used_gb, sy.vram_total_gb);
+            draw_labeled_ring(rect.left + rw * 0.82f, ring_cy, ring_rad, 5.6f, sy.vram_pct, col_vram, L"显存", vsub);
+        } else {
+            draw_labeled_ring(rect.left + rw * 0.82f, ring_cy, ring_rad, 5.6f, static_cast<float>(sy.disk_used_pct), col_disk,
+                              L"C: 盘", L"剩 " + FormatBytesCompact(sy.disk_free));
+        }
+
+        const float cards_top = ring_cy + ring_rad + 42.0f;
+        const float cards_h = std::max(80.0f, rect.bottom - 16.0f - cards_top);
+        const float half_h = (cards_h - 10.0f) * 0.5f;
+
+        // Middle: Side-by-side dedicated CPU (0-100%) and RAM (auto-zoomed local range) sparkline cards
+        const float mid_gap = 10.0f;
+        const float mid_w = (rw - 32.0f - mid_gap) * 0.5f;
+        const D2D1_RECT_F cpu_box = D2D1::RectF(rect.left + 16.0f, cards_top, rect.left + 16.0f + mid_w, cards_top + half_h);
+        const D2D1_RECT_F mem_box = D2D1::RectF(cpu_box.right + mid_gap, cards_top, rect.right - 16.0f, cards_top + half_h);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), cpu_box, 14.0f, dark);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), mem_box, 14.0f, dark);
+
+        wchar_t cleg[24]{}, mleg[28]{};
+        std::swprintf(cleg, ARRAYSIZE(cleg), L"● CPU %d%%", sy.cpu_pct);
+        std::swprintf(mleg, ARRAYSIZE(mleg), L"● 内存 %.1f%%", mem_pct);
+        const SparklineRange mem_range4 = ComputeMemoryZoomRange(mem_span, mem_total_gb);
+        const std::wstring mem_rng4 = FormatMemoryZoomLabel(mem_range4);
+
+        const float c_split = cpu_box.left + (cpu_box.right - cpu_box.left) * 0.56f;
+        draw_text(cleg, fmt_clock_num_.Get(),
+                  D2D1::RectF(cpu_box.left + 10.0f, cpu_box.top + 6.0f, c_split, cpu_box.top + 22.0f),
+                  col_cpu, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+        draw_text(L"0–100%", fmt_clock_num_.Get(),
+                  D2D1::RectF(c_split, cpu_box.top + 6.0f, cpu_box.right - 10.0f, cpu_box.top + 22.0f),
+                  text_sec, 0.72f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        const D2D1_RECT_F cpu_plot = D2D1::RectF(cpu_box.left + 10.0f, cpu_box.top + 26.0f, cpu_box.right - 10.0f, cpu_box.bottom - 9.0f);
+        d2d_dc_->DrawLine(D2D1::Point2F(cpu_plot.left, (cpu_plot.top + cpu_plot.bottom) * 0.5f),
+                          D2D1::Point2F(cpu_plot.right, (cpu_plot.top + cpu_plot.bottom) * 0.5f),
+                          Brush(dark ? 0x1AFFFFFFu : 0x12000000u), 0.7f);
+        DrawTahoeSparkline(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                           cpu_span, 100.0f, cpu_plot, col_cpu, true, dark);
+
+        const float m_split = mem_box.left + (mem_box.right - mem_box.left) * 0.56f;
+        draw_text(mleg, fmt_clock_num_.Get(),
+                  D2D1::RectF(mem_box.left + 10.0f, mem_box.top + 6.0f, m_split, mem_box.top + 22.0f),
+                  col_mem, 1.0f, DWRITE_TEXT_ALIGNMENT_LEADING);
+        draw_text(mem_rng4, fmt_clock_num_.Get(),
+                  D2D1::RectF(m_split, mem_box.top + 6.0f, mem_box.right - 10.0f, mem_box.top + 22.0f),
+                  text_sec, 0.72f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        const D2D1_RECT_F mem_plot = D2D1::RectF(mem_box.left + 10.0f, mem_box.top + 26.0f, mem_box.right - 10.0f, mem_box.bottom - 9.0f);
+        d2d_dc_->DrawLine(D2D1::Point2F(mem_plot.left, (mem_plot.top + mem_plot.bottom) * 0.5f),
+                          D2D1::Point2F(mem_plot.right, (mem_plot.top + mem_plot.bottom) * 0.5f),
+                          Brush(dark ? 0x1AFFFFFFu : 0x12000000u), 0.7f);
+        DrawTahoeSparkline(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                           mem_span, mem_range4.max_val, mem_plot, col_mem, true, dark, 48, mem_range4.min_val);
+
+        // Bottom: Network throughput sparkline + Down/Up readouts
+        const D2D1_RECT_F net_box = D2D1::RectF(rect.left + 16.0f, cpu_box.bottom + 10.0f, rect.right - 16.0f, rect.bottom - 16.0f);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), net_box, 14.0f, dark);
+        draw_text(L"网络吞吐", fmt_clock_num_.Get(),
+                  D2D1::RectF(net_box.left + 12.0f, net_box.top + 6.0f, net_box.left + 84.0f, net_box.top + 22.0f),
+                  text_sec, 0.96f, DWRITE_TEXT_ALIGNMENT_LEADING);
+        draw_text(L"↓ " + FormatSpeedPerSec(sy.net_down_bps), fmt_pill_.Get(),
+                  D2D1::RectF(net_box.left + 80.0f, net_box.top + 5.0f, net_box.right - 110.0f, net_box.top + 23.0f),
+                  col_down, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        draw_text(L"↑ " + FormatSpeedPerSec(sy.net_up_bps), fmt_pill_.Get(),
+                  D2D1::RectF(net_box.right - 108.0f, net_box.top + 5.0f, net_box.right - 12.0f, net_box.top + 23.0f),
+                  col_up, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        float net_peak = 128.0f;
+        for (float v : net_span) net_peak = std::max(net_peak, v * 1.2f);
+        const D2D1_RECT_F net_plot = D2D1::RectF(net_box.left + 10.0f, net_box.top + 27.0f, net_box.right - 10.0f, net_box.bottom - 9.0f);
+        d2d_dc_->DrawLine(D2D1::Point2F(net_plot.left, (net_plot.top + net_plot.bottom) * 0.5f),
+                          D2D1::Point2F(net_plot.right, (net_plot.top + net_plot.bottom) * 0.5f),
+                          Brush(dark ? 0x1AFFFFFFu : 0x12000000u), 0.7f);
+        DrawTahoeSparkline(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                           net_span, net_peak, net_plot, col_down, true, dark);
+        break;
+    }
+
+    case model::TileKind::Pomodoro: {
+        const auto& pm = live_data.pomodoro;
+        const bool is_short = (pm.phase == live::PomodoroPhase::ShortBreak);
+        const bool is_long = (pm.phase == live::PomodoroPhase::LongBreak);
+        const uint32_t col_pomo = is_short ? col_mem : (is_long ? col_cpu : (dark ? 0xFFFF645Au : 0xFFE03E36u));
+        const wchar_t* phase_lbl = is_short ? L"短休时刻" : (is_long ? L"长休时刻" : L"番茄专注");
+        const wchar_t* status_lbl = pm.running ? (is_short || is_long ? L"休息中" : L"专注中") : L"已暂停";
+        const int rem = std::max(0, pm.remaining_sec);
+        const int tot = std::max(1, pm.total_sec);
+        const float pct = std::clamp(static_cast<float>(rem) * 100.0f / static_cast<float>(tot), 0.0f, 100.0f);
+        wchar_t time_buf[16]{};
+        std::swprintf(time_buf, ARRAYSIZE(time_buf), L"%02d:%02d", rem / 60, rem % 60);
+        const int hot_btn = hovered ? interaction.hovered_widget_btn : -1;
+
+        auto draw_play_pause_glyph = [&](float gcx, float gcy, float s, bool playing, uint32_t argb) {
+            if (playing) {
+                const float bw = s * 0.28f;
+                const float bh = s * 0.92f;
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(gcx - bw - s * 0.14f, gcy - bh * 0.5f, gcx - s * 0.14f, gcy + bh * 0.5f), 1.4f, 1.4f), Brush(argb));
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(gcx + s * 0.14f, gcy - bh * 0.5f, gcx + bw + s * 0.14f, gcy + bh * 0.5f), 1.4f, 1.4f), Brush(argb));
+            } else {
+                ComPtr<ID2D1PathGeometry> tri;
+                if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&tri)) && tri) {
+                    ComPtr<ID2D1GeometrySink> sink;
+                    if (SUCCEEDED(tri->Open(&sink)) && sink) {
+                        sink->BeginFigure(D2D1::Point2F(gcx - s * 0.34f, gcy - s * 0.48f), D2D1_FIGURE_BEGIN_FILLED);
+                        sink->AddLine(D2D1::Point2F(gcx + s * 0.48f, gcy));
+                        sink->AddLine(D2D1::Point2F(gcx - s * 0.34f, gcy + s * 0.48f));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        if (SUCCEEDED(sink->Close())) d2d_dc_->FillGeometry(tri.Get(), Brush(argb));
+                    }
+                }
+            }
+        };
+
+        if (tile.size.cols == 1) {
+            const float cx = (rect.left + rect.right) * 0.5f;
+            const float cy = rect.top + 38.0f;
+            DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, 32.0f, col_pomo, dark);
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, 23.0f, 4.4f, pct, col_pomo, dark);
+            draw_text(time_buf, fmt_disk_pct_.Get(),
+                      D2D1::RectF(cx - 24.0f, cy - 10.0f, cx + 24.0f, cy + 10.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            const D2D1_RECT_F pb = PomodoroButtonRectImpl(tile_in, rect, 0);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(pb, 9.5f, 9.5f),
+                                          Brush(col_pomo, hot_btn == 0 ? 1.0f : (pm.running ? 0.90f : 0.78f)));
+            draw_text(pm.running ? L"暂停" : L"开始", fmt_clock_num_.Get(), pb, 0xFFFFFFFFu, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            break;
+        }
+
+        if (tile.size.rows == 1) {
+            const float cy = (rect.top + rect.bottom) * 0.5f;
+            const float rcx = rect.left + 35.0f;
+            DrawTahoeIconAura(d2d_dc_.Get(), rcx, cy, 28.0f, col_pomo, dark);
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               rcx, cy, 21.0f, 4.2f, pct, col_pomo, dark);
+            wchar_t pbuf[12]{};
+            std::swprintf(pbuf, ARRAYSIZE(pbuf), L"%d%%", static_cast<int>(std::lround(pct)));
+            draw_text(pbuf, fmt_clock_num_.Get(),
+                      D2D1::RectF(rcx - 20.0f, cy - 9.0f, rcx + 20.0f, cy + 9.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(time_buf, fmt_group_title_.Get(),
+                      D2D1::RectF(rect.left + 64.0f, cy - 22.0f, rect.right - 70.0f, cy + 2.0f), text_pri);
+            wchar_t sub[40]{};
+            std::swprintf(sub, ARRAYSIZE(sub), L"%ls · 今日 %d 个", status_lbl, pm.completed_today);
+            draw_text(sub, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + 64.0f, cy + 2.0f, rect.right - 70.0f, cy + 21.0f), text_sec);
+            const D2D1_RECT_F b0 = PomodoroButtonRectImpl(tile_in, rect, 0);
+            const D2D1_RECT_F b1 = PomodoroButtonRectImpl(tile_in, rect, 1);
+            const float b0x = (b0.left + b0.right) * 0.5f, b0y = (b0.top + b0.bottom) * 0.5f;
+            d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(b0x, b0y), 14.5f, 14.5f),
+                                 Brush(col_pomo, hot_btn == 0 ? 1.0f : 0.88f));
+            draw_play_pause_glyph(b0x, b0y, 11.0f, pm.running, 0xFFFFFFFFu);
+            const float b1x = (b1.left + b1.right) * 0.5f, b1y = (b1.top + b1.bottom) * 0.5f;
+            d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(b1x, b1y), 11.5f, 11.5f),
+                                 Brush(dark ? (hot_btn == 1 ? 0x36FFFFFFu : 0x1EFFFFFFu)
+                                            : (hot_btn == 1 ? 0x24000000u : 0x12000000u)));
+            const wchar_t rg[2] = {L'\xE72C', 0};
+            DrawGlyph(d2d_dc_.Get(), rg, 1, fmt_fluent_12_.Get(), b1, Brush(text_pri, 0.9f));
+            break;
+        }
+
+        if (tile.size.cols == 2) {
+            const D2D1_RECT_F ph_rc = PomodoroButtonRectImpl(tile_in, rect, 2);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(ph_rc, 10.0f, 10.0f),
+                                          Brush(col_pomo, hot_btn == 2 ? 0.30f : 0.18f));
+            d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(ph_rc, 10.0f, 10.0f),
+                                          Brush(col_pomo, 0.45f), 0.9f);
+            draw_text(phase_lbl, fmt_clock_num_.Get(), ph_rc, col_pomo, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+            const float dot_right = show_hover_edit ? (rect.right - 38.0f) : (rect.right - 14.0f);
+            for (int di = 0; di < 4; ++di) {
+                const float dx = dot_right - static_cast<float>(3 - di) * 10.0f;
+                const bool lit = di < (pm.completed_today % 4) || (pm.completed_today > 0 && (pm.completed_today % 4) == 0);
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dx, rect.top + 21.0f), 3.0f, 3.0f),
+                                     Brush(lit ? col_pomo : (dark ? 0x2EFFFFFFu : 0x22000000u)));
+            }
+
+            const float cx = (rect.left + rect.right) * 0.5f;
+            const float cy = rect.top + rh * 0.48f;
+            const float rad = std::clamp(std::min(rw, rh) * 0.24f, 36.0f, 48.0f);
+            DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, rad + 18.0f, col_pomo, dark);
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, rad, 5.6f, pct, col_pomo, dark);
+            draw_text(time_buf, fmt_clock_big_.Get(),
+                      D2D1::RectF(cx - rad + 4.0f, cy - 22.0f, cx + rad - 4.0f, cy + 10.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(status_lbl, fmt_clock_num_.Get(),
+                      D2D1::RectF(cx - 38.0f, cy + 12.0f, cx + 38.0f, cy + 28.0f), text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+            const D2D1_RECT_F b0 = PomodoroButtonRectImpl(tile_in, rect, 0);
+            const D2D1_RECT_F b1 = PomodoroButtonRectImpl(tile_in, rect, 1);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b0, 13.0f, 13.0f),
+                                          Brush(col_pomo, hot_btn == 0 ? 1.0f : 0.88f));
+            draw_text(pm.running ? L"暂停" : L"开始专注", fmt_pill_.Get(), b0, 0xFFFFFFFFu, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), b1, 13.0f, dark);
+            if (hot_btn == 1) {
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b1, 13.0f, 13.0f),
+                                              Brush(dark ? 0x20FFFFFFu : 0x12000000u));
+            }
+            draw_text(L"重置", fmt_pill_.Get(), b1, text_pri, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            break;
+        }
+
+        // 4x2 Wide Pomodoro workstation: large glowing dial on left + presets & tactile controls on right.
+        const float split_x = rect.left + rw * 0.44f;
+        const float cx = (rect.left + split_x) * 0.5f + 4.0f;
+        const float cy = (rect.top + rect.bottom) * 0.5f;
+        const float rad = std::clamp(std::min(split_x - rect.left, rh) * 0.34f, 46.0f, 64.0f);
+        DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, rad + 22.0f, col_pomo, dark);
+        DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                           cx, cy, rad, 6.4f, pct, col_pomo, dark);
+        draw_text(time_buf, fmt_clock_big_.Get(),
+                  D2D1::RectF(cx - rad + 4.0f, cy - 26.0f, cx + rad - 4.0f, cy + 12.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_text(status_lbl, fmt_caption_.Get(),
+                  D2D1::RectF(cx - 48.0f, cy + 14.0f, cx + 48.0f, cy + 32.0f), text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        const float rx0 = split_x + 8.0f;
+        const float rx1 = rect.right - 14.0f;
+        draw_text(phase_lbl, fmt_group_title_.Get(),
+                  D2D1::RectF(rx0, rect.top + 16.0f, rx1 - 32.0f, rect.top + 38.0f), text_pri);
+        wchar_t cnt_line[48]{};
+        std::swprintf(cnt_line, ARRAYSIZE(cnt_line), L"今日已完成 %d 个番茄 · 每 4 轮长休", pm.completed_today);
+        draw_text(cnt_line, fmt_caption_.Get(),
+                  D2D1::RectF(rx0, rect.top + 40.0f, rx1, rect.top + 58.0f), text_sec);
+        for (int di = 0; di < 4; ++di) {
+            const bool lit = di < (pm.completed_today % 4) || (pm.completed_today > 0 && (pm.completed_today % 4) == 0);
+            d2d_dc_->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(rx0 + di * 22.0f, rect.top + 63.0f, rx0 + di * 22.0f + 16.0f, rect.top + 69.0f), 3.0f, 3.0f),
+                Brush(lit ? col_pomo : (dark ? 0x24FFFFFFu : 0x18000000u)));
+        }
+
+        struct PChip { int id; const wchar_t* label; bool active; };
+        const PChip chips[3] = {
+            {3, L"25 分钟", pm.phase == live::PomodoroPhase::Focus && pm.focus_minutes == 25},
+            {4, L"45 分钟", pm.phase == live::PomodoroPhase::Focus && pm.focus_minutes == 45},
+            {5, L"5 分短休", pm.phase == live::PomodoroPhase::ShortBreak},
+        };
+        for (const auto& ch : chips) {
+            const D2D1_RECT_F cr = PomodoroButtonRectImpl(tile_in, rect, ch.id);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), cr, 9.0f, dark);
+            if (ch.active || hot_btn == ch.id) {
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(cr, 9.0f, 9.0f),
+                                              Brush(col_pomo, ch.active ? 0.24f : 0.14f));
+                d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(cr, 9.0f, 9.0f),
+                                              Brush(col_pomo, ch.active ? 0.72f : 0.42f), 1.0f);
+            }
+            draw_text(ch.label, fmt_clock_num_.Get(), cr, ch.active ? col_pomo : text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        const D2D1_RECT_F b0 = PomodoroButtonRectImpl(tile_in, rect, 0);
+        const D2D1_RECT_F b1 = PomodoroButtonRectImpl(tile_in, rect, 1);
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b0, 15.0f, 15.0f),
+                                      Brush(col_pomo, hot_btn == 0 ? 1.0f : 0.90f));
+        draw_text(pm.running ? L"暂停专注" : L"开始专注", fmt_row_lead_.Get(), b0, 0xFFFFFFFFu, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), b1, 15.0f, dark);
+        if (hot_btn == 1) {
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(b1, 15.0f, 15.0f),
+                                          Brush(dark ? 0x20FFFFFFu : 0x12000000u));
+        }
+        draw_text(L"重置", fmt_pill_.Get(), b1, text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        break;
+    }
+
+    case model::TileKind::MediaPlayer: {
+        const auto& mp = live_data.media;
+        ID2D1Bitmap* cover = EnsureMediaCoverBitmap(mp);
+        const uint32_t col_media = cover ? media_cover_accent_ : (dark ? 0xFFFF5C94u : 0xFFC62870u);
+        const int hot_btn = hovered ? interaction.hovered_widget_btn : -1;
+        const std::wstring track_title = !mp.title.empty() ? mp.title : (mp.active ? L"未知曲目" : L"未在播放音乐");
+        std::wstring track_sub;
+        if (!mp.artist.empty() && !mp.album.empty()) track_sub = mp.artist + L" · " + mp.album;
+        else if (!mp.artist.empty()) track_sub = mp.artist;
+        else if (!mp.source_app.empty()) track_sub = mp.source_app;
+        else track_sub = L"打开任意音乐或视频软件自动同步";
+        const std::wstring app_badge = !mp.source_app.empty() ? mp.source_app : (mp.playing ? L"正在播放" : L"系统媒体");
+
+        auto draw_vinyl_art = [&](const D2D1_RECT_F& ar, float rad, bool peek_disc) {
+            const float w_a = ar.right - ar.left;
+            if (cover && peek_disc && mp.playing) {
+                const float dcx = ar.right - w_a * 0.24f;
+                const float dcy = (ar.top + ar.bottom) * 0.5f;
+                const float dr = w_a * 0.44f;
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dcx + w_a * 0.14f, dcy), dr, dr), Brush(0xE8101016u));
+                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(dcx + w_a * 0.14f, dcy), dr * 0.78f, dr * 0.78f), Brush(0x28FFFFFFu), 0.9f);
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(dcx + w_a * 0.14f, dcy), dr * 0.28f, dr * 0.28f), Brush(col_media, 0.9f));
+            }
+            if (cover) {
+                ComPtr<ID2D1RoundedRectangleGeometry> cg;
+                d2d_factory_->CreateRoundedRectangleGeometry(D2D1::RoundedRect(ar, rad, rad), &cg);
+                if (cg) {
+                    d2d_dc_->PushLayer(D2D1::LayerParameters1(ar, cg.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), nullptr);
+                    const D2D1_SIZE_F bs = cover->GetSize();
+                    const float ah = ar.bottom - ar.top;
+                    if (bs.width > 0.0f && bs.height > 0.0f) {
+                        const float sc = std::max(w_a / bs.width, ah / bs.height);
+                        const float dw = bs.width * sc, dh = bs.height * sc;
+                        d2d_dc_->DrawBitmap(cover, D2D1::RectF(ar.left + (w_a - dw) * 0.5f, ar.top + (ah - dh) * 0.5f,
+                                                               ar.left + (w_a + dw) * 0.5f, ar.top + (ah + dh) * 0.5f),
+                                            1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    } else {
+                        d2d_dc_->DrawBitmap(cover, ar, 1.0f);
+                    }
+                    d2d_dc_->PopLayer();
+                }
+            } else {
+                const float acx = (ar.left + ar.right) * 0.5f;
+                const float acy = (ar.top + ar.bottom) * 0.5f;
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(ar, rad, rad),
+                                              Brush(dark ? 0xD81B1828u : 0xE6221E34u));
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(acx, acy), w_a * 0.38f, w_a * 0.38f), Brush(0xFF0E0D15u));
+                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(acx, acy), w_a * 0.30f, w_a * 0.30f), Brush(0x28FFFFFFu), 0.9f);
+                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(acx, acy), w_a * 0.22f, w_a * 0.22f), Brush(0x20FFFFFFu), 0.8f);
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(acx, acy), w_a * 0.14f, w_a * 0.14f), Brush(col_media));
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(acx, acy), w_a * 0.045f, w_a * 0.045f), Brush(0xFFFFFFFFu));
+            }
+            d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(ar, rad, rad), Brush(0x36FFFFFFu), 1.0f);
+        };
+
+        auto draw_transport = [&](int id, const D2D1_RECT_F& br) {
+            const float cx = (br.left + br.right) * 0.5f;
+            const float cy = (br.top + br.bottom) * 0.5f;
+            const float rad = (br.right - br.left) * 0.5f;
+            const bool is_play = (id == 1);
+            const bool hot = (hot_btn == id);
+            if (is_play) {
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad),
+                                     Brush(col_media, hot ? 1.0f : 0.90f));
+                d2d_dc_->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad - 0.5f, rad - 0.5f),
+                                     Brush(0x48FFFFFFu), 0.9f);
+            } else {
+                d2d_dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), rad, rad),
+                                     Brush(dark ? (hot ? 0x30FFFFFFu : 0x18FFFFFFu)
+                                                : (hot ? 0x20000000u : 0x0F000000u)));
+            }
+            const uint32_t fg = is_play ? 0xFFFFFFFFu : text_pri;
+            const float s = rad * 0.72f;
+            if (id == 1) {
+                if (mp.playing) {
+                    const float bw = s * 0.28f, bh = s * 0.96f;
+                    d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx - bw - s * 0.14f, cy - bh * 0.5f, cx - s * 0.14f, cy + bh * 0.5f), 1.3f, 1.3f), Brush(fg));
+                    d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx + s * 0.14f, cy - bh * 0.5f, cx + bw + s * 0.14f, cy + bh * 0.5f), 1.3f, 1.3f), Brush(fg));
+                } else {
+                    ComPtr<ID2D1PathGeometry> tri;
+                    if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&tri)) && tri) {
+                        ComPtr<ID2D1GeometrySink> sink;
+                        if (SUCCEEDED(tri->Open(&sink)) && sink) {
+                            sink->BeginFigure(D2D1::Point2F(cx - s * 0.30f, cy - s * 0.50f), D2D1_FIGURE_BEGIN_FILLED);
+                            sink->AddLine(D2D1::Point2F(cx + s * 0.50f, cy));
+                            sink->AddLine(D2D1::Point2F(cx - s * 0.30f, cy + s * 0.50f));
+                            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                            if (SUCCEEDED(sink->Close())) d2d_dc_->FillGeometry(tri.Get(), Brush(fg));
+                        }
+                    }
+                }
+            } else {
+                const float dir = (id == 2) ? 1.0f : -1.0f;
+                d2d_dc_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(cx + dir * s * 0.34f - 1.1f, cy - s * 0.44f, cx + dir * s * 0.34f + 1.1f, cy + s * 0.44f), 0.9f, 0.9f),
+                    Brush(fg));
+                ComPtr<ID2D1PathGeometry> tri;
+                if (SUCCEEDED(d2d_factory_->CreatePathGeometry(&tri)) && tri) {
+                    ComPtr<ID2D1GeometrySink> sink;
+                    if (SUCCEEDED(tri->Open(&sink)) && sink) {
+                        sink->BeginFigure(D2D1::Point2F(cx - dir * s * 0.42f, cy - s * 0.44f), D2D1_FIGURE_BEGIN_FILLED);
+                        sink->AddLine(D2D1::Point2F(cx + dir * s * 0.28f, cy));
+                        sink->AddLine(D2D1::Point2F(cx - dir * s * 0.42f, cy + s * 0.44f));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        if (SUCCEEDED(sink->Close())) d2d_dc_->FillGeometry(tri.Get(), Brush(fg));
+                    }
+                }
+            }
+        };
+
+        auto draw_eq = [&](float x, float bottom_y) {
+            const float hs[3] = {mp.playing ? 8.0f : 3.0f, mp.playing ? 12.0f : 4.5f, mp.playing ? 6.0f : 3.0f};
+            for (int bi = 0; bi < 3; ++bi) {
+                d2d_dc_->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(x + bi * 4.5f, bottom_y - hs[bi], x + bi * 4.5f + 2.5f, bottom_y), 1.2f, 1.2f),
+                    Brush(col_media, mp.playing ? 0.95f : 0.45f));
+            }
+        };
+
+        // Ambient artwork tint glow inside the tile
+        DrawTahoeIconAura(d2d_dc_.Get(), rect.left + rw * 0.28f, rect.top + rh * 0.44f, std::min(rw, rh) * 0.65f, col_media, dark);
+
+        if (tile.size.rows == 1) {
+            const float cy = (rect.top + rect.bottom) * 0.5f;
+            if (tile.size.cols >= 4) {
+                const D2D1_RECT_F ar = D2D1::RectF(rect.left + 14.0f, cy - 31.0f, rect.left + 76.0f, cy + 31.0f);
+                draw_vinyl_art(ar, 12.0f, true);
+                const float tx0 = rect.left + 94.0f;
+                const float tx1 = rect.right - 134.0f;
+                draw_eq(tx0, rect.top + 27.0f);
+                draw_text(app_badge, fmt_clock_num_.Get(), D2D1::RectF(tx0 + 18.0f, rect.top + 13.0f, tx1, rect.top + 30.0f), col_media);
+                draw_text(track_title, fmt_group_title_.Get(), D2D1::RectF(tx0, rect.top + 32.0f, tx1, rect.top + 56.0f), text_pri);
+                draw_text(track_sub, fmt_caption_.Get(), D2D1::RectF(tx0, rect.top + 56.0f, tx1, rect.bottom - 10.0f), text_sec);
+            } else {
+                const D2D1_RECT_F ar = D2D1::RectF(rect.left + 12.0f, cy - 26.0f, rect.left + 64.0f, cy + 26.0f);
+                draw_vinyl_art(ar, 10.0f, false);
+                const float tx0 = rect.left + 72.0f;
+                const float tx1 = show_hover_edit ? (rect.right - 34.0f) : (rect.right - 10.0f);
+                draw_text(track_title, fmt_tile_hdr_.Get(), D2D1::RectF(tx0, rect.top + 11.0f, tx1, rect.top + 31.0f), text_pri);
+                draw_text(track_sub, fmt_clock_num_.Get(), D2D1::RectF(tx0, rect.top + 31.0f, rect.right - 10.0f, rect.top + 48.0f), text_sec);
+            }
+            for (int id = 0; id <= 2; ++id) draw_transport(id, MediaButtonRectImpl(tile_in, rect, id));
+            break;
+        }
+
+        if (tile.size.cols == 2) {
+            const D2D1_RECT_F ar = D2D1::RectF(rect.left + 14.0f, rect.top + 14.0f, rect.left + 86.0f, rect.top + 86.0f);
+            draw_vinyl_art(ar, 14.0f, true);
+            const D2D1_RECT_F badge = D2D1::RectF(rect.left + 102.0f, rect.top + 16.0f,
+                                                  show_hover_edit ? (rect.right - 36.0f) : (rect.right - 14.0f), rect.top + 36.0f);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(badge, 9.0f, 9.0f), Brush(col_media, 0.20f));
+            draw_text(app_badge, fmt_clock_num_.Get(), badge, col_media, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_eq(rect.left + 104.0f, rect.top + 60.0f);
+            draw_text(mp.playing ? L"播放中" : (mp.active ? L"已暂停" : L"待机"), fmt_clock_num_.Get(),
+                      D2D1::RectF(rect.left + 122.0f, rect.top + 46.0f, rect.right - 14.0f, rect.top + 63.0f), text_sec);
+            draw_text(track_title, fmt_group_title_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, rect.top + 98.0f, rect.right - 14.0f, rect.top + 122.0f), text_pri);
+            draw_text(track_sub, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, rect.top + 122.0f, rect.right - 14.0f, rect.top + 142.0f), text_sec);
+            const D2D1_RECT_F ctrl_bar = D2D1::RectF(rect.left + 14.0f, rect.bottom - 50.0f, rect.right - 14.0f, rect.bottom - 8.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), ctrl_bar, 14.0f, dark);
+            for (int id = 0; id <= 2; ++id) draw_transport(id, MediaButtonRectImpl(tile_in, rect, id));
+            break;
+        }
+
+        // 4x2 Wide Apple Music Now Playing
+        const float art_sz = std::min(rh - 34.0f, 154.0f);
+        const float ay = (rect.top + rect.bottom - art_sz) * 0.5f;
+        const D2D1_RECT_F ar = D2D1::RectF(rect.left + 18.0f, ay, rect.left + 18.0f + art_sz, ay + art_sz);
+        draw_vinyl_art(ar, 16.0f, true);
+        const float rx0 = ar.right + 22.0f;
+        const float rx1 = rect.right - 16.0f;
+        const D2D1_RECT_F badge = D2D1::RectF(rx0, rect.top + 18.0f, std::min(rx0 + 104.0f, rx1 - 40.0f), rect.top + 38.0f);
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(badge, 10.0f, 10.0f), Brush(col_media, 0.20f));
+        draw_text(app_badge, fmt_clock_num_.Get(), badge, col_media, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_eq(badge.right + 10.0f, rect.top + 34.0f);
+
+        draw_text(track_title, fmt_group_title_.Get(),
+                  D2D1::RectF(rx0, rect.top + 50.0f, rx1, rect.top + 78.0f), text_pri);
+        draw_text(track_sub, fmt_row_lead_.Get(),
+                  D2D1::RectF(rx0, rect.top + 80.0f, rx1, rect.top + 102.0f), text_sec);
+        // Subtle ambient audio rail
+        const D2D1_RECT_F rail = D2D1::RectF(rx0, rect.top + 116.0f, rx1, rect.top + 121.0f);
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(rail, 2.5f, 2.5f), Brush(dark ? 0x20FFFFFFu : 0x16000000u));
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rail.left, rail.top, rail.left + (rail.right - rail.left) * (mp.playing ? 0.52f : 0.18f), rail.bottom), 2.5f, 2.5f),
+                                      Brush(col_media, 0.85f));
+        for (int id = 0; id <= 2; ++id) draw_transport(id, MediaButtonRectImpl(tile_in, rect, id));
+        break;
+    }
+
+    case model::TileKind::Countdown: {
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        const auto cd = live::ComputeCountdown(tile.title, tile.countdown_date, now);
+        const uint32_t col_cd = dark ? 0xFF8191FFu : 0xFF463CD4u;
+        const int abs_days = std::abs(cd.days_delta);
+        const std::wstring hero_num = cd.is_today ? L"今天" : std::to_wstring(abs_days);
+        const std::wstring delta_lbl = cd.is_today ? L"就在今天" : (cd.is_past ? (L"已过 " + std::to_wstring(abs_days) + L" 天") : (L"还有 " + std::to_wstring(abs_days) + L" 天"));
+
+        auto draw_prog = [&](const D2D1_RECT_F& bar, float pct_v, uint32_t col) {
+            const float rad = (bar.bottom - bar.top) * 0.5f;
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(bar, rad, rad), Brush(dark ? 0x1EFFFFFFu : 0x14000000u));
+            const float fw = std::max(rad * 2.0f, (bar.right - bar.left) * std::clamp(pct_v / 100.0f, 0.0f, 1.0f));
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bar.left, bar.top, bar.left + fw, bar.bottom), rad, rad), Brush(col));
+        };
+
+        if (tile.size.cols == 1) {
+            DrawTahoeIconAura(d2d_dc_.Get(), (rect.left + rect.right) * 0.5f, rect.top + 44.0f, 32.0f, col_cd, dark);
+            draw_text(cd.title, fmt_clock_num_.Get(),
+                      D2D1::RectF(rect.left + 8.0f, rect.top + 9.0f, rect.right - 8.0f, rect.top + 25.0f), col_cd, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(hero_num, fmt_clock_big_.Get(),
+                      D2D1::RectF(rect.left + 4.0f, rect.top + 25.0f, rect.right - 4.0f, rect.bottom - 30.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            const D2D1_RECT_F pill = D2D1::RectF(rect.left + 10.0f, rect.bottom - 27.0f, rect.right - 10.0f, rect.bottom - 8.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), pill, 9.5f, dark);
+            draw_text(delta_lbl, fmt_clock_num_.Get(), pill, text_pri, 0.96f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            break;
+        }
+
+        if (tile.size.rows == 1) {
+            const D2D1_RECT_F hero_box = D2D1::RectF(rect.left + 12.0f, rect.top + 14.0f, rect.left + 76.0f, rect.bottom - 14.0f);
+            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(hero_box, 12.0f, 12.0f), Brush(col_cd, 0.22f));
+            d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(hero_box, 12.0f, 12.0f), Brush(col_cd, 0.45f), 0.9f);
+            draw_text(hero_num, fmt_group_title_.Get(),
+                      D2D1::RectF(hero_box.left, hero_box.top + 8.0f, hero_box.right, hero_box.top + 38.0f), col_cd, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(cd.is_today ? L"目标日" : (cd.is_past ? L"天已过" : L"天剩余"), fmt_clock_num_.Get(),
+                      D2D1::RectF(hero_box.left, hero_box.bottom - 24.0f, hero_box.right, hero_box.bottom - 6.0f), text_sec, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            const float tx0 = hero_box.right + 12.0f;
+            const float tx1 = rect.right - 14.0f;
+            draw_text(cd.title, fmt_group_title_.Get(), D2D1::RectF(tx0, rect.top + 14.0f, tx1 - 24.0f, rect.top + 38.0f), text_pri);
+            wchar_t ys[48]{};
+            std::swprintf(ys, ARRAYSIZE(ys), L"%ls · 今年 %.0f%%", cd.target_iso.c_str(), cd.year_pct);
+            draw_text(ys, fmt_caption_.Get(), D2D1::RectF(tx0, rect.top + 40.0f, tx1, rect.top + 58.0f), text_sec);
+            draw_prog(D2D1::RectF(tx0, rect.bottom - 22.0f, tx1, rect.bottom - 15.0f), cd.year_pct, col_cd);
+            break;
+        }
+
+        if (tile.size.cols == 2) {
+            DrawTahoeIconAura(d2d_dc_.Get(), rect.left + rw * 0.5f, rect.top + 78.0f, 62.0f, col_cd, dark);
+            draw_text(cd.title, fmt_tile_hdr_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, rect.top + 12.0f, rect.right - 88.0f, rect.top + 32.0f), col_cd);
+            draw_text(cd.target_iso, fmt_clock_num_.Get(),
+                      D2D1::RectF(rect.right - 92.0f, rect.top + 13.0f, show_hover_edit ? (rect.right - 36.0f) : (rect.right - 14.0f), rect.top + 30.0f),
+                      text_sec, 0.9f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            draw_text(hero_num, fmt_hero_num_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, rect.top + 40.0f, rect.right - 14.0f, rect.top + 104.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(delta_lbl, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + 14.0f, rect.top + 104.0f, rect.right - 14.0f, rect.top + 124.0f), text_sec, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+            const D2D1_RECT_F box = D2D1::RectF(rect.left + 12.0f, rect.bottom - 68.0f, rect.right - 12.0f, rect.bottom - 12.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), box, 12.0f, dark);
+            wchar_t lb1[28]{}, lb2[28]{};
+            std::swprintf(lb1, ARRAYSIZE(lb1), L"今日 %.0f%%", cd.day_pct);
+            std::swprintf(lb2, ARRAYSIZE(lb2), L"今年 %.0f%%", cd.year_pct);
+            draw_text(lb1, fmt_clock_num_.Get(), D2D1::RectF(box.left + 10.0f, box.top + 6.0f, box.right - 10.0f, box.top + 20.0f), text_sec);
+            draw_prog(D2D1::RectF(box.left + 10.0f, box.top + 21.0f, box.right - 10.0f, box.top + 26.0f), cd.day_pct, col_cpu);
+            draw_text(lb2, fmt_clock_num_.Get(), D2D1::RectF(box.left + 10.0f, box.top + 31.0f, box.right - 10.0f, box.top + 45.0f), text_sec);
+            draw_prog(D2D1::RectF(box.left + 10.0f, box.top + 46.0f, box.right - 10.0f, box.top + 51.0f), cd.year_pct, col_cd);
+            break;
+        }
+
+        // 4x2 Wide Countdown + Time Progress Bento (Today / Week / Month / Year)
+        const float split_x = rect.left + rw * 0.44f;
+        const D2D1_RECT_F left_card = D2D1::RectF(rect.left + 14.0f, rect.top + 14.0f, split_x - 4.0f, rect.bottom - 14.0f);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), left_card, 14.0f, dark);
+        DrawTahoeIconAura(d2d_dc_.Get(), (left_card.left + left_card.right) * 0.5f, (left_card.top + left_card.bottom) * 0.5f, 56.0f, col_cd, dark);
+        draw_text(cd.title, fmt_tile_hdr_.Get(),
+                  D2D1::RectF(left_card.left + 12.0f, left_card.top + 12.0f, left_card.right - 12.0f, left_card.top + 32.0f), col_cd, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_text(hero_num, fmt_hero_num_.Get(),
+                  D2D1::RectF(left_card.left + 8.0f, left_card.top + 44.0f, left_card.right - 8.0f, left_card.top + 114.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_text(delta_lbl, fmt_row_lead_.Get(),
+                  D2D1::RectF(left_card.left + 8.0f, left_card.bottom - 56.0f, left_card.right - 8.0f, left_card.bottom - 34.0f), text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_text(cd.target_iso, fmt_clock_num_.Get(),
+                  D2D1::RectF(left_card.left + 8.0f, left_card.bottom - 30.0f, left_card.right - 8.0f, left_card.bottom - 12.0f), text_sec, 0.9f, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        const D2D1_RECT_F right_card = D2D1::RectF(split_x + 6.0f, rect.top + 14.0f, rect.right - 14.0f, rect.bottom - 14.0f);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), right_card, 14.0f, dark);
+        draw_text(L"时间进度", fmt_tile_hdr_.Get(),
+                  D2D1::RectF(right_card.left + 12.0f, right_card.top + 10.0f, right_card.right - 40.0f, right_card.top + 28.0f), text_pri);
+        struct PBar { const wchar_t* name; float pct; uint32_t col; };
+        const PBar bars[4] = {
+            {L"今日", cd.day_pct,   col_cpu},
+            {L"本周", cd.week_pct,  col_mem},
+            {L"本月", cd.month_pct, col_disk},
+            {L"今年", cd.year_pct,  col_vram},
+        };
+        const float row_h = (right_card.bottom - right_card.top - 42.0f) / 4.0f;
+        for (int bi = 0; bi < 4; ++bi) {
+            const float ry = right_card.top + 34.0f + bi * row_h;
+            wchar_t pv[16]{};
+            std::swprintf(pv, ARRAYSIZE(pv), L"%.0f%%", bars[bi].pct);
+            draw_text(bars[bi].name, fmt_clock_num_.Get(),
+                      D2D1::RectF(right_card.left + 12.0f, ry, right_card.left + 50.0f, ry + 16.0f), text_sec);
+            draw_text(pv, fmt_clock_num_.Get(),
+                      D2D1::RectF(right_card.right - 52.0f, ry, right_card.right - 12.0f, ry + 16.0f), text_pri, 0.96f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            draw_prog(D2D1::RectF(right_card.left + 12.0f, ry + 18.0f, right_card.right - 12.0f, ry + 24.0f), bars[bi].pct, bars[bi].col);
+        }
+        break;
+    }
+
+    case model::TileKind::Battery: {
+        live::BatteryPowerSnapshot snap = live_data.battery;
+        if (!snap.valid) snap = live::SampleBatteryPower(false);
+        const int pct = std::clamp(snap.battery_pct, 0, 100);
+        const uint32_t col_bat = snap.charging ? col_mem
+                               : (snap.has_battery && pct <= 20) ? col_red
+                               : (snap.has_battery && pct <= 40) ? col_disk
+                               : col_mem;
+        auto fmt_uptime = [](uint64_t sec) -> std::wstring {
+            const uint64_t mins = sec / 60ull;
+            const uint64_t hrs = mins / 60ull;
+            const uint64_t days = hrs / 24ull;
+            wchar_t buf[48]{};
+            if (days > 0) std::swprintf(buf, ARRAYSIZE(buf), L"%llu天 %llu时", static_cast<unsigned long long>(days), static_cast<unsigned long long>(hrs % 24ull));
+            else std::swprintf(buf, ARRAYSIZE(buf), L"%llu时 %llu分", static_cast<unsigned long long>(hrs), static_cast<unsigned long long>(mins % 60ull));
+            return buf;
+        };
+        const std::wstring pct_lbl = snap.has_battery ? (std::to_wstring(pct) + L"%") : L"AC";
+        std::wstring state_lbl;
+        if (!snap.has_battery) state_lbl = L"接通电源";
+        else if (snap.charging) state_lbl = L"充电中";
+        else if (snap.remaining_min > 0) {
+            wchar_t rb[32]{};
+            std::swprintf(rb, ARRAYSIZE(rb), L"剩 %d时%d分", snap.remaining_min / 60, snap.remaining_min % 60);
+            state_lbl = rb;
+        } else state_lbl = snap.ac_online ? L"已充满" : L"电池供电";
+
+        if (tile.size.cols == 1) {
+            const float cx = (rect.left + rect.right) * 0.5f;
+            const float cy = rect.top + 37.0f;
+            DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, 30.0f, col_bat, dark);
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               cx, cy, 22.0f, 4.6f, static_cast<float>(pct), col_bat, dark);
+            draw_text(pct_lbl, fmt_disk_pct_.Get(),
+                      D2D1::RectF(cx - 22.0f, cy - 11.0f, cx + 22.0f, cy + 11.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            const D2D1_RECT_F foot = D2D1::RectF(rect.left + 8.0f, rect.bottom - 26.0f, rect.right - 8.0f, rect.bottom - 7.0f);
+            DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), foot, 9.5f, dark);
+            draw_text(state_lbl, fmt_clock_num_.Get(), foot, text_pri, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            break;
+        }
+
+        if (tile.size.rows == 1) {
+            const float cy = (rect.top + rect.bottom) * 0.5f;
+            const float rcx = rect.left + 35.0f;
+            DrawTahoeIconAura(d2d_dc_.Get(), rcx, cy, 28.0f, col_bat, dark);
+            DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                               rcx, cy, 21.0f, 4.4f, static_cast<float>(pct), col_bat, dark);
+            draw_text(pct_lbl, fmt_clock_num_.Get(),
+                      D2D1::RectF(rcx - 20.0f, cy - 9.0f, rcx + 20.0f, cy + 9.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+            draw_text(L"本机 · " + state_lbl, fmt_tile_hdr_.Get(),
+                      D2D1::RectF(rect.left + 66.0f, cy - 20.0f, rect.right - 14.0f, cy), text_pri);
+            const std::wstring sub = !snap.bt_devices.empty()
+                ? (snap.bt_devices.front().name + L" " + std::to_wstring(snap.bt_devices.front().percent) + L"%")
+                : (snap.power_plan + L" · 已运行 " + fmt_uptime(snap.uptime_sec));
+            draw_text(sub, fmt_caption_.Get(),
+                      D2D1::RectF(rect.left + 66.0f, cy + 1.0f, rect.right - 14.0f, cy + 20.0f), text_sec);
+            break;
+        }
+
+        if (tile.size.cols == 2) {
+            if (!snap.bt_devices.empty()) {
+                // Apple Batteries 2x2 multi-ring layout (PC + up to 3 Bluetooth peripherals)
+                struct Slot { std::wstring name; int p; uint32_t c; };
+                std::vector<Slot> slots;
+                slots.push_back({L"本机", pct, col_bat});
+                for (size_t i = 0; i < snap.bt_devices.size() && slots.size() < 4; ++i) {
+                    const auto& d = snap.bt_devices[i];
+                    const uint32_t dc = d.percent <= 20 ? col_red : (d.percent <= 40 ? col_disk : col_cpu);
+                    slots.push_back({d.name, std::clamp(d.percent, 0, 100), dc});
+                }
+                for (size_t si = 0; si < slots.size(); ++si) {
+                    const float cx = (si % 2 == 0) ? (rect.left + rw * 0.27f) : (rect.left + rw * 0.73f);
+                    const float cy = (si / 2 == 0) ? (rect.top + rh * 0.28f) : (rect.top + rh * 0.73f);
+                    DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                       cx, cy, 24.0f, 4.4f, static_cast<float>(slots[si].p), slots[si].c, dark);
+                    const std::wstring pl = (si == 0 && !snap.has_battery) ? L"AC" : std::to_wstring(slots[si].p);
+                    draw_text(pl, fmt_disk_pct_.Get(),
+                              D2D1::RectF(cx - 22.0f, cy - 10.0f, cx + 22.0f, cy + 10.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                    draw_text(slots[si].name, fmt_clock_num_.Get(),
+                              D2D1::RectF(cx - 42.0f, cy + 27.0f, cx + 42.0f, cy + 43.0f), text_sec, 0.94f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                }
+            } else {
+                // Clean Desktop/Laptop Hero card
+                const float cx = rect.left + 54.0f;
+                const float cy = rect.top + 62.0f;
+                DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, 42.0f, col_bat, dark);
+                DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                                   cx, cy, 34.0f, 5.4f, static_cast<float>(pct), col_bat, dark);
+                draw_text(pct_lbl, fmt_group_title_.Get(),
+                          D2D1::RectF(cx - 30.0f, cy - 14.0f, cx + 30.0f, cy + 14.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+                draw_text(snap.has_battery ? L"本机电量" : L"桌面电源", fmt_tile_hdr_.Get(),
+                          D2D1::RectF(rect.left + 100.0f, rect.top + 32.0f, rect.right - 12.0f, rect.top + 52.0f), text_pri);
+                draw_text(state_lbl, fmt_caption_.Get(),
+                          D2D1::RectF(rect.left + 100.0f, rect.top + 54.0f, rect.right - 12.0f, rect.top + 72.0f), col_bat);
+                draw_text(snap.power_plan, fmt_clock_num_.Get(),
+                          D2D1::RectF(rect.left + 100.0f, rect.top + 74.0f, rect.right - 12.0f, rect.top + 90.0f), text_sec);
+
+                const D2D1_RECT_F info = D2D1::RectF(rect.left + 12.0f, rect.bottom - 76.0f, rect.right - 12.0f, rect.bottom - 12.0f);
+                DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), info, 12.0f, dark);
+                draw_text(L"系统运行时间", fmt_clock_num_.Get(),
+                          D2D1::RectF(info.left + 10.0f, info.top + 8.0f, info.right - 10.0f, info.top + 24.0f), text_sec);
+                draw_text(fmt_uptime(snap.uptime_sec), fmt_group_title_.Get(),
+                          D2D1::RectF(info.left + 10.0f, info.top + 25.0f, info.right - 10.0f, info.bottom - 8.0f), text_pri);
             }
             break;
         }
-        float my = show_title ? rect.top + 54.0f : rect.top + 16.0f;
-        auto metric = [&](const wchar_t* lbl, int pct, const std::wstring& val, uint32_t c) {
-            DrawWidgetText(lbl, static_cast<UINT32>(std::wcslen(lbl)), fmt_row_meta_.Get(), D2D1::RectF(rect.left + 14.0f, my - 8.0f, rect.left + 50.0f, my + 10.0f), Brush(text_sec));
-            const float bx0 = rect.left + 52.0f, bx1 = rect.right - 82.0f;
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, my - 3.0f, bx1, my + 3.0f), 3.0f, 3.0f), Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
-            d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx0, my - 3.0f, bx0 + (bx1 - bx0) * std::clamp(pct, 0, 100) / 100.0f, my + 3.0f), 3.0f, 3.0f), Brush(c));
-            DrawWidgetText(val.c_str(), static_cast<UINT32>(val.size()), fmt_row_name_.Get(), D2D1::RectF(rect.right - 78.0f, my - 9.0f, rect.right - 12.0f, my + 10.0f), Brush(text_pri));
-            my += 30.0f;
-        };
-        wchar_t cpu[16]{};
-        std::swprintf(cpu, ARRAYSIZE(cpu), L"%d%%", sy.cpu_pct);
-        metric(L"CPU", sy.cpu_pct, cpu, hue);
-        metric(L"内存", mem_pct, FormatBytesCompact(sy.mem_used), 0xFF30A46Cu);
-        metric(L"C:", sy.disk_used_pct, L"剩 " + FormatBytesCompact(sy.disk_free), 0xFFF5A524u);
-        if (tile.size.cols >= 4 && my + 10.0f <= rect.bottom) {
-            const int net_pct = static_cast<int>(std::min<uint64_t>(100, sy.net_down_bps / (1024 * 1024 / 4)));
-            metric(L"网络", net_pct, L"↓ " + FormatBytesCompact(sy.net_down_bps) + L"/s", 0xFF8E6BE8u);
+
+        // 4x2 Wide Battery & Connected Peripherals
+        const float split_x = rect.left + rw * 0.43f;
+        const float cx = (rect.left + split_x) * 0.5f + 4.0f;
+        const float cy = rect.top + rh * 0.44f;
+        DrawTahoeIconAura(d2d_dc_.Get(), cx, cy, 52.0f, col_bat, dark);
+        DrawTahoeGlassRing(d2d_factory_.Get(), d2d_dc_.Get(), Brush(0xFFFFFFFFu), round_stroke_.Get(),
+                           cx, cy, 39.0f, 5.8f, static_cast<float>(pct), col_bat, dark);
+        draw_text(pct_lbl, fmt_group_title_.Get(),
+                  D2D1::RectF(cx - 34.0f, cy - 14.0f, cx + 34.0f, cy + 14.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_text(L"本机 · " + state_lbl, fmt_tile_hdr_.Get(),
+                  D2D1::RectF(rect.left + 14.0f, rect.bottom - 56.0f, split_x, rect.bottom - 34.0f), text_pri, 1.0f, DWRITE_TEXT_ALIGNMENT_CENTER);
+        draw_text(snap.power_plan + L" · " + fmt_uptime(snap.uptime_sec), fmt_clock_num_.Get(),
+                  D2D1::RectF(rect.left + 10.0f, rect.bottom - 32.0f, split_x + 4.0f, rect.bottom - 12.0f), text_sec, 0.92f, DWRITE_TEXT_ALIGNMENT_CENTER);
+
+        const D2D1_RECT_F right_card = D2D1::RectF(split_x + 8.0f, rect.top + 14.0f, rect.right - 14.0f, rect.bottom - 14.0f);
+        DrawTahoeGlassCard(d2d_dc_.Get(), Brush(0xFFFFFFFFu), right_card, 14.0f, dark);
+        draw_text(snap.bt_devices.empty() ? L"电源与外设" : L"蓝牙设备电量", fmt_tile_hdr_.Get(),
+                  D2D1::RectF(right_card.left + 12.0f, right_card.top + 10.0f, right_card.right - 40.0f, right_card.top + 28.0f), text_pri);
+        if (!snap.bt_devices.empty()) {
+            const size_t n = std::min<size_t>(snap.bt_devices.size(), 3u);
+            const float rh_item = (right_card.bottom - right_card.top - 42.0f) / 3.0f;
+            for (size_t di = 0; di < n; ++di) {
+                const auto& d = snap.bt_devices[di];
+                const float ry = right_card.top + 36.0f + static_cast<float>(di) * rh_item;
+                const uint32_t dc = d.percent <= 20 ? col_red : (d.percent <= 40 ? col_disk : col_mem);
+                draw_text(d.name, fmt_caption_.Get(),
+                          D2D1::RectF(right_card.left + 12.0f, ry, right_card.right - 52.0f, ry + 18.0f), text_pri);
+                draw_text(std::to_wstring(d.percent) + L"%", fmt_clock_num_.Get(),
+                          D2D1::RectF(right_card.right - 50.0f, ry, right_card.right - 12.0f, ry + 18.0f), dc, 1.0f, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                const D2D1_RECT_F bar = D2D1::RectF(right_card.left + 12.0f, ry + 22.0f, right_card.right - 12.0f, ry + 28.0f);
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(bar, 3.0f, 3.0f), Brush(dark ? 0x1EFFFFFFu : 0x14000000u));
+                const float fw = std::max(6.0f, (bar.right - bar.left) * std::clamp(static_cast<float>(d.percent) / 100.0f, 0.0f, 1.0f));
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bar.left, bar.top, bar.left + fw, bar.bottom), 3.0f, 3.0f), Brush(dc));
+            }
+        } else {
+            const std::pair<const wchar_t*, std::wstring> rows[3] = {
+                {L"电源计划", snap.power_plan.empty() ? L"平衡" : snap.power_plan},
+                {L"供电状态", snap.power_saver ? L"节电模式已开启" : (snap.ac_online ? L"交流电源供电" : L"电池供电中")},
+                {L"蓝牙外设", L"未检测到上报电量的设备"},
+            };
+            for (int ri = 0; ri < 3; ++ri) {
+                const float ry = right_card.top + 42.0f + ri * 42.0f;
+                draw_text(rows[ri].first, fmt_clock_num_.Get(),
+                          D2D1::RectF(right_card.left + 12.0f, ry, right_card.right - 12.0f, ry + 16.0f), text_sec);
+                draw_text(rows[ri].second, fmt_caption_.Get(),
+                          D2D1::RectF(right_card.left + 12.0f, ry + 16.0f, right_card.right - 12.0f, ry + 34.0f), text_pri);
+            }
         }
         break;
     }
@@ -5967,6 +8518,7 @@ void DesktopRenderer::DrawLiveTile(const model::DesktopTile& tile_in,
 }
 
 void DesktopRenderer::DrawSceneBanner(const model::DesktopModelState& state,
+                                      const LiveTileRuntimeData& live_data,
                                       const DesktopInteractionState& interaction) {
     if (interaction.banner_suppressed) return;
 
@@ -6001,8 +8553,24 @@ void DesktopRenderer::DrawSceneBanner(const model::DesktopModelState& state,
     const float btn_w = MeasureSingleLineWidth(btn_txt, fmt_pill_.Get(), 160.0f) + 22.0f;
     const float total_w = 36.0f + msg_w + 16.0f + btn_w + 10.0f;
 
-    const float bx = static_cast<float>(wa.x + 24);
-    const float by = static_cast<float>(wa.bottom() - 20 - 36);
+    float bx = static_cast<float>(wa.x + 24);
+    float by = static_cast<float>(wa.bottom() - 20 - 36);
+    const bool dock_shown = (state.settings.dock_enabled || interaction.dock_bar_reveal > 0.01f) &&
+                            interaction.dock_bar_reveal > 0.005f &&
+                            state.settings.active_scene != model::DesktopScene::Present &&
+                            !interaction.side_drawer_open &&
+                            live_data.dock.HasItems() &&
+                            live_data.dock.pill_rect.right > live_data.dock.pill_rect.left;
+    if (dock_shown) {
+        if (live_data.dock.dock_position == 1) {
+            if (by < live_data.dock.pill_rect.bottom + 12.0f && by + 36.0f > live_data.dock.pill_rect.top - 12.0f) {
+                bx = std::max(bx, live_data.dock.pill_rect.right + 16.0f);
+            }
+        } else if (bx + total_w + 16.0f > live_data.dock.pill_rect.left &&
+                   by + 36.0f > live_data.dock.pill_rect.top - 12.0f) {
+            by = std::max(static_cast<float>(wa.y + 16), live_data.dock.pill_rect.top - 52.0f);
+        }
+    }
     const D2D1_RECT_F banner_rc = D2D1::RectF(bx, by, bx + total_w, by + 36.0f);
 
     DrawCardMaterial(banner_rc, 18.0f, model::CardMaterial::Acrylic, 88, dark, accent, false, false);

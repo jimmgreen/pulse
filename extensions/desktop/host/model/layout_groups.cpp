@@ -551,6 +551,50 @@ void MoveGroupInteractive(std::vector<DesktopGroup>& groups, size_t group_index,
     ResolveGroupCollisions(groups, group_index, work_area, tile_board_rect, icon_size, extra_obstacles);
 }
 
+std::optional<PointI> FindNearestFreeGroupSpot(const std::vector<DesktopGroup>& groups,
+                                               size_t group_index,
+                                               int proposed_x, int proposed_y,
+                                               const RectI& work_area,
+                                               const RectI& tile_board_rect,
+                                               DesktopIconSize icon_size,
+                                               std::span<const RectI> extra_obstacles) {
+    if (group_index >= groups.size()) {
+        return std::nullopt;
+    }
+    const auto members = TabMembers(groups, groups[group_index].id);
+    int max_content = 0;
+    for (size_t m : members) {
+        max_content = std::max(max_content, groups[m].content_count);
+    }
+    DesktopGroup rep = groups[group_index];
+    rep.content_count = max_content;
+    const RectI frame = ComputeGroupFrame(rep, icon_size);
+
+    std::vector<RectI> stationary;
+    stationary.reserve(groups.size());
+    for (size_t i = 0; i < groups.size(); ++i) {
+        if (std::find(members.begin(), members.end(), i) != members.end()) continue;
+        if (!groups[i].tab_stack_id.empty() && !groups[i].tab_active) continue;
+        DesktopGroup other = groups[i];
+        if (!other.tab_stack_id.empty()) {
+            for (size_t om : TabMembers(groups, other.id)) {
+                other.content_count = std::max(other.content_count, groups[om].content_count);
+            }
+        }
+        stationary.push_back(ComputeGroupFrame(other, icon_size));
+    }
+
+    if (auto spot = FindBestGroupSpot(proposed_x, proposed_y, frame.w, frame.h,
+                                      work_area, tile_board_rect, stationary, extra_obstacles, kSnapGridPx)) {
+        return spot;
+    }
+    if (auto spot = FindBestGroupSpot(proposed_x, proposed_y, frame.w, frame.h,
+                                      work_area, tile_board_rect, stationary, extra_obstacles, 0)) {
+        return spot;
+    }
+    return std::nullopt;
+}
+
 void CommitGroupRestOrigins(std::vector<DesktopGroup>& groups) noexcept {
     for (DesktopGroup& group : groups) {
         group.rest_origin.reset();

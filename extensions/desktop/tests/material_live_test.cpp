@@ -130,15 +130,17 @@ int wmain(int argc, wchar_t** argv) {
     auto check = [&](bool ok, const char* name) { std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failed += !ok; };
     const auto thin_light = render::CardAcrylicProfile(false, 80);
     const auto thin_dark = render::CardAcrylicProfile(true, 80);
-    check(std::abs(thin_light.tint_opacity - 0.186048f) < 0.00001f &&
-          std::abs(thin_light.luminosity_opacity - 0.402288f) < 0.00001f,
-          "thin light separates tint and luminosity instead of a solid alpha wash");
-    check(std::abs(thin_dark.tint_opacity - 0.234192f) < 0.00001f &&
-          std::abs(thin_dark.luminosity_opacity - 0.342720f) < 0.00001f,
-          "thin dark separates tint and luminosity");
+    check(thin_light.luminosity_opacity >= 0.72f && thin_light.luminosity_opacity <= 0.90f &&
+          thin_light.tint_opacity >= 0.20f && thin_light.tint_opacity <= 0.48f,
+          "light Acrylic menu clamps WUC backdrop luminosity for WCAG contrast while staying translucent");
+    check(thin_dark.luminosity_opacity >= 0.76f && thin_dark.luminosity_opacity <= 0.92f &&
+          thin_dark.tint_opacity >= 0.25f && thin_dark.tint_opacity <= 0.52f,
+          "dark Acrylic menu clamps WUC backdrop luminosity for WCAG contrast while staying translucent");
     check(render::CardMicaProfile(true, false).luminosity_opacity < 0.65f &&
-          render::CardAcrylicProfile(false, 30).tint_opacity < thin_light.tint_opacity,
-          "desktop MicaAlt retains wallpaper contrast; Acrylic slider remains effective");
+          render::CardMicaProfile(false, false).tint_opacity >= 0.65f &&
+          render::CardSurfaceProfile(false, 30).luminosity_opacity >= 0.65f &&
+          render::CardAcrylicProfile(false, 30).luminosity_opacity < thin_light.luminosity_opacity,
+          "desktop Mica/MicaAlt/Acrylic lock theme brightness while keeping chroma and slider responsive");
     {
         std::filesystem::create_directories(argv[1]);
         WNDCLASSW wc{};

@@ -3,7 +3,9 @@
 // so 100% of geometry, collision, displacement, rule matching, and undo logic can be
 // verified deterministically in pulse_desktop_model_test.
 #pragma once
+#include "ipc/widget_prefs.h"
 #include "glass_options.h"
+#include "host/video/video_wallpaper_types.h"
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -171,10 +173,64 @@ struct BeautifySettings {
     uint8_t glass_blur_radius = 1;
     bool glass_blur_edge = true;
     uint8_t glass_live_rate = 1;      // 0=Static/15fps (PowerSave), 1=30fps (Standard), 2=60fps (Smooth)
+    // macOS 26 Tahoe Liquid Glass Dock (replaces legacy Apps tile on desktop).
+    bool dock_enabled = false;        // enabled by default on live host; false in bare unit-test fixtures
+    uint8_t dock_icon_size = 48;      // 42 (Small), 48 (Medium), 56 (Large)
+    bool dock_magnification = true;
+    uint16_t dock_max_scale_x100 = 152; // 132 (Subtle), 152 (Classic), 178 (Bold)
+    uint8_t dock_hide_mode = 0;       // 0=AlwaysVisible, 1=SmartHide (window overlap), 2=AutoHide (edge reveal)
+    uint8_t dock_minimize_effect = 1; // 0=Off, 1=Genie (curved funnel), 2=Scale (spring scale & slide)
+    uint8_t dock_position = 0;        // 0=Bottom, 1=Left, 2=Right
+    bool dock_system_area = true;     // Show unified .dk-sys tray & system status capsule on Dock
+    // Dock stacks (叠放): how a Dock folder opens when clicked, and its order.
+    uint8_t dock_stack_view = 0;      // 0=Automatic, 1=Fan, 2=Grid, 3=List (overlays::DockStackView)
+    uint8_t dock_stack_sort = 0;      // 0=Date created, 1=Name, 2=Date modified, 3=Kind
+    bool dock_apps_stack = true;      // 应用程序 stack (Start menu apps in a grid) beside 下载
+    std::vector<std::wstring> dock_pinned_paths;     // empty => auto-discover default Windows apps
+    std::vector<std::wstring> dock_tray_pinned_keys; // tray icons pinned directly inside Dock .dk-sys
     // 天气: the city picked in settings (no location API); coordinates come from Open-Meteo's geocoder.
     std::wstring weather_city;
+    WidgetPrefs widgets{};             // 小组件 (plugin settings › 小组件), ipc/widget_prefs.h
     bool operator==(const BeautifySettings&) const noexcept = default;
 };
+
+inline DockPrefs ExtractDockPrefs(const BeautifySettings& s) noexcept {
+    DockPrefs d{};
+    d.enabled = s.dock_enabled;
+    d.position = std::min<uint8_t>(s.dock_position, 2);
+    d.hide_mode = std::min<uint8_t>(s.dock_hide_mode, 2);
+    d.minimize_effect = std::min<uint8_t>(s.dock_minimize_effect, 2);
+    d.icon_size = std::clamp<uint8_t>(s.dock_icon_size, 36, 68);
+    d.magnification = s.dock_magnification;
+    d.max_scale_x100 = std::clamp<uint16_t>(s.dock_max_scale_x100, 100, 195);
+    d.system_area = s.dock_system_area;
+    return d;
+}
+
+inline void ApplyDockPrefs(const DockPrefs& d, BeautifySettings& s) noexcept {
+    s.dock_enabled = d.enabled;
+    s.dock_position = std::min<uint8_t>(d.position, 2);
+    s.dock_hide_mode = std::min<uint8_t>(d.hide_mode, 2);
+    s.dock_minimize_effect = std::min<uint8_t>(d.minimize_effect, 2);
+    s.dock_icon_size = std::clamp<uint8_t>(d.icon_size, 36, 68);
+    s.dock_magnification = d.magnification;
+    s.dock_max_scale_x100 = std::clamp<uint16_t>(d.max_scale_x100, 100, 195);
+    s.dock_system_area = d.system_area;
+}
+
+inline uint8_t GlassPresetToModeIndex(uint8_t preset) noexcept {
+    // Maps persisted glass_preset IDs onto the 4 curated Liquid Glass UI modes:
+    // 0=清透水滴 (5/0), 1=标准液态 (1), 2=柔雾凝脂 (3), 3=流光棱镜 (2).
+    if (preset == 1) return 1;
+    if (preset == 3) return 2;
+    if (preset == 2) return 3;
+    return 0;
+}
+
+inline uint8_t GlassModeIndexToPreset(uint8_t mode_idx) noexcept {
+    static constexpr uint8_t kMap[4] = {5, 1, 3, 2};
+    return kMap[mode_idx < 4 ? mode_idx : 0];
+}
 
 inline void ApplyGlassPreset(uint8_t preset, BeautifySettings& s) noexcept {
     if (preset < 4) s.glass_reference = false;
@@ -355,8 +411,12 @@ enum class TileKind : uint8_t {
     Calendar = 14,   // date, weekday and month (no events yet)
     Todo = 15,       // local list kept with the desktop state
     System = 16,     // CPU, memory, C: and network
+    Pomodoro = 17,   // interactive 25/5 focus timer
+    MediaPlayer = 18,// Windows GSMTC Now Playing + Vinyl cover & playback controls
+    Countdown = 19,  // event countdown + Today/Week/Month/Year progress bars
+    Battery = 20,    // PC power / battery + connected Bluetooth device batteries
 };
-inline constexpr TileKind kLastTileKind = TileKind::System;
+inline constexpr TileKind kLastTileKind = TileKind::Battery;
 
 // A tile's own look (自定义磁贴). `material` on the tile is its Windows effect.
 enum class TileBackground : uint8_t {
@@ -397,6 +457,7 @@ struct DesktopTile {
     std::wstring title;
     std::wstring target_path;                  // folder/file path for PinnedFolder, PinnedItem, Photos
     std::wstring note_body;                    // UTF-16 text for StickyNote
+    std::wstring countdown_date;               // YYYY-MM-DD target date for Countdown (empty = auto next New Year)
     bool analog_clock = true;                  // 1x1 analog sweep clock vs 2x1 digital clock
     bool live_content = true;                  // per-tile dynamic content switch
     CardMaterial material = CardMaterial::FollowHost;
@@ -481,6 +542,7 @@ struct DesktopModelState {
     std::vector<DesktopTile> tiles;
     std::vector<TodoItem> todos;
     bool widget_defaults_applied = false;      // the one-time 最近使用/日历/天气 stack on boards saved before widgets
+    video::VideoWallpaperPersistedState video_wallpaper;
 };
 
 // Default factory matching desktop_pack_mockup.html (4 default groups + 10-tile 5x7 board).
@@ -503,6 +565,13 @@ void MoveGroupInteractive(std::vector<DesktopGroup>& groups, size_t group_index,
                           const RectI& work_area, const RectI& tile_board_rect,
                           DesktopIconSize icon_size = DesktopIconSize::Medium,
                           std::span<const RectI> extra_obstacles = {});
+// Finds the nearest snapped non-overlapping spot for `group_index` keeping all other groups stationary.
+std::optional<PointI> FindNearestFreeGroupSpot(const std::vector<DesktopGroup>& groups,
+                                               size_t group_index,
+                                               int proposed_x, int proposed_y,
+                                               const RectI& work_area, const RectI& tile_board_rect,
+                                               DesktopIconSize icon_size = DesktopIconSize::Medium,
+                                               std::span<const RectI> extra_obstacles = {});
 void CommitGroupRestOrigins(std::vector<DesktopGroup>& groups) noexcept;
 void ResizeGroupColumns(std::vector<DesktopGroup>& groups, size_t group_index,
                         int proposed_cols, int proposed_rows,

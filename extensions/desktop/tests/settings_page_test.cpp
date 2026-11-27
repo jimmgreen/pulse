@@ -1,4 +1,5 @@
 #include "plugin/settings_page.h"
+#include "../../src/app/extensions/native/ui_model.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -6,11 +7,26 @@
 #include <vector>
 #include <functional>
 #include <map>
+#include <set>
 
 namespace {
 std::function<void(const PulseUiModelTree*)> model_capture;
 PulseStringView Sv(const std::string& s) { return {s.data(), static_cast<uint32_t>(s.size())}; }
 std::string Str(PulseStringView v) { return {v.data, v.length}; }
+// Every tree the page hands the host, run through Pulse's own validator (what the settings host does).
+std::vector<std::string> g_validator_errors;
+size_t g_validated_trees = 0;
+pulse::extensions::UiTree g_last_ui_tree;  // the last accepted tree (settings_render_test paints it)
+void Validate(const PulseUiModelTree* tree) {
+    pulse::extensions::UiTree out;
+    std::set<std::string> commands;
+    std::string error;
+    ++g_validated_trees;
+    if (pulse::extensions::native::ConvertUiModel(tree, out, commands, error) != PULSE_OK) g_validator_errors.push_back(error);
+    else g_last_ui_tree = std::move(out);
+}
+// Canvas drawing scripts have their own option budget in the SDK (4096 bytes per entry, ui_tree.cpp).
+size_t g_max_canvas_opt = 0;
 void WalkNode(const PulseUiModelNode* n, size_t depth, size_t& nodes, size_t& max_depth,
               size_t& max_id, size_t& max_opt, size_t& max_text) {
     if (!n) return;
@@ -22,7 +38,8 @@ void WalkNode(const PulseUiModelNode* n, size_t depth, size_t& nodes, size_t& ma
     if (n->message.present) max_text = std::max<size_t>(max_text, n->message.value.length);
     if (n->options.present && n->options.data) {
         for (uint32_t i = 0; i < n->options.count; ++i) {
-            max_opt = std::max<size_t>(max_opt, n->options.data[i].length);
+            if (n->type == PULSE_UI_MODEL_CANVAS) g_max_canvas_opt = std::max<size_t>(g_max_canvas_opt, n->options.data[i].length);
+            else max_opt = std::max<size_t>(max_opt, n->options.data[i].length);
         }
     }
     if (n->children.present && n->children.data) {
@@ -49,6 +66,7 @@ struct Host {
     void* get_user = nullptr;
     void* set_user = nullptr;
     std::string written, stored, inflight_value, ui_material, initial_ui_material, initial_ui_opacity;
+    size_t updates = 0, update_max_nodes = 0, update_max_depth = 0, update_max_states = 0;
     size_t tree_nodes = 0, tree_max_depth = 0, tree_states = 0, tree_max_id = 0, tree_max_opt = 0, tree_max_text = 0;
     uint64_t expected_version = 0;
     uint64_t next = 1;
@@ -85,6 +103,7 @@ struct Host {
             api.create = [](void* p, PulseStringView, const PulseUiModelTree* tree, uint64_t* id) -> PulseStatus {
                 auto& h = *static_cast<Host*>(p);
                 if (tree) {
+                    Validate(tree);
                     if (model_capture) model_capture(tree);
                     h.tree_nodes = 0;
                     h.tree_max_depth = 0;
@@ -124,6 +143,20 @@ struct Host {
             PulseUiModelV1 api{}; api.context = self;
             api.subscribe_command=[](void* p,uint64_t,PulseStringView id,PulseUiClickFn cb,void* user,uint64_t* token)->PulseStatus {
                 auto& h=*static_cast<Host*>(p);h.command_callbacks[Str(id)]={cb,user};*token=h.next++;return PULSE_OK;
+            };
+            api.update = [](void* p, uint64_t, const PulseUiModelTree* tree) -> PulseStatus {
+                auto& h = *static_cast<Host*>(p);
+                if (!tree || !tree->root) return PULSE_ERROR_ARGUMENT;
+                Validate(tree);
+                size_t nodes = 0, depth = 0, id = 0, opt = 0, text = 0;
+                WalkNode(tree->root, 0, nodes, depth, id, opt, text);
+                // The SDK rejects it (sdk/native/include/pulse/ui_model.h: nodes 384/depth 12, states 128).
+                if (nodes > 384 || depth > 12 || tree->state_count > 128 || g_max_canvas_opt > 4096) return PULSE_ERROR_ARGUMENT;
+                ++h.updates;
+                h.update_max_nodes = std::max(h.update_max_nodes, nodes);
+                h.update_max_depth = std::max(h.update_max_depth, depth);
+                h.update_max_states = std::max<size_t>(h.update_max_states, tree->state_count);
+                return PULSE_OK;
             };
             api.set_states = [](void* p, uint64_t, const PulseUiState* values, uint32_t count) -> PulseStatus {
                 auto& h = *static_cast<Host*>(p);
@@ -310,18 +343,32 @@ int main(int argc, char** argv) {
     clean.SaveReply(false, 10);
 
     // LiquidGlass (5), dispersion/live-rate roundtrip, unknown material fallback, and SDK ui_tree.cpp budget check
-    std::printf("[INFO] settings_tree nodes=%zu/128 depth=%zu/8 states=%zu/64 id=%zu/64 opt=%zu/128 text=%zu/1024\n",
+    std::printf("[INFO] settings_tree nodes=%zu/384 depth=%zu/12 states=%zu/128 id=%zu/64 opt=%zu/128 canvas=%zu/4096 text=%zu/1024\n",
                 clean.tree_nodes, clean.tree_max_depth, clean.tree_states,
-                clean.tree_max_id, clean.tree_max_opt, clean.tree_max_text);
-    check(clean.tree_nodes > 0 && clean.tree_nodes <= 128 &&
-          clean.tree_max_depth <= 8 && clean.tree_states <= 64 &&
-          clean.tree_max_id <= 64 && clean.tree_max_opt <= 128 && clean.tree_max_text <= 1024,
+                clean.tree_max_id, clean.tree_max_opt, g_max_canvas_opt, clean.tree_max_text);
+    check(clean.tree_nodes > 0 && clean.tree_nodes <= 384 &&
+          clean.tree_max_depth <= 12 && clean.tree_states <= 128 &&
+          clean.tree_max_id <= 64 && clean.tree_max_opt <= 128 && g_max_canvas_opt <= 4096 && clean.tree_max_text <= 1024,
           "settings UI tree stays within Pulse SDK ui_tree.cpp node, depth, state, and string limits");
 
     clean.Select("5");
     clean.SaveReply(false, 11);
-    clean.SelectKey("glass_preset", "2"); // DeepPrism -> thick=44, ior=188, disp=22, glare=108, angle=-38, frost=0
+    check(clean.all_states["is_liquid_glass"] == "true",
+          "selecting LiquidGlass reveals curated glass mode and rate controls");
+    clean.SelectKey("glass_mode", "3"); // 流光棱镜 -> preset 2
     clean.SaveReply(false, 12);
+    check(page.Prefs().glass_preset == 2 && clean.all_states["glass_mode"] == "3",
+          "glass_mode=3 selects Prism (preset 2) and syncs UI state");
+    clean.SelectKey("glass_mode", "2"); // 柔雾凝脂 -> preset 3
+    clean.SaveReply(false, 13);
+    check(page.Prefs().glass_preset == 3 && clean.all_states["glass_mode"] == "2",
+          "glass_mode=2 selects Frosted (preset 3) and syncs UI state");
+    clean.SelectKey("glass_mode", "0"); // 清透水滴 -> preset 5
+    clean.SaveReply(false, 14);
+    check(page.Prefs().glass_preset == 5 && clean.all_states["glass_mode"] == "0",
+          "glass_mode=0 selects Clear Droplet (preset 5) and syncs UI state");
+    clean.SelectKey("glass_preset", "2"); // DeepPrism -> thick=44, ior=188, disp=22, glare=108, angle=-38, frost=0
+    clean.SaveReply(false, 15);
     check(page.Prefs().material == 5 && page.Prefs().glass_preset == 2 &&
           page.Prefs().glass_thickness == 44 && page.Prefs().glass_ior_x100 == 188 &&
           page.Prefs().glass_dispersion == 22 && page.Prefs().glass_frost == 0 &&
@@ -330,7 +377,7 @@ int main(int argc, char** argv) {
           pulse::desktop::plugin::DesktopPrefs::FromJson(clean.written).glass_dispersion == 22,
           "LiquidGlass DeepPrism preset applies full Studio optical fields and serializes them");
     clean.SelectKey("glass_frost", "3"); // 60% stop -> switches glass_preset to Custom (4)
-    clean.SaveReply(false, 13);
+    clean.SaveReply(false, 16);
     clean.SelectKey("glass_rate", "0");
     check(page.Prefs().glass_preset == 4 && page.Prefs().glass_frost == 60 &&
           page.Prefs().glass_live_rate == 0 &&
@@ -338,7 +385,11 @@ int main(int argc, char** argv) {
           pulse::desktop::plugin::DesktopPrefs::FromJson(clean.written).glass_frost == 60 &&
           pulse::desktop::plugin::DesktopPrefs::FromJson(clean.written).glass_live_rate == 0,
           "Glass frost slider switches preset to Custom (4) and serializes cleanly");
-    clean.SaveReply(false, 14);
+    clean.SaveReply(false, 17);
+    clean.Select("1");
+    clean.SaveReply(false, 18);
+    check(clean.all_states["is_liquid_glass"] == "false",
+          "switching away from LiquidGlass hides curated glass mode controls");
     page.Close();
 
     Host compat; PulseHostV1 compat_host{sizeof(PulseHostV1), 1, &compat, Host::Query};
@@ -362,6 +413,85 @@ int main(int argc, char** argv) {
               "settings tree exposes four options with catalog-backed Normal text");
         page.Close();
     }
+    {
+        // 小组件: every widget's options fit the SDK's page limits, and the options survive save and reload.
+        Host w; PulseHostV1 w_host{sizeof(PulseHostV1), 1, &w, Host::Query};
+        w.enforce_value_limit = true;
+        check(page.Open(&w_host, {}, {}) == PULSE_OK, "open widget settings fixture");
+        w.Load("{}", 30);
+        const size_t updates_before_tabs = w.updates;
+        for (int tab = 1; tab < 8; ++tab) {
+            const auto t = std::to_string(tab);
+            w.SelectKey("w_tab", t.c_str());
+        }
+        std::printf("[INFO] widget tabs: updates=%zu max nodes=%zu/384 depth=%zu/12 states=%zu/128\n",
+                    w.updates - updates_before_tabs, w.update_max_nodes, w.update_max_depth, w.update_max_states);
+        check(w.updates - updates_before_tabs == 7 && w.update_max_nodes <= 384 && w.update_max_states <= 128,
+              "every 小组件 tab (including 照片) rebuilds the page within the SDK node and state limits");
+        w.SelectKey("w_scheme_3", "true");
+        check(w.all_states["w_scheme_3"] == "true" && w.all_states["w_scheme_0"] == "false",
+              "配色 option cards act as radios (the page unchecks the others)");
+        w.Command("w-tint-2");
+        check(w.update_max_nodes > 0, "a swatch click redraws the page");
+        w.SelectKey("w_rotate", "false");
+        w.SelectKey("w_seconds", "false");
+        w.Command("w-city-del-3");      // 纽约 out (defaults 北京 东京 伦敦 纽约)
+        w.Command("w-city-add-16");     // 悉尼 in
+        w.Command("w-city-add-16");     // a city already shown is not added twice
+        w.SelectKey("w_sys_cpu", "false");
+        w.SelectKey("w_photo_int", "3"); // 60s
+        w.SelectKey("w_photo_shuf", "true");
+        w.SelectKey("w_photo_cap", "false");
+        w.SelectKey("w_focus", "4");    // 45
+        w.SelectKey("w_low", "3");      // 30%
+        w.SelectKey("dock_enabled", "true");
+        w.SelectKey("dock_pos", "1");   // 左侧
+        w.SelectKey("dock_hide", "2");  // 自动隐藏
+        w.SelectKey("dock_minfx", "1"); // 缩放 (2)
+        w.SelectKey("dock_size", "2");  // 大 (56)
+        w.SelectKey("dock_mag", "false");
+        w.SelectKey("dock_sys", "false");
+        w.SelectKey("wp_kind", "1");
+        w.SelectKey("video_fill", "1");
+        page.SetVideoWallpaperStatus("海边日落.mp4", "正在播放");
+        const auto& wp = page.Prefs().widgets;
+        const auto& dp = page.Prefs().dock;
+        check(page.Prefs().wallpaper_kind == 1 && page.Prefs().video_fill == 1 &&
+              w.all_states["is_video_wallpaper"] == "true" &&
+              w.all_states["video_status"].find("海边日落.mp4") != std::string::npos,
+              "video wallpaper settings state, fill mode, and status sync cleanly");
+        check(wp.scheme == 3 && !wp.tint_auto && wp.tint_argb == 0xFF5E5CE6u && !wp.stack_rotate &&
+              !wp.clock_seconds && wp.world_cities.size() == 4 && wp.world_cities[3] == L"悉尼" &&
+              wp.system_items == 0x1E && wp.photo_interval_s == 60 && wp.photo_shuffle && !wp.photo_caption &&
+              wp.focus_min == 45 && wp.battery_low_pct == 30,
+              "小组件 selections (including 叠放自动轮换 & 照片 tab) land in the prefs");
+        check(dp.enabled && dp.position == 1 && dp.hide_mode == 2 && dp.minimize_effect == 2 &&
+              dp.icon_size == 56 && !dp.magnification && !dp.system_area,
+              "程序坞 Dock settings selections land in DesktopPrefs::dock");
+        const auto restored = pulse::desktop::plugin::DesktopPrefs::FromJson(page.Prefs().ToPersistedJson());
+        check(restored.widgets == wp && restored.dock == dp && w.all_states["w_is_tint"] == "true" &&
+              restored.wallpaper_kind == 1 && restored.video_fill == 1,
+              "小组件, Dock, and video wallpaper prefs survive the persisted form and reveal the tint row");
+        w.Command("w-tint-0");
+        for (int i = 0; i < 5; ++i) w.Command("w-city-del-0");
+        check(page.Prefs().widgets.tint_auto && page.Prefs().widgets.world_cities.size() == 1 &&
+              page.Prefs().widgets.world_cities[0] == L"悉尼",
+              "取自壁纸 brings back the wallpaper tint; removing chips keeps the last city");
+        w.Command("w-city-add-1");      // 上海
+        check(page.Prefs().widgets.world_cities.size() == 2 && page.Prefs().widgets.world_cities[1] == L"上海",
+              "添加城市 appends after the cities already shown");
+        for (const char* key : {"w_sys_mem", "w_sys_vram", "w_sys_disk", "w_sys_net"}) w.SelectKey(key, "false");
+        check(page.Prefs().widgets.system_items != 0, "turning every 系统 item off keeps one");
+        pulse::desktop::plugin::DesktopPrefs big = page.Prefs();
+        big.weather_city = std::wstring(40, L'\u6D4B');
+        big.widgets.world_cities = {L"奥克兰", L"温哥华", L"莫斯科", L"新加坡"};
+        const auto persisted = big.ToPersistedJson();
+        std::printf("[INFO] largest persisted prefs: %zu/1024 bytes\n", persisted.size());
+        check(persisted.size() <= 1024, "the largest persisted prefs stay within the SDK's 1024-byte value limit");
+        page.Close();
+    }
+    for (const auto& e : g_validator_errors) std::printf("[INFO] validator: %s\n", e.c_str());
+    check(g_validated_trees > 0 && g_validator_errors.empty(), "every settings tree passes Pulse's ConvertUiModel/ui_tree validation");
     std::printf("SETTINGS_RESULT failed=%d\n", failed);
     return failed ? 1 : 0;
 }

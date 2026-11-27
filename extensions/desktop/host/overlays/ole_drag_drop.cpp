@@ -205,6 +205,12 @@ DWORD DesktopDropTarget::EvaluateHover(model::PointI client_pt, DWORD key_state,
     const bool force_copy = (key_state & MK_CONTROL) != 0;
 
     switch (out_zone.kind) {
+    case DropZoneKind::DockBar:
+        out_hint = L"固定到程序坞";
+        return DROPEFFECT_COPY;
+    case DropZoneKind::DockTrash:
+        out_hint = L"移入回收站";
+        return DROPEFFECT_MOVE;
     case DropZoneKind::StagingTrayTile:
         out_hint = L"加入 Pulse 暂存区";
         return DROPEFFECT_COPY;

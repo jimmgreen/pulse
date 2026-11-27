@@ -23,6 +23,7 @@ struct DesktopDragHostTestPeer {
         host.dragging_tile_idx_=0;
         host.drag_offset_={};
         host.interaction_.dragging_tile=true;
+        host.interaction_.dragging_tile_id="0";
 #ifndef BASELINE_HOST
         host.tile_drag_session_.Begin(host.state_.tiles,0,host.PrimaryWorkAreaClient(),{},{});
 #endif
@@ -32,13 +33,15 @@ struct DesktopDragHostTestPeer {
         auto check=[&](bool ok,const char* label) {
             failed+=!ok;std::printf("[%s] %s\n",ok?"PASS":"FAIL",label);
         };
-        check(host.state_.tiles[0].x==240 && host.state_.tiles[1].x==24 && host.state_.tiles[2].x==132,
-              "host applies stable insertion rather than nearest-empty displacement");
+        check(host.state_.tiles[0].x==240 && host.state_.tiles[1].x==132 && host.state_.tiles[2].x==240 &&
+              host.interaction_.drag_tile_preview_rect.x==348 && host.interaction_.drag_tile_preview_rect.y==44,
+              "host follows pointer 1:1 with stationary siblings and nearest-free-cell ghost preview");
         host.SaveModel();
         check(host.test_saved_model_==original,"host persists original tiles during preview");
         host.OnSurfaceMessage(nullptr,WM_CAPTURECHANGED,0,0,handled);
-        check(host.state_.tiles[0].x==24 && host.state_.tiles[1].x==132 && host.state_.tiles[2].x==240,
-              "capture loss restores starting tile placement");
+        check(host.state_.tiles[0].x==24 && host.state_.tiles[1].x==132 && host.state_.tiles[2].x==240 &&
+              host.interaction_.drag_tile_preview_rect.empty(),
+              "capture loss restores starting tile placement and clears ghost");
         std::printf("Drag contract: 3 cases, %d failures\n",failed);
         return failed?1:0;
     }

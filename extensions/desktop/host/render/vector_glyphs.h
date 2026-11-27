@@ -23,4 +23,9 @@ void DrawGlyph(ID2D1DeviceContext* dc, const wchar_t* text, UINT32 length, IDWri
                const D2D1_RECT_F& rect, ID2D1Brush* brush,
                D2D1_DRAW_TEXT_OPTIONS options = D2D1_DRAW_TEXT_OPTIONS_NONE);
 
+// SVG path data drawn into `box` from a view x view square (centred, aspect kept). `path` must be a string
+// literal: the geometry is cached per pointer. Filled, or stroked `stroke_view` view units wide with round ends.
+void DrawSvgPath(ID2D1DeviceContext* dc, const char* path, const D2D1_RECT_F& box, float view, ID2D1Brush* brush,
+                 bool fill, float stroke_view = 1.7f);
+
 } // namespace pulse::desktop::render

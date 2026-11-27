@@ -460,7 +460,7 @@ std::span<const TileSize> AllowedTileSizesFor(TileKind kind) noexcept {
     static constexpr TileSize kTodo[] = {
         {1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}, {2, 3}, {4, 3}, {4, 4}, {4, 6}};
     static constexpr TileSize kApps[] = {
-        {1, 1}, {2, 2}, {4, 2}, {2, 3}, {4, 3}, {4, 4}, {4, 6}};
+        {1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}, {2, 3}, {4, 3}, {4, 4}, {4, 6}};
     static constexpr TileSize kClock[] = {
         {1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}, {2, 3}, {4, 4}};
     static constexpr TileSize kNote[] = {
@@ -470,7 +470,9 @@ std::span<const TileSize> AllowedTileSizesFor(TileKind kind) noexcept {
     static constexpr TileSize kCompact[] = {{1, 1}, {2, 1}, {2, 2}, {4, 2}};
     switch (kind) {
     case TileKind::Weather: case TileKind::Calendar: case TileKind::System:
+    case TileKind::Pomodoro: case TileKind::Countdown: case TileKind::Battery:
         return kWidget;
+    case TileKind::MediaPlayer: return kTray;
     case TileKind::Todo: return kTodo;
     case TileKind::Apps: return kApps;
     case TileKind::Clock: return kClock;

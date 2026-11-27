@@ -1223,11 +1223,29 @@ void DesktopMountHost::HideNativeIcons() {
     hid_icons_ = desktop_takeover::HideNativeDesktopListView(list_view, takeover_reg_key_.c_str());
 }
 
+bool DesktopMountHost::NativeIconsHidden() const noexcept {
+    if (!mounted_) return false;
+    if (hid_icons_) return true;
+    HWND list_view = desktop_takeover::FindNativeDesktopListView();
+    if (!list_view || !IsWindow(list_view)) return true;
+    return (GetWindowLongPtrW(list_view, GWL_STYLE) & WS_VISIBLE) == 0;
+}
+
 void DesktopMountHost::HideNativeIconsNow() {
     if (!mounted_ || icons_taken_) return;
     icons_taken_ = true;
     HideNativeIcons();
-    MountLog("icons hidden=%d", hid_icons_ ? 1 : 0);
+    MountLog("icons hidden=%d effective=%d", hid_icons_ ? 1 : 0, NativeIconsHidden() ? 1 : 0);
+}
+
+bool DesktopMountHost::EnableIconTakeover() {
+    if (!mounted_) return false;
+    takeover_icons_ = true;
+    icons_taken_ = true;
+    HideNativeIcons();
+    const bool effective = NativeIconsHidden();
+    MountLog("enable icon takeover hidden=%d effective=%d", hid_icons_ ? 1 : 0, effective ? 1 : 0);
+    return effective;
 }
 
 void DesktopMountHost::UpdateSurfaceBounds() {
@@ -1365,7 +1383,11 @@ LRESULT DesktopMountHost::HandleMessage(UINT msg, WPARAM wparam, LPARAM lparam) 
         UpdateSurfaceBounds();
         return 0;
     }
-    if (msg == WM_SETTINGCHANGE && wparam == SPI_SETDESKWALLPAPER) {
+    const bool desktop_setting_changed =
+        (msg == WM_SETTINGCHANGE) &&
+        (wparam == SPI_SETDESKWALLPAPER ||
+         (lparam != 0 && _wcsicmp(reinterpret_cast<LPCWSTR>(lparam), L"Desktop") == 0));
+    if (desktop_setting_changed) {
         if (mounted_) {
             hierarchy_ = ProbeDesktopHierarchy();
             PlaceAboveHost();

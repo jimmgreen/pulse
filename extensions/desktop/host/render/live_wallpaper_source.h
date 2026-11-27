@@ -27,6 +27,7 @@ enum class LiveCaptureBackend : uint8_t {
     None = 0,
     WgcWindow = 1,
     PrintWindowFallback = 2,
+    VideoWallpaperShared = 3,
 };
 
 struct LiveGlassSourceStats {
@@ -67,7 +68,30 @@ public:
                              bool need_frost,
                              std::span<const RECT> glass_cards_surface_px) noexcept;
 
+    // Direct internal video wallpaper source (shared NT texture via KeyedMutex or CPU poster snapshot),
+    // completely bypassing WGC/PrintWindow capture when Pulse's own video wallpaper is active.
+    void SetInternalVideoMode(bool active) noexcept;
+    bool IsInternalVideoMode() const noexcept;
+    bool ImportSharedVideoTexture(ID3D11Device* d3d_device,
+                                  ID2D1DeviceContext* d2d_dc,
+                                  HANDLE shared_nt_handle,
+                                  uint32_t w,
+                                  uint32_t h,
+                                  uint32_t logical_w,
+                                  uint32_t logical_h,
+                                  bool need_frost) noexcept;
+    bool ImportBgraSnapshot(ID3D11Device* d3d_device,
+                            ID2D1DeviceContext* d2d_dc,
+                            const uint8_t* bgra,
+                            uint32_t w,
+                            uint32_t h,
+                            uint32_t stride,
+                            uint32_t logical_w,
+                            uint32_t logical_h,
+                            bool need_frost) noexcept;
+
     void ReleaseDeviceResources() noexcept;
+    void ResetDesktopBlackFallback() noexcept;
 
     bool HasFrame() const noexcept;
     ID2D1Bitmap1* SharpBitmap() const noexcept;

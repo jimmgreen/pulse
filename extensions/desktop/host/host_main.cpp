@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <imm.h>
 #include <objbase.h>
 #include <psapi.h>
@@ -33,6 +34,7 @@
 #include "host/desktop_mount.h"
 #include "host/live_wallpaper_watcher.h"
 #include "host/live/widget_data.h"
+#include "host/live/widget_live_extras.h"
 #include "host/model/desktop_model.h"
 #include "host/group_interaction.h"
 #include "host/preview_request.h"
@@ -40,11 +42,18 @@
 #include "../../../src/common/localization.h"
 #include "../../../src/common/config_json.h"
 #include "host/model/drag_damage.h"
+#include "host/model/drag_motion.h"
 #include "host/model/tile_drag_session.h"
 #include "host/overlays/desktop_overlays.h"
 #include "host/overlays/ole_drag_drop.h"
 #include "host/render/desktop_renderer.h"
 #include "host/render/desktop_appearance.h"
+#include "host/render/dock_tile.h"
+#include "host/render/liquid_dock_bar.h"
+#include "host/render/dock_genie.h"
+#include "host/overlays/dock_stack_popup.h"
+#include "host/video/video_visibility.h"
+#include "host/video/video_wallpaper_controller.h"
 #include "ipc/assistant_availability.h"
 #include "ipc/desktop_ipc.h"
 #include "tests/hosted_edit_checks.h"
@@ -91,6 +100,7 @@ namespace mount = pulse::desktop::mount;
 namespace render = pulse::desktop::render;
 namespace live = pulse::desktop::live;
 namespace overlays = pulse::desktop::overlays;
+namespace video = pulse::desktop::video;
 
 constexpr UINT kMsgDrainIpc = WM_APP + 41;
 constexpr UINT kMsgFolderChanged = WM_APP + 42;
@@ -99,8 +109,17 @@ constexpr UINT kMsgIconsReady = WM_APP + 44;
 constexpr UINT kMsgWeatherReady = WM_APP + 46;   // lParam: live::WeatherResult* from the fetch thread
 constexpr UINT kMsgLiveWallpaperProbe = WM_APP + 47;
 constexpr UINT kMsgLiveGlassFrame = WM_APP + 48;
+constexpr UINT kMsgAnimFrame = WM_APP + 49;
+constexpr UINT kMsgDockTrashReady = WM_APP + 50;
+constexpr UINT kMsgDockWinMinimize = WM_APP + 51;
+constexpr UINT kMsgMediaReady = WM_APP + 52;
+constexpr UINT kMsgDockSysReady = WM_APP + 53;
+constexpr UINT kMsgVideoWallpaper = WM_APP + 54;
+constexpr UINT kMsgForegroundChanged = WM_APP + 55;
 constexpr UINT_PTR kTimerGroupInteraction = 109;
 constexpr UINT_PTR kTimerHoverGlass = 110;
+constexpr UINT_PTR kTimerDockFollowup = 111;
+constexpr UINT_PTR kTimerDockAutoHide = 112;
 constexpr UINT_PTR kTimerHeartbeat = 101;
 constexpr UINT_PTR kTimerLiveTiles = 102;
 constexpr UINT_PTR kTimerPhotos = 106;     // the 照片 slideshow, at the tile's own interval
@@ -113,6 +132,19 @@ constexpr UINT_PTR kTimerWeatherCity = 105;  // the city is still being typed in
 int64_t NowUnixMs() noexcept {
     using namespace std::chrono;
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+double NowAnimMs() noexcept {
+    static const LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f{};
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER t{};
+    QueryPerformanceCounter(&t);
+    return freq.QuadPart > 0
+        ? (static_cast<double>(t.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart))
+        : static_cast<double>(GetTickCount64());
 }
 
 struct ProcessMemorySnapshot {
@@ -572,7 +604,24 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
     renderer.Backdrop().SetUseVectorIconsOnly(true);
 
     overlays::DesktopOverlayController ov;
-    ov.Initialize({});
+    // The 添加小组件 drawer's preview comes from a renderer of its own (it cannot nest in this frame).
+    render::DesktopRenderer preview_renderer;
+    const bool preview_ok = preview_renderer.InitializeOffscreen(4 * model::kTileUnitPx + 3 * model::kTileGapPx + 16,
+                                                                 4 * model::kTileUnitPx + 3 * model::kTileGapPx + 16);
+    const model::DesktopModelState* preview_state = nullptr;
+    const render::LiveTileRuntimeData* preview_live = nullptr;
+    overlays::OverlayCallbacks snap_cb{};
+    snap_cb.on_render_widget_preview = [&](model::TileKind kind, model::TileSize size, std::vector<uint8_t>& bgra,
+                                           uint32_t& w, uint32_t& h) -> bool {
+        if (!preview_ok || !preview_state || !preview_live) return false;
+        model::DesktopTile t{};
+        t.id = "gallery-preview";
+        t.kind = kind;
+        t.size = size;
+        t.live_content = true;
+        return preview_renderer.RenderTilePixels(t, *preview_state, *preview_live, bgra, w, h);
+    };
+    ov.Initialize(snap_cb);
     ov.SetBackdropSource(&renderer.Backdrop(), renderer.DeviceContext());
 
     const model::RectI work_area{0, 0, 1920, 1032};
@@ -767,9 +816,31 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
     live.weather.valid = true;
     live.weather.city = L"北京";
     live.weather.temp_c = 12; live.weather.code = 2; live.weather.hi_c = 15; live.weather.lo_c = 7;
-    live.weather.hours = {{L"15时", 2, 15}, {L"16时", 0, 15}, {L"17时", 0, 14}, {L"18时", 3, 12}, {L"19时", 3, 11}};
+    live.weather.is_day = true; live.weather.has_sun = true;
+    live.weather.sunrise_min = 6 * 60 + 32; live.weather.sunset_min = 17 * 60 + 48;
+    live.weather.hours = {{L"15时", 2, 15, true}, {L"16时", 0, 15, true}, {L"17时", 0, 14, true},
+                          {L"18时", 3, 12, false}, {L"19时", 1, 11, false}};
     live.weather.days = {{L"明天", 61, 6, 11}, {L"周日", 2, 5, 13}, {L"周一", 0, 7, 16}};
-    live.system = {true, 23, 10ull << 30, 16ull << 30, 76, 113ull << 30, 2500000ull};
+    live.system.valid = true;
+    live.system.cpu_pct = 28;
+    live.system.mem_used = 10ull << 30;
+    live.system.mem_total = 16ull << 30;
+    live.system.disk_used_pct = 76;
+    live.system.disk_free = 113ull << 30;
+    live.system.net_down_bps = 2500000ull;
+    live.system.net_up_bps = 420000ull;
+    live.system.logical_cores = 16;
+    live.system.has_vram = true;
+    live.system.vram_used_gb = 4.2f;
+    live.system.vram_total_gb = 12.0f;
+    live.system.vram_pct = 35.0f;
+    live.system.gpu_name = L"RTX 4070";
+    for (int i = 0; i < 48; ++i) {
+        const float phase = static_cast<float>(i) * 0.24f;
+        live.system.cpu_history.push_back(std::clamp(26.0f + 14.0f * std::sin(phase) + 6.0f * std::cos(phase * 2.1f), 6.0f, 88.0f));
+        live.system.mem_history.push_back(std::clamp(61.5f + 1.8f * std::sin(phase * 0.4f), 40.0f, 85.0f));
+        live.system.net_history.push_back(std::max(12.0f, 1800.0f + 1100.0f * std::sin(phase * 0.7f)));
+    }
 
     auto compute_views_and_settle = [&](model::DesktopModelState& st, bool drawer_open)
         -> std::pair<model::RectI, std::vector<model::GroupComputedView>> {
@@ -793,6 +864,8 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
                           const render::DesktopInteractionState& inter,
                           bool with_overlay) {
         const std::wstring path = (out_dir / filename).wstring();
+        preview_state = &st;
+        preview_live = &live;
         const bool ok = renderer.RenderCompositePng(
             path, st, gvs, br, live, inter,
             with_overlay ? std::function<void(ID2D1DeviceContext*)>([&](ID2D1DeviceContext* dc) {
@@ -1023,11 +1096,45 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
             export_png((L"17_hover_" + std::to_wstring(static_cast<int>(kind)) + L".png").c_str(), st, gvs, br, inter, false);
         }
         {
-            // An app pressed in the 应用 tile: only its icon reacts, the card stays put.
+            // An app pressed in the 应用坞 tile: only its icon reacts, the card stays put.
             render::DesktopInteractionState inter{};
             inter.force_opaque_wallpaper = true;
             inter.pressed_app_index = 1;
             export_png(L"17_app_pressed.png", st, gvs, br, inter, false);
+        }
+        {
+            // 18_dock_hover.png: Reference-faithful bottom-center macOS 26 Tahoe Liquid Glass Dock
+            // with dynamic capsule expansion, raised-cosine fisheye magnification wave, live active/running
+            // indicator dots, vertical glass divider, Downloads + Widgets + Trash, and floating frosted tooltip.
+            model::DesktopModelState dock_st = base_state;
+            dock_st.settings.dark_mode = true;
+            dock_st.settings.default_material = model::CardMaterial::LiquidGlass;
+            dock_st.settings.dock_enabled = true;
+            dock_st.settings.dock_icon_size = 48;
+            dock_st.settings.dock_magnification = true;
+            dock_st.settings.dock_max_scale_x100 = 152;
+            dock_st.tiles.clear();
+
+            renderer.ReloadWallpaper(model::WallpaperPreset::Bloom, true);
+            auto [dock_br, dock_gvs] = compute_views_and_settle(dock_st, false);
+
+            auto saved_dock = live.dock;
+            live.dock.BuildDemoItems(true);
+            // Show unread notification badge on Edge to verify macOS #FF3B30 pill rendering as well.
+            if (live.dock.items.size() > 1) live.dock.items[1].badge_count = 3;
+            const model::RectI wa{0, 0, 1920, 1032};
+            live.dock.ComputeGeometry(wa, dock_st.settings, -1.0f, 0.0f, 0.0);
+            const int focus_idx = live.dock.items.size() > 4 ? 4 : 0; // 系统设置 (redrawn Tahoe double-gear icon)
+            const float focus_x = live.dock.items[static_cast<size_t>(focus_idx)].rest_cx;
+            live.dock.ComputeGeometry(wa, dock_st.settings, focus_x, 1.0f, 0.0);
+
+            render::DesktopInteractionState dock_inter{};
+            dock_inter.force_opaque_wallpaper = true;
+            dock_inter.dock_bar_hovered = true;
+            dock_inter.dock_bar_tooltip_index = focus_idx;
+            dock_inter.dock_bar_tooltip_alpha = 1.0f;
+            export_png(L"18_dock_hover.png", dock_st, dock_gvs, dock_br, dock_inter, false);
+            live.dock = std::move(saved_dock);
         }
     }
     {
@@ -1155,11 +1262,13 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
     }
 
     // -----------------------------------------------------------------------
-    // 05_beautify_drawer.png: Dusk preset wallpaper + Beautify drawer open
+    // 05_beautify_drawer.png: Dusk preset wallpaper + Beautify drawer open (Liquid Glass modes)
     // -----------------------------------------------------------------------
     {
         model::DesktopModelState st = base_state;
         st.settings.wallpaper_preset = model::WallpaperPreset::Dusk;
+        st.settings.default_material = model::CardMaterial::LiquidGlass;
+        model::ApplyGlassPreset(static_cast<uint8_t>(model::GlassPreset::ClearDroplet), st.settings);
         renderer.ReloadWallpaper(model::WallpaperPreset::Dusk, true);
         auto [br, gvs] = compute_views_and_settle(st, true);
         render::DesktopInteractionState inter{};
@@ -1175,6 +1284,12 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
         ov.SetAppearance(true, renderer.Backdrop().VibrantAccentArgb());
         ov.OpenBeautifyDrawer(work_area_rc, st.settings, active_widgets);
         export_png(L"05_beautify_drawer.png", st, gvs, br, inter, true);
+        ov.Dismiss();
+
+        // 13_widget_gallery_4x4.png: 4x4 16-widget gallery drawer showcasing Pomodoro & new widgets
+        ov.SetAppearance(true, renderer.Backdrop().VibrantAccentArgb());
+        ov.OpenWidgetGalleryDrawer(work_area_rc, br.x, br.y, st.tiles, model::TileKind::Pomodoro, std::nullopt);
+        export_png(L"13_widget_gallery_4x4.png", st, gvs, br, inter, true);
         ov.Dismiss();
     }
 
@@ -1331,14 +1446,22 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
         st.settings.default_material = model::CardMaterial::LiquidGlass;
         model::ApplyGlassPreset(static_cast<uint8_t>(model::GlassPreset::ClearDroplet), st.settings);
         st.settings.wallpaper_preset = lg_dark ? model::WallpaperPreset::Dusk : model::WallpaperPreset::Bloom;
+        st.settings.dock_enabled = true;
+        st.tiles.erase(std::remove_if(st.tiles.begin(), st.tiles.end(),
+                                      [](const model::DesktopTile& t) { return t.kind == model::TileKind::Apps; }),
+                       st.tiles.end());
         renderer.ReloadWallpaper(st.settings.wallpaper_preset, st.settings.dark_mode);
         auto [br, gvs] = compute_views_and_settle(st, false);
+        auto saved_dock = live.dock;
+        live.dock.BuildDemoItems(true);
+        live.dock.ComputeGeometry({0, 0, 1920, 1032}, st.settings, -1.0f, 0.0f, 0.0);
         render::DesktopInteractionState inter{};
         inter.host_dark_mode = st.settings.dark_mode;
         inter.force_opaque_wallpaper = true;
         inter.cleanable_installer_bytes = 753ull * 1024ull * 1024ull;
         export_png(lg_dark ? L"11_liquid_glass_dark.png" : L"12_liquid_glass_light.png",
                    st, gvs, br, inter, false);
+        live.dock = std::move(saved_dock);
     }
 
     ov.Shutdown();
@@ -1355,9 +1478,11 @@ class DesktopHostSession {
     friend struct DesktopGroupHostTestPeer;
     friend struct DesktopPersistenceHostTestPeer;
     friend struct DesktopPreviewHostTestPeer;
+    friend struct DesktopVideoPauseHostTestPeer;
 public:
     DesktopHostSession(std::wstring pipe_name, DWORD parent_pid)
         : pipe_name_(std::move(pipe_name)), parent_pid_(parent_pid) {}
+    ~DesktopHostSession() { StopVsyncClockThread(); }
 
     int Run() {
         if (parent_pid_ != 0) {
@@ -1368,6 +1493,7 @@ public:
         SeedTagsFromLocalPulseFiles();
         overlays_.SetTagPalette(tag_palette_);
         LoadOrInitModel();
+        ApplyWidgetPrefs();
         ApplySystemAppearance();
 
         mount::MountHostCallbacks mcb{};
@@ -1379,13 +1505,19 @@ public:
             RecomputeLayout();
             renderer_.Resize(static_cast<uint32_t>(bounds.w), static_cast<uint32_t>(bounds.h));
             renderer_.SetSurfaceGeometry(dpi, PrimaryMonitorPx(), bounds);
+            const model::RectI pm = PrimaryMonitorPx();
+            video_ctrl_.OnMonitorGeometryChanged(static_cast<uint32_t>(std::max(320, pm.w)),
+                                                 static_cast<uint32_t>(std::max(240, pm.h)));
+            SyncSecondaryVideoMonitors();
             overlays_.SetDipScale(dpi / 96.0f);
             RefreshLiveWallpaperState();
             renderer_.ReloadWallpaper(state_.settings.wallpaper_preset, state_.settings.dark_mode);
             renderer_.Tick(state_, group_views_, tile_board_rect_, live_data_, interaction_);
+            video_ctrl_.SetGlassConsumers(renderer_.HasLiveGlassConsumers(), overlays_.IsOpen());
             SyncHoverGlassTimer();
         };
         mcb.on_wallpaper_changed = [this]() {
+            last_sys_wallpaper_token_ = render::WallpaperBackdrop::QuerySystemWallpaperChangeToken();
             RecordExternalSystemWallpaperIfChanged();
             RefreshLiveWallpaperState();
             if (state_.settings.wallpaper_preset == model::WallpaperPreset::System) {
@@ -1396,8 +1528,10 @@ public:
         };
         mcb.on_explorer_restarted = [this]() {
             RefreshLiveWallpaperState();
+            SyncSecondaryVideoMonitors();
             renderer_.InvalidateAll();
             renderer_.Tick(state_, group_views_, tile_board_rect_, live_data_, interaction_);
+            video_ctrl_.SetGlassConsumers(renderer_.HasLiveGlassConsumers(), overlays_.IsOpen());
             SyncHoverGlassTimer();
         };
 
@@ -1428,6 +1562,10 @@ public:
         live_watcher_.Start(mount_.Hwnd(), kMsgLiveWallpaperProbe);
         RefreshLiveWallpaperState();
         WTSRegisterSessionNotification(mount_.Hwnd(), NOTIFY_FOR_THIS_SESSION);
+        display_power_notify_ = RegisterPowerSettingNotification(
+            mount_.Hwnd(), &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
+        InitVideoWallpaperController();
+        last_sys_wallpaper_token_ = render::WallpaperBackdrop::QuerySystemWallpaperChangeToken();
         renderer_.ReloadWallpaper(state_.settings.wallpaper_preset, state_.settings.dark_mode);
         if (state_.settings.wallpaper_preset != model::WallpaperPreset::System) {
             SyncSystemDesktopWallpaper(state_.settings.wallpaper_preset, state_.settings.dark_mode, false);
@@ -1461,12 +1599,45 @@ public:
 
         g_console_close_target.store(mount_.Hwnd());
         SetConsoleCtrlHandler(&OnConsoleCtrl, TRUE);
+        dock_bar_reveal_ = state_.settings.dock_enabled ? 1.0f : 0.0f;
+        interaction_.dock_bar_reveal = dock_bar_reveal_;
+        StartVsyncClockThread();
         SetTimer(mount_.Hwnd(), kTimerHeartbeat, 1000, nullptr);
         SetTimer(mount_.Hwnd(), kTimerLiveTiles, 3000, nullptr);
+        SetTimer(mount_.Hwnd(), kTimerDockAutoHide, 120, nullptr);
+#ifndef PULSE_DESKTOP_DRAG_TEST
+        media_monitor_.Start(mount_.Hwnd(), kMsgMediaReady);
+        media_monitor_.SetEnabled(model::BoardHasKind(state_.tiles, model::TileKind::MediaPlayer));
+        dock_sys_monitor_.SetClock24h(state_.settings.widgets.clock_24h);
+        dock_sys_monitor_.SetPinnedTrayKeys(state_.settings.dock_tray_pinned_keys);
+        dock_sys_monitor_.Start(mount_.Hwnd(), kMsgDockSysReady);
+        dock_sys_monitor_.SetEnabled(state_.settings.dock_enabled && state_.settings.dock_system_area);
+        if (model::BoardHasKind(state_.tiles, model::TileKind::Battery)) {
+            live_data_.battery = live::SampleBatteryPower(true);
+            last_battery_sample_ms_ = GetTickCount64();
+            last_bt_sample_ms_ = last_battery_sample_ms_;
+        }
+        g_dock_minimize_notify_hwnd.store(mount_.Hwnd());
+        g_fg_change_posted.store(false);
+        dock_min_hook_ = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, nullptr,
+                                         &OnDockWinMinimizeEvent, 0, 0,
+                                         WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        foreground_hook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+                                           &OnSystemForegroundEvent, 0, 0,
+                                           WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+#endif
 
         renderer_.InvalidateAll();
         renderer_.Tick(state_, group_views_, tile_board_rect_, live_data_, interaction_);
         mount_.HideNativeIconsNow();
+        {
+            const model::RectI pm = PrimaryMonitorPx();
+            video_ctrl_.RestorePersisted(state_.video_wallpaper, mount_.NativeIconsHidden(),
+                                         static_cast<uint32_t>(std::max(320, pm.w)),
+                                         static_cast<uint32_t>(std::max(240, pm.h)),
+                                         state_.settings.glass_live_rate);
+            SyncSecondaryVideoMonitors();
+        }
         renderer_.TrimDxgiMemory();
         _heapmin();
 
@@ -1474,10 +1645,46 @@ public:
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            // Coalesce consecutive queued WM_MOUSEMOVE / VSync / live video glass messages in strict FIFO order
+            // before invoking GPU Tick(), eliminating high-polling-rate mouse lag and double commits.
+            int drained = 0;
+            MSG peek{};
+            while (drained < 16 && PeekMessageW(&peek, nullptr, 0, 0, PM_NOREMOVE)) {
+                if (peek.message != WM_MOUSEMOVE &&
+                    peek.message != kMsgAnimFrame &&
+                    peek.message != kMsgVideoWallpaper &&
+                    peek.message != kMsgLiveGlassFrame) {
+                    break;
+                }
+                if (!PeekMessageW(&peek, nullptr, 0, 0, PM_REMOVE)) break;
+                TranslateMessage(&peek);
+                DispatchMessageW(&peek);
+                ++drained;
+            }
             renderer_.Tick(state_, group_views_, tile_board_rect_, live_data_, interaction_);
+            video_ctrl_.SetGlassConsumers(renderer_.HasLiveGlassConsumers(), overlays_.IsOpen());
             SyncHoverGlassTimer();
         }
 
+        StopVsyncClockThread();
+#ifndef PULSE_DESKTOP_DRAG_TEST
+        dock_sys_monitor_.Stop();
+        media_monitor_.Stop();
+        g_dock_minimize_notify_hwnd.store(nullptr);
+        if (dock_min_hook_) {
+            UnhookWinEvent(dock_min_hook_);
+            dock_min_hook_ = nullptr;
+        }
+        if (foreground_hook_) {
+            UnhookWinEvent(foreground_hook_);
+            foreground_hook_ = nullptr;
+        }
+#endif
+        dock_genie_.Shutdown();
+        dock_stack_.Close(/*animate=*/false);
+        if (mount_.Hwnd()) {
+            KillTimer(mount_.Hwnd(), kTimerDockAutoHide);
+        }
         if (active_ai_session_) {
             active_ai_session_->Cancel();
             active_ai_session_.reset();
@@ -1489,6 +1696,11 @@ public:
         if (mount_.Hwnd()) {
             WTSUnRegisterSessionNotification(mount_.Hwnd());
         }
+        if (display_power_notify_) {
+            UnregisterPowerSettingNotification(display_power_notify_);
+            display_power_notify_ = nullptr;
+        }
+        video_ctrl_.Shutdown();
         live_watcher_.Stop();
         g_console_close_target.store(nullptr);
         SaveModel();
@@ -1547,12 +1759,85 @@ private:
 
     uint32_t EffectiveAccentArgb() const noexcept {
         if (state_.settings.auto_wallpaper_accent) {
+            if (video_ctrl_.IsVideoActive() && (video_accent_argb_ & 0x00FFFFFFu) != 0) {
+                return video_accent_argb_;
+            }
             const uint32_t vib = renderer_.Backdrop().VibrantAccentArgb();
             if ((vib & 0x00FFFFFFu) != 0) return vib;
         }
         return (state_.settings.accent_argb & 0x00FFFFFFu) != 0
                    ? state_.settings.accent_argb
                    : interaction_.host_accent_argb;
+    }
+
+    void InitVideoWallpaperController() {
+        video::VideoWallpaperControllerCallbacks vcb{};
+        vcb.on_ui_state_changed = [this](const video::VideoWallpaperUiState& ui) {
+            overlays_.SetBeautifyVideoState(ui, overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer);
+            SyncSettingsToPlugin();
+        };
+        vcb.on_persisted_changed = [this](const video::VideoWallpaperPersistedState& persisted) {
+            state_.video_wallpaper = persisted;
+            SaveModel();
+            SyncSettingsToPlugin();
+        };
+        vcb.on_accent_extracted = [this](uint32_t accent_argb) {
+            video_accent_argb_ = accent_argb;
+            if (state_.settings.auto_wallpaper_accent) {
+                overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+                renderer_.InvalidateAll();
+            }
+        };
+        vcb.on_drawer_preview_frame = [this](const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t stride) {
+            if (overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer) {
+                overlays_.UpdateBeautifyVideoLiveFrame(bgra, w, h, stride);
+            }
+        };
+        vcb.on_live_glass_updated = [this](bool force) {
+            if (overlays_.IsOpen()) {
+                overlays_.OnLiveVideoFrameArrived(force);
+            }
+        };
+        vcb.on_video_active_changed = [this]() {
+            RefreshLiveWallpaperState();
+            SyncSecondaryVideoMonitors();
+            renderer_.InvalidateAll();
+            if (overlays_.IsOpen()) {
+                overlays_.OnLiveVideoFrameArrived(true);
+            }
+        };
+        video_ctrl_.Initialize(mount_.Hwnd(), kMsgVideoWallpaper, &renderer_, std::move(vcb));
+    }
+
+    void SyncSecondaryVideoMonitors() noexcept {
+        const auto mons = mount::QueryMonitorWorkAreas();
+        renderer_.SyncSecondaryVideoMonitors(mons, mount_.LayerHostHwnd());
+    }
+
+    void SetVideoWallpaperPath(const std::wstring& path) {
+        if (path.empty()) {
+            video_ctrl_.StopVideoWallpaper(true);
+            return;
+        }
+        const model::RectI pm = PrimaryMonitorPx();
+        video_ctrl_.SetVideoWallpaper(path, mount_.NativeIconsHidden(),
+                                      static_cast<uint32_t>(std::max(320, pm.w)),
+                                      static_cast<uint32_t>(std::max(240, pm.h)),
+                                      state_.settings.glass_live_rate);
+    }
+
+    void PickAndSetVideoWallpaper() {
+        const bool was_beautify = (overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer);
+        if (was_beautify) overlays_.SetDeactivateSuppressed(true);
+        const HWND owner = was_beautify ? overlays_.OverlayHwnd() : mount_.Hwnd();
+        const std::wstring picked = video::VideoWallpaperController::PickVideoFileDialog(owner);
+        if (was_beautify) overlays_.SetDeactivateSuppressed(false);
+        if (!picked.empty()) {
+            SetVideoWallpaperPath(picked);
+            if (was_beautify) {
+                overlays_.SetBeautifyTab(overlays::DesktopOverlayController::BeautifyTab::Wall, true);
+            }
+        }
     }
 
     std::unordered_set<uint8_t> ActiveWidgetKinds() const {
@@ -1576,15 +1861,1398 @@ private:
     }
 
     void RefreshLiveWallpaperState() noexcept {
+        if (video_ctrl_.IsVideoActive() || state_.settings.wallpaper_preset != model::WallpaperPreset::System) {
+            live_watcher_.Clear();
+            renderer_.SetLiveWallpaperDecision({});
+            return;
+        }
+        const auto fresh_hier = mount::ProbeDesktopHierarchy();
+        const auto& hier = fresh_hier.progman ? fresh_hier : mount_.Hierarchy();
         const model::RectI sb = mount_.SurfaceBounds();
-        live_watcher_.Refresh(mount_.Hierarchy(), sb.w, sb.h);
+        live_watcher_.Refresh(hier, sb.w, sb.h, mount_.Hwnd(), /*allow_desktop_host_capture=*/true);
         renderer_.SetLiveWallpaperDecision(live_watcher_.Current());
+    }
+
+    void StartVsyncClockThread() {
+        const HWND hwnd = mount_.Hwnd();
+        if (!hwnd || vsync_wake_event_) return;
+        vsync_stop_.store(false);
+        vsync_active_.store(false);
+        vsync_frame_pending_.store(false);
+        vsync_wake_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!vsync_wake_event_) return;
+        vsync_thread_ = std::thread([this, hwnd]() {
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+            while (!vsync_stop_.load()) {
+                if (!vsync_active_.load()) {
+                    WaitForSingleObject(vsync_wake_event_, INFINITE);
+                    if (vsync_stop_.load()) break;
+                }
+                if (FAILED(DwmFlush())) Sleep(8);
+                if (vsync_stop_.load() || !vsync_active_.load()) continue;
+                if (IsWindow(hwnd) && !vsync_frame_pending_.exchange(true)) {
+                    PostMessageW(hwnd, kMsgAnimFrame, 0, 0);
+                }
+            }
+        });
+    }
+
+    void StopVsyncClockThread() noexcept {
+        vsync_active_.store(false);
+        vsync_stop_.store(true);
+        if (vsync_wake_event_) SetEvent(vsync_wake_event_);
+        if (vsync_thread_.joinable()) vsync_thread_.join();
+        if (vsync_wake_event_) {
+            CloseHandle(vsync_wake_event_);
+            vsync_wake_event_ = nullptr;
+        }
+        vsync_frame_pending_.store(false);
+    }
+
+    static inline std::atomic<HWND> g_dock_minimize_notify_hwnd{nullptr};
+    static inline std::atomic<bool> g_fg_change_posted{false};
+
+    static void CALLBACK OnDockWinMinimizeEvent(HWINEVENTHOOK, DWORD ev, HWND hwnd, LONG id_object,
+                                                LONG id_child, DWORD, DWORD) noexcept {
+        if (id_object != OBJID_WINDOW || id_child != CHILDID_SELF || !hwnd) return;
+        if (ev != EVENT_SYSTEM_MINIMIZESTART && ev != EVENT_SYSTEM_MINIMIZEEND) return;
+        HWND notify = g_dock_minimize_notify_hwnd.load();
+        if (notify && IsWindow(notify)) {
+            PostMessageW(notify, kMsgDockWinMinimize, (ev == EVENT_SYSTEM_MINIMIZESTART) ? 1u : 0u,
+                         reinterpret_cast<LPARAM>(hwnd));
+        }
+    }
+
+    static void CALLBACK OnSystemForegroundEvent(HWINEVENTHOOK, DWORD ev, HWND, LONG, LONG, DWORD, DWORD) noexcept {
+        if (ev != EVENT_SYSTEM_FOREGROUND) return;
+        HWND notify = g_dock_minimize_notify_hwnd.load();
+        if (notify && IsWindow(notify) && !g_fg_change_posted.exchange(true, std::memory_order_acq_rel)) {
+            if (!PostMessageW(notify, kMsgForegroundChanged, 0, 0)) {
+                g_fg_change_posted.store(false, std::memory_order_release);
+            }
+        }
+    }
+
+    float TargetDockReveal() const noexcept {
+        if (!state_.settings.dock_enabled || interaction_.side_drawer_open ||
+            state_.settings.active_scene == model::DesktopScene::Present) {
+            return 0.0f;
+        }
+        return dock_bar_should_hide_ ? 0.0f : 1.0f;
+    }
+
+    bool HasActiveDockBarMotion(double now_ms) const noexcept {
+        const float target_reveal = TargetDockReveal();
+        const bool reveal_moving = std::fabs(target_reveal - dock_bar_reveal_) > 0.002f;
+        if (!state_.settings.dock_enabled && !reveal_moving && !dock_genie_.IsActive()) return false;
+        return reveal_moving ||
+               dock_bar_pointer_inside_ ||
+               dock_bar_hover_presence_ > 0.002f ||
+               interaction_.dock_bar_tooltip_alpha > 0.002f ||
+               interaction_.dock_bar_drag.active ||
+               live_data_.dock.HasActiveBounce(now_ms) ||
+               live_data_.dock.HasActivePoof(now_ms) ||
+               live_data_.dock.HasActiveSlotMotion(now_ms) ||
+               dock_genie_.IsActive();
+    }
+
+    bool HasActiveDockMotion(double now_ms) const noexcept {
+        return dock_target_hover_ ||
+               interaction_.dock_hover_presence > 0.002f ||
+               interaction_.dock_tooltip_alpha > 0.002f ||
+               render::IsDockBounceActive(interaction_.dock_bounce_start_ms, now_ms) ||
+               HasActiveDockBarMotion(now_ms);
+    }
+
+    void MigrateLegacyAppsTileToDock() {
+        bool migrated = false;
+        auto it = state_.tiles.begin();
+        while (it != state_.tiles.end()) {
+            if (it->kind == model::TileKind::Apps) {
+                it = state_.tiles.erase(it);
+                migrated = true;
+            } else {
+                if (!it->stack.empty()) {
+                    const size_t before = it->stack.size();
+                    it->stack.erase(std::remove_if(it->stack.begin(), it->stack.end(),
+                                                   [](const model::TileStackEntry& m) { return m.kind == model::TileKind::Apps; }),
+                                    it->stack.end());
+                    if (it->stack.size() != before) {
+                        migrated = true;
+                        if (it->stack.size() <= 1) {
+                            if (it->stack.size() == 1) {
+                                it->kind = it->stack.front().kind;
+                                it->title = it->stack.front().title;
+                                it->target_path = it->stack.front().target_path;
+                            }
+                            it->stack.clear();
+                            it->stack_index = 0;
+                        } else {
+                            it->stack_index = std::clamp(it->stack_index, 0, static_cast<int>(it->stack.size()) - 1);
+                        }
+                    }
+                }
+                ++it;
+            }
+        }
+        for (auto& item : state_.items) {
+            if (item.pinned_group_id == model::kAppsTileGroupId) {
+                item.pinned_group_id.clear();
+            }
+            item.in_apps_tile = false;
+        }
+        if (migrated) {
+            state_.settings.dock_enabled = true;
+        }
+    }
+
+    void InvalidateDockBar(const model::RectI& extra = {}) noexcept {
+        const model::RectI wa = PrimaryWorkAreaClient();
+        model::RectI dmg = live_data_.dock.DamageRect(wa);
+        if (!extra.empty()) {
+            if (dmg.empty()) {
+                dmg = extra;
+            } else {
+                const int x0 = std::min(dmg.x, extra.x);
+                const int y0 = std::min(dmg.y, extra.y);
+                const int x1 = std::max(dmg.right(), extra.right());
+                const int y1 = std::max(dmg.bottom(), extra.bottom());
+                dmg = {x0, y0, x1 - x0, y1 - y0};
+            }
+        }
+        if (!dmg.empty()) renderer_.InvalidateRect(dmg);
+    }
+
+    struct DockTrashAsyncState {
+        std::atomic<bool> running{false};
+        std::atomic<bool> again{false};
+        std::atomic<int> cached{-1};
+    };
+
+    void RequestDockTrashRefreshAsync() {
+        if (!dock_trash_state_) return;
+        if (dock_trash_state_->running.exchange(true)) {
+            dock_trash_state_->again.store(true);
+            return;
+        }
+        HWND notify = mount_.Hwnd();
+        auto shared = dock_trash_state_;
+        std::thread([shared, notify] {
+            const HRESULT ci = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            bool not_empty = false;
+            do {
+                shared->again.store(false);
+                SHQUERYRBINFO q{sizeof(q)};
+                not_empty = SUCCEEDED(SHQueryRecycleBinW(nullptr, &q)) && q.i64NumItems > 0;
+            } while (shared->again.load());
+            if (SUCCEEDED(ci)) CoUninitialize();
+            shared->cached.store(not_empty ? 1 : 0);
+            shared->running.store(false);
+            if (notify && IsWindow(notify)) {
+                PostMessageW(notify, kMsgDockTrashReady, not_empty ? 1u : 0u, 0);
+            }
+        }).detach();
+    }
+
+    void RefreshLiquidDockBar(bool invalidate_if_changed, bool request_trash_async = true) {
+        if (!state_.settings.dock_enabled) return;
+        // Avoid shuffling items mid-drag while the user is actively reordering the Dock.
+        if (interaction_.dock_bar_drag.active) return;
+        const model::RectI wa = PrimaryWorkAreaClient();
+        const model::RectI old_dmg = live_data_.dock.DamageRect(wa);
+        const int trash_override = dock_trash_state_ ? dock_trash_state_->cached.load() : -1;
+        const double now_ms = NowAnimMs();
+        live_data_.dock.apps_stack_enabled = state_.settings.dock_apps_stack;
+        const bool changed = live_data_.dock.RefreshSystemItems(
+            state_.settings.dock_pinned_paths, GetCurrentProcessId(), trash_override, now_ms);
+        if (request_trash_async) {
+            RequestDockTrashRefreshAsync();
+        }
+        live_data_.dock.ComputeGeometry(wa, state_.settings, dock_bar_smooth_x_,
+                                        dock_bar_hover_presence_, now_ms, nullptr, 0.016f, dock_bar_reveal_);
+        if (live_data_.dock.HasActiveSlotMotion(now_ms)) {
+            StartAnimClock();
+        }
+        if (dock_bar_pressed_idx_ >= 0 && !dock_bar_pressed_key_.empty()) {
+            dock_bar_pressed_idx_ = live_data_.dock.FindItemIndexByKey(dock_bar_pressed_key_);
+            interaction_.dock_bar_pressed_index = dock_bar_pressed_idx_;
+        }
+        if (dock_bar_hovered_idx_ >= static_cast<int>(live_data_.dock.items.size())) dock_bar_hovered_idx_ = -1;
+        if (interaction_.dock_bar_tooltip_index >= static_cast<int>(live_data_.dock.items.size())) {
+            interaction_.dock_bar_tooltip_index = -1;
+        }
+        if (invalidate_if_changed && changed) {
+            InvalidateDockBar(old_dmg);
+        }
+    }
+
+    RECT DockSysSlotScreenRect(const render::DockSysSlotRect& slot) const noexcept {
+        POINT tl{static_cast<LONG>(std::floor(slot.rect.left)), static_cast<LONG>(std::floor(slot.rect.top))};
+        POINT br{static_cast<LONG>(std::ceil(slot.rect.right)), static_cast<LONG>(std::ceil(slot.rect.bottom))};
+        mount_.ClientToScreenDip(&tl);
+        mount_.ClientToScreenDip(&br);
+        return RECT{tl.x, tl.y, br.x, br.y};
+    }
+
+    void OpenDockSystemPanelForSlot(const render::DockSysSlotRect& slot, bool right_click) {
+        using SK = render::DockSysSlotKind;
+        using PK = overlays::DockPanelKind;
+        if (slot.kind == SK::None) return;
+
+        // Left-clicking IME toggles 中/英 directly; right-click opens input method layout panel (design spec!)
+        if (slot.kind == SK::Ime && !right_click) {
+            if (live::ToggleImeChineseEnglish(last_external_fg_hwnd_)) {
+                live_data_.dock.sys_snap.ime_chinese = !live_data_.dock.sys_snap.ime_chinese;
+                live_data_.dock.sys_snap.ime_badge = live_data_.dock.sys_snap.ime_chinese ? L"中" : L"英";
+                InvalidateDockBar();
+                dock_sys_monitor_.RequestRefresh(false);
+            }
+            return;
+        }
+
+        // Left-clicking a pinned tray icon activates the app directly; right-click opens its Dock menu popover
+        if (slot.kind == SK::PinnedTrayApp && !right_click) {
+            if (slot.tray_index >= 0 &&
+                static_cast<size_t>(slot.tray_index) < live_data_.dock.sys_snap.tray_apps.size()) {
+                POINT scr{};
+                GetCursorPos(&scr);
+                live::ActivateDockTrayApp(live_data_.dock.sys_snap.tray_apps[static_cast<size_t>(slot.tray_index)],
+                                          false, scr);
+            }
+            return;
+        }
+
+        PK pk = PK::None;
+        switch (slot.kind) {
+        case SK::PinnedTrayApp: pk = PK::TrayAppMenu; break;
+        case SK::TrayOverflow:  pk = PK::TrayOverflow; break;
+        case SK::Ime:           pk = PK::Ime; break;
+        case SK::Wifi:          pk = PK::Wifi; break;
+        case SK::Volume:        pk = PK::Volume; break;
+        case SK::Bluetooth:     pk = PK::Bluetooth; break;
+        case SK::Battery:       pk = PK::Battery; break;
+        case SK::Clock:         pk = PK::Clock; break;
+        default: break;
+        }
+        if (pk == PK::None) return;
+
+        // Clicking the same active slot toggles the panel closed cleanly.
+        if (overlays_.ActiveKind() == overlays::OverlayKind::DockSystemPanel &&
+            overlays_.ActiveDockPanelKind() == pk &&
+            (pk != PK::TrayAppMenu || overlays_.ActiveDockPanelTrayIndex() == slot.tray_index)) {
+            overlays_.Dismiss();
+            interaction_.dock_sys_open_kind = SK::None;
+            interaction_.dock_sys_open_tray_idx = -1;
+            InvalidateDockBar();
+            return;
+        }
+
+        dock_sys_monitor_.RequestRefresh(true);
+        const RECT wa_dip = PrimaryWorkAreaScreen();
+        const RECT anchor = DockSysSlotScreenRect(slot);
+        overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+        overlays_.SetBeautifySettings(state_.settings);
+        // Dock popups use DrawMenuMaterial (theme-locked frost + body veil across LiquidGlass,
+        // Acrylic, Mica, MicaAlt, and Solid), so foreground ink tracks state_.settings.dark_mode directly.
+        overlays_.SetDockPanelLightInk(state_.settings.dark_mode);
+        if (overlays_.OpenDockSystemPanel(wa_dip, anchor, state_.settings.dock_position, pk,
+                                          live_data_.dock.sys_snap, slot.tray_index,
+                                          state_.settings.widgets.week_start,
+                                          state_.settings.widgets.battery_low_pct,
+                                          state_.todos)) {
+            interaction_.dock_sys_open_kind = slot.kind;
+            interaction_.dock_sys_open_tray_idx = slot.tray_index;
+            SyncOverlayInteractionFlags();
+            InvalidateDockBar();
+        }
+    }
+
+    void HandleDockSystemPanelAction(const std::string& cmd) {
+        auto sync_tray_pins_from_snap = [&]() {
+            state_.settings.dock_tray_pinned_keys.clear();
+            for (const auto& a : live_data_.dock.sys_snap.tray_apps) {
+                if (a.pinned && !a.key.empty()) {
+                    state_.settings.dock_tray_pinned_keys.push_back(a.key);
+                }
+            }
+            // Keep explicit sentinel when user unpinned everything so auto-pin doesn't re-add them
+            if (state_.settings.dock_tray_pinned_keys.empty()) {
+                state_.settings.dock_tray_pinned_keys.push_back(L"@none");
+            }
+            dock_sys_monitor_.SetPinnedTrayKeys(state_.settings.dock_tray_pinned_keys);
+            const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+            live_data_.dock.ComputeGeometry(PrimaryWorkAreaClient(), state_.settings, dock_bar_smooth_x_,
+                                            dock_bar_hover_presence_, NowAnimMs(), nullptr, 0.016f, dock_bar_reveal_);
+            SaveModel();
+            InvalidateDockBar(old_dmg);
+            renderer_.InvalidateAll();
+        };
+
+        if (cmd.starts_with("uri:")) {
+            const std::wstring uri = ipc::Utf8ToWide(cmd.substr(4));
+            live::OpenWindowsSettingsUri(uri.c_str());
+        } else if (cmd == "notif-center") {
+            live::OpenWindowsNotificationCenter();
+        } else if (cmd == "vol-mute") {
+            int p = live_data_.dock.sys_snap.volume_pct;
+            bool m = live_data_.dock.sys_snap.muted;
+            if (live::ToggleMasterAudioMute(p, m)) {
+                live_data_.dock.sys_snap.volume_pct = p;
+                live_data_.dock.sys_snap.muted = m;
+                overlays_.UpdateDockSystemPanel(live_data_.dock.sys_snap);
+                InvalidateDockBar();
+            }
+        } else if (cmd.starts_with("audio-dev:")) {
+            const size_t idx = static_cast<size_t>(std::atoi(cmd.c_str() + 10));
+            if (idx < live_data_.dock.sys_snap.audio_devices.size()) {
+                const std::wstring id = live_data_.dock.sys_snap.audio_devices[idx].id;
+                if (live::SetDefaultAudioOutputDevice(id)) {
+                    for (size_t i = 0; i < live_data_.dock.sys_snap.audio_devices.size(); ++i) {
+                        live_data_.dock.sys_snap.audio_devices[i].is_default = (i == idx);
+                    }
+                    dock_sys_monitor_.RequestRefresh(true);
+                }
+            }
+        } else if (cmd.starts_with("pwr:")) {
+            const uint8_t mode = static_cast<uint8_t>(std::clamp(std::atoi(cmd.c_str() + 4), 0, 2));
+            if (live::SetSystemPowerMode(mode)) {
+                live_data_.dock.sys_snap.power_mode = mode;
+                live_data_.dock.sys_snap.power_plan_name = (mode == 0) ? L"节能" : (mode == 2 ? L"性能" : L"平衡");
+                dock_sys_monitor_.RequestRefresh(true);
+            }
+        } else if (cmd == "ime-toggle") {
+            live::ToggleImeChineseEnglish(last_external_fg_hwnd_);
+            dock_sys_monitor_.RequestRefresh(false);
+        } else if (cmd.starts_with("ime-hkl:")) {
+            const uint64_t raw = std::strtoull(cmd.c_str() + 8, nullptr, 10);
+            live::SwitchKeyboardLayout(last_external_fg_hwnd_, raw);
+            dock_sys_monitor_.RequestRefresh(false);
+        } else if (cmd == "wifi-disconnect") {
+            HWND notify = mount_.Hwnd();
+            std::thread([notify]() {
+                live::DisconnectWifiNetwork();
+                if (notify && IsWindow(notify)) PostMessageW(notify, kMsgDockSysReady, 1, 0);
+            }).detach();
+        } else if (cmd.starts_with("wifi-conn:")) {
+            const size_t idx = static_cast<size_t>(std::atoi(cmd.c_str() + 10));
+            if (idx < live_data_.dock.sys_snap.wifi_networks.size()) {
+                const std::wstring ssid = live_data_.dock.sys_snap.wifi_networks[idx].ssid;
+                const bool has_prof = live_data_.dock.sys_snap.wifi_networks[idx].has_profile;
+                if (!has_prof) {
+                    live::OpenWindowsSettingsUri(L"ms-settings:network-wifi");
+                } else {
+                    HWND notify = mount_.Hwnd();
+                    std::thread([notify, ssid]() {
+                        live::ConnectWifiNetwork(ssid);
+                        if (notify && IsWindow(notify)) PostMessageW(notify, kMsgDockSysReady, 1, 0);
+                    }).detach();
+                }
+            }
+        } else if (cmd.starts_with("tray-open:")) {
+            const size_t idx = static_cast<size_t>(std::atoi(cmd.c_str() + 10));
+            if (idx < live_data_.dock.sys_snap.tray_apps.size()) {
+                POINT scr{};
+                GetCursorPos(&scr);
+                live::ActivateDockTrayApp(live_data_.dock.sys_snap.tray_apps[idx], false, scr);
+            }
+        } else if (cmd.starts_with("tray-pin:")) {
+            const size_t idx = static_cast<size_t>(std::atoi(cmd.c_str() + 9));
+            if (idx < live_data_.dock.sys_snap.tray_apps.size()) {
+                live_data_.dock.sys_snap.tray_apps[idx].pinned = !live_data_.dock.sys_snap.tray_apps[idx].pinned;
+                sync_tray_pins_from_snap();
+            }
+        } else if (cmd.starts_with("tray-unpin:")) {
+            const size_t idx = static_cast<size_t>(std::atoi(cmd.c_str() + 11));
+            if (idx < live_data_.dock.sys_snap.tray_apps.size()) {
+                live_data_.dock.sys_snap.tray_apps[idx].pinned = false;
+                sync_tray_pins_from_snap();
+            }
+        }
+    }
+
+    // Evaluates macOS / WacOS Auto-Hide & Smart-Hide policy and kicks the VSync reveal/collapse slide.
+    void EvaluateDockAutoHide(double now_ms) {
+        const bool prev_hide = dock_bar_should_hide_;
+        if (!state_.settings.dock_enabled || state_.settings.dock_hide_mode == 0) {
+            dock_bar_should_hide_ = false;
+        } else if (dock_bar_pointer_inside_ || dock_bar_pressed_idx_ >= 0 ||
+                   interaction_.dock_bar_drag.active || dock_bar_resizing_ || overlays_.IsOpen()) {
+            dock_bar_should_hide_ = false;
+            dock_bar_last_reveal_touch_ms_ = now_ms;
+        } else {
+            POINT pt{};
+            GetCursorPos(&pt);
+            const RECT wa_px = PrimaryWorkAreaScreen();
+            const model::RectI rest = live_data_.dock.RestingObstacleRect();
+            const POINT left_px = mount_.Hwnd() ? mount_.ClientDipToScreenPx(POINT{rest.x, rest.y}) : POINT{wa_px.left, wa_px.bottom - 80};
+            const POINT right_px = mount_.Hwnd() ? mount_.ClientDipToScreenPx(POINT{rest.right(), rest.bottom()}) : POINT{wa_px.right, wa_px.bottom};
+            const uint8_t dpos = state_.settings.dock_position;
+            bool near_edge = false;
+            bool inside_revealed = false;
+            RECT dock_rc{};
+            if (dpos == 1) {
+                near_edge = (pt.x >= wa_px.left - 8 && pt.x <= wa_px.left + 10 &&
+                             pt.y >= left_px.y - 48 && pt.y <= right_px.y + 48);
+                inside_revealed = (dock_bar_reveal_ > 0.4f &&
+                                   pt.x >= wa_px.left - 4 && pt.x <= right_px.x + 24 &&
+                                   pt.y >= left_px.y - 16 && pt.y <= right_px.y + 16);
+                dock_rc = RECT{wa_px.left, left_px.y, right_px.x, right_px.y};
+            } else if (dpos == 2) {
+                near_edge = (pt.x >= wa_px.right - 10 && pt.x <= wa_px.right + 8 &&
+                             pt.y >= left_px.y - 48 && pt.y <= right_px.y + 48);
+                inside_revealed = (dock_bar_reveal_ > 0.4f &&
+                                   pt.x >= left_px.x - 24 && pt.x <= wa_px.right + 4 &&
+                                   pt.y >= left_px.y - 16 && pt.y <= right_px.y + 16);
+                dock_rc = RECT{left_px.x, left_px.y, wa_px.right, right_px.y};
+            } else {
+                near_edge = (pt.y >= wa_px.bottom - 10 && pt.y <= wa_px.bottom + 8 &&
+                             pt.x >= left_px.x - 48 && pt.x <= right_px.x + 48);
+                inside_revealed = (dock_bar_reveal_ > 0.4f &&
+                                   pt.y >= left_px.y - 24 && pt.y <= wa_px.bottom + 4 &&
+                                   pt.x >= left_px.x - 16 && pt.x <= right_px.x + 16);
+                dock_rc = RECT{left_px.x, left_px.y, right_px.x, wa_px.bottom};
+            }
+            if (near_edge || inside_revealed) {
+                dock_bar_should_hide_ = false;
+                dock_bar_last_reveal_touch_ms_ = now_ms;
+            } else if (state_.settings.dock_hide_mode == 2) {
+                // AutoHide: brief 220ms leave grace prevents accidental flicker on quick mouse exits.
+                dock_bar_should_hide_ = (now_ms - dock_bar_last_reveal_touch_ms_) >= 220.0;
+            } else {
+                // SmartHide: collapse only when an external visible foreground window overlaps resting Dock bounds.
+                bool overlapped = false;
+                HWND fg = GetForegroundWindow();
+                if (fg && fg != mount_.Hwnd() && IsWindowVisible(fg) && !IsIconic(fg)) {
+                    DWORD fg_pid = 0;
+                    GetWindowThreadProcessId(fg, &fg_pid);
+                    if (fg_pid != 0 && fg_pid != GetCurrentProcessId()) {
+                        wchar_t cls[64]{};
+                        GetClassNameW(fg, cls, ARRAYSIZE(cls));
+                        if (wcscmp(cls, L"Progman") != 0 && wcscmp(cls, L"WorkerW") != 0 &&
+                            wcscmp(cls, L"Shell_TrayWnd") != 0 && wcscmp(cls, L"Shell_SecondaryTrayWnd") != 0) {
+                            RECT fg_rc{};
+                            if (FAILED(DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &fg_rc, sizeof(fg_rc)))) {
+                                GetWindowRect(fg, &fg_rc);
+                            }
+                            RECT inter{};
+                            overlapped = IntersectRect(&inter, &fg_rc, &dock_rc) != FALSE;
+                        }
+                    }
+                }
+                dock_bar_should_hide_ = overlapped && ((now_ms - dock_bar_last_reveal_touch_ms_) >= 180.0);
+            }
+        }
+        if (dock_bar_should_hide_ != prev_hide ||
+            std::fabs(TargetDockReveal() - dock_bar_reveal_) > 0.002f) {
+            StartAnimClock();
+        }
+    }
+
+    RECT DockItemScreenRectPx(int idx) const noexcept {
+        float cx = 960.0f;
+        float cy = 1000.0f;
+        float sz = static_cast<float>(state_.settings.dock_icon_size);
+        if (idx >= 0 && static_cast<size_t>(idx) < live_data_.dock.items.size()) {
+            const auto& it = live_data_.dock.items[static_cast<size_t>(idx)];
+            cx = it.draw_cx;
+            cy = it.draw_cy;
+            sz = std::max(32.0f, it.draw_size);
+        } else if (live_data_.dock.pill_rect.right > live_data_.dock.pill_rect.left) {
+            cx = (live_data_.dock.pill_rect.left + live_data_.dock.pill_rect.right) * 0.5f;
+            cy = (live_data_.dock.pill_rect.top + live_data_.dock.pill_rect.bottom) * 0.5f;
+        }
+        const float half = sz * 0.45f;
+        const POINT tl = mount_.ClientDipToScreenPx(POINT{
+            static_cast<LONG>(std::lround(cx - half)), static_cast<LONG>(std::lround(cy - half))});
+        const POINT br = mount_.ClientDipToScreenPx(POINT{
+            static_cast<LONG>(std::lround(cx + half)), static_cast<LONG>(std::lround(cy + half))});
+        return RECT{tl.x, tl.y, std::max(tl.x + 16, br.x), std::max(tl.y + 16, br.y)};
+    }
+
+    struct RecentWindowSnap {
+        HWND hwnd = nullptr;
+        render::DockWindowSnapshot snap;
+        RECT normal_rect{};
+        bool was_maximized = false;
+        double captured_ms = 0.0;
+    };
+
+    RecentWindowSnap* FindRecentSnap(HWND target) noexcept {
+        for (auto& e : recent_win_snaps_) {
+            if (e.hwnd == target) return &e;
+        }
+        return nullptr;
+    }
+
+    void RememberWindowSnap(HWND target, render::DockWindowSnapshot snap, bool was_max, double now_ms) {
+        if (!target || !snap.Valid()) return;
+        const RECT rect = snap.screen_rect;
+        if (auto* existing = FindRecentSnap(target)) {
+            existing->snap = std::move(snap);
+            existing->normal_rect = rect;
+            existing->was_maximized = was_max;
+            existing->captured_ms = now_ms;
+            return;
+        }
+        if (recent_win_snaps_.size() >= 6) {
+            auto oldest = std::min_element(recent_win_snaps_.begin(), recent_win_snaps_.end(),
+                                           [](const RecentWindowSnap& a, const RecentWindowSnap& b) {
+                                               return a.captured_ms < b.captured_ms;
+                                           });
+            if (oldest != recent_win_snaps_.end()) recent_win_snaps_.erase(oldest);
+        }
+        recent_win_snaps_.push_back(RecentWindowSnap{target, std::move(snap), rect, was_max, now_ms});
+    }
+
+    void SampleForegroundWindowSnapshot(double now_ms) {
+        if (!state_.settings.dock_enabled || state_.settings.dock_minimize_effect == 0 || dock_genie_.IsActive()) {
+            fg_snap_in_caption_ = false;
+            fg_snap_caption_hwnd_ = nullptr;
+            return;
+        }
+
+        // Prune dead HWNDs occasionally without touching live foreground apps.
+        if ((now_ms - last_fg_snap_prune_ms_) >= 5000.0) {
+            last_fg_snap_prune_ms_ = now_ms;
+            recent_win_snaps_.erase(
+                std::remove_if(recent_win_snaps_.begin(), recent_win_snaps_.end(),
+                               [](const RecentWindowSnap& e) { return !e.hwnd || !IsWindow(e.hwnd); }),
+                recent_win_snaps_.end());
+        }
+
+        // NEVER poll PrintWindow on an active foreground app (calling PrintWindow on apps such as
+        // AutoCAD synchronously repaints GDI/MFC/DirectX child toolbars and causes visible flicker).
+        // Instead, take at most ONE passive read-only screen snapshot only when the pointer enters
+        // the foreground window's top-right caption-button zone (minimize button area).
+        HWND fg = GetForegroundWindow();
+        if (!fg || fg == mount_.Hwnd() || IsIconic(fg) || !render::LiquidDockBarState::IsWindowLiveForActivation(fg)) {
+            fg_snap_in_caption_ = false;
+            fg_snap_caption_hwnd_ = nullptr;
+            return;
+        }
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        if (pid == 0 || pid == GetCurrentProcessId()) {
+            fg_snap_in_caption_ = false;
+            fg_snap_caption_hwnd_ = nullptr;
+            return;
+        }
+        const LONG_PTR ex = GetWindowLongPtrW(fg, GWL_EXSTYLE);
+        const LONG_PTR st = GetWindowLongPtrW(fg, GWL_STYLE);
+        if ((ex & WS_EX_TOOLWINDOW) || !(st & WS_CAPTION)) {
+            fg_snap_in_caption_ = false;
+            fg_snap_caption_hwnd_ = nullptr;
+            return;
+        }
+
+        POINT cur{};
+        if (!GetCursorPos(&cur)) return;
+        RECT ext{};
+        if (!GetWindowRect(fg, &ext)) return;
+        DwmGetWindowAttribute(fg, DWMWA_EXTENDED_FRAME_BOUNDS, &ext, sizeof(ext));
+        const UINT wdpi = GetDpiForWindow(fg);
+        const float ds = (wdpi >= 72u && wdpi <= 480u) ? (static_cast<float>(wdpi) / 96.0f) : 1.0f;
+        const LONG cap_w = static_cast<LONG>(std::lround(190.0f * ds));
+        const LONG cap_h = static_cast<LONG>(std::lround(44.0f * ds));
+        const bool in_caption_corner =
+            (cur.x >= ext.right - cap_w && cur.x <= ext.right &&
+             cur.y >= ext.top && cur.y <= ext.top + cap_h);
+
+        if (!in_caption_corner) {
+            fg_snap_in_caption_ = false;
+            fg_snap_caption_hwnd_ = nullptr;
+            return;
+        }
+        if (fg_snap_in_caption_ && fg_snap_caption_hwnd_ == fg) {
+            return;
+        }
+        fg_snap_in_caption_ = true;
+        fg_snap_caption_hwnd_ = fg;
+        if ((now_ms - last_fg_snap_ms_) < 2000.0) return;
+        last_fg_snap_ms_ = now_ms;
+
+        render::DockWindowSnapshot snap;
+        if (render::CaptureWindowSnapshotForDock(
+                fg, snap, 1200, render::WindowCaptureMode::PassiveScreenOnly, mount_.Hwnd())) {
+            RememberWindowSnap(fg, std::move(snap), IsZoomed(fg) != FALSE, now_ms);
+        }
+    }
+
+    RECT ComputeWindowRestoreRect(HWND target, const RecentWindowSnap* cached) const noexcept {
+        if (cached && (cached->normal_rect.right - cached->normal_rect.left) > 40 &&
+            (cached->normal_rect.bottom - cached->normal_rect.top) > 40) {
+            return cached->normal_rect;
+        }
+        WINDOWPLACEMENT wp{sizeof(wp)};
+        if (GetWindowPlacement(target, &wp)) {
+            HMONITOR mon = MonitorFromRect(&wp.rcNormalPosition, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{sizeof(mi)};
+            GetMonitorInfoW(mon, &mi);
+            const bool maxed = ((wp.flags & WPF_RESTORETOMAXIMIZED) != 0) || (cached && cached->was_maximized);
+            if (maxed) {
+                return mi.rcWork;
+            }
+            RECT r = wp.rcNormalPosition;
+            OffsetRect(&r, mi.rcWork.left - mi.rcMonitor.left, mi.rcWork.top - mi.rcMonitor.top);
+            UINT dpi = GetDpiForWindow(target);
+            if (dpi == 0) dpi = 96;
+            const int border = MulDiv(7, static_cast<int>(dpi), 96);
+            return RECT{r.left + border, r.top, r.right - border, r.bottom - border};
+        }
+        return RECT{200, 120, 1100, 760};
+    }
+
+    bool EnsureDockGenieReady() {
+        if (dock_genie_ready_) return true;
+        dock_genie_ready_ = dock_genie_.Initialize(GetModuleHandleW(nullptr));
+        return dock_genie_ready_;
+    }
+
+    bool IsDockBarOccludedByOtherWindow(HWND ignore_hwnd) const noexcept {
+        if (!mount_.Hwnd() || live_data_.dock.pill_rect.right <= live_data_.dock.pill_rect.left) return false;
+        const POINT tl = mount_.ClientDipToScreenPx(POINT{
+            static_cast<LONG>(std::floor(live_data_.dock.pill_rect.left)),
+            static_cast<LONG>(std::floor(live_data_.dock.pill_rect.top))});
+        const POINT br = mount_.ClientDipToScreenPx(POINT{
+            static_cast<LONG>(std::ceil(live_data_.dock.pill_rect.right)),
+            static_cast<LONG>(std::ceil(live_data_.dock.pill_rect.bottom))});
+        const RECT dock_rc{tl.x, tl.y, br.x, br.y};
+        if (dock_rc.right <= dock_rc.left || dock_rc.bottom <= dock_rc.top) return false;
+
+        const DWORD self_pid = GetCurrentProcessId();
+        for (HWND w = GetTopWindow(nullptr); w; w = GetWindow(w, GW_HWNDNEXT)) {
+            if (w == mount_.Hwnd()) break; // Reached desktop layer; nothing above covers Dock.
+            if (w == ignore_hwnd || !IsWindowVisible(w) || IsIconic(w)) continue;
+            BOOL cloaked = FALSE;
+            DwmGetWindowAttribute(w, DWMWA_CLOAKED, &cloaked, sizeof(cloaked));
+            if (cloaked) continue;
+            DWORD wpid = 0;
+            GetWindowThreadProcessId(w, &wpid);
+            if (wpid == 0 || wpid == self_pid) continue;
+            wchar_t cls[64]{};
+            GetClassNameW(w, cls, ARRAYSIZE(cls));
+            if (_wcsicmp(cls, L"Progman") == 0 || _wcsicmp(cls, L"WorkerW") == 0 ||
+                _wcsicmp(cls, L"Shell_TrayWnd") == 0 || _wcsicmp(cls, L"Shell_SecondaryTrayWnd") == 0) {
+                continue;
+            }
+            const LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+            if ((ex & WS_EX_TOOLWINDOW) && (ex & WS_EX_TRANSPARENT)) continue;
+            RECT wext{};
+            if (FAILED(DwmGetWindowAttribute(w, DWMWA_EXTENDED_FRAME_BOUNDS, &wext, sizeof(wext))) &&
+                !GetWindowRect(w, &wext)) continue;
+            RECT inter{};
+            if (IntersectRect(&inter, &dock_rc, &wext)) {
+                const int64_t dock_area = static_cast<int64_t>(dock_rc.right - dock_rc.left) *
+                                          (dock_rc.bottom - dock_rc.top);
+                const int64_t cover_area = static_cast<int64_t>(inter.right - inter.left) *
+                                           (inter.bottom - inter.top);
+                if (dock_area > 0 && cover_area * 100 >= dock_area * 65) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    void MinimizeWindowWithGenie(HWND target, int slot_idx, bool already_minimizing_from_os) {
+        if (!target || !IsWindow(target)) return;
+        const auto fx = static_cast<render::DockMinimizeEffect>(state_.settings.dock_minimize_effect);
+        // Skip Genie when disabled, Dock hidden, target is hung, or OS-initiated minimize happens
+        // while the Dock itself is buried underneath another maximized app (e.g. AutoCAD).
+        if (fx == render::DockMinimizeEffect::Off || !state_.settings.dock_enabled || !mount_.Hwnd() ||
+            dock_bar_reveal_ <= 0.05f || IsHungAppWindow(target) ||
+            (already_minimizing_from_os && IsDockBarOccludedByOtherWindow(target))) {
+            if (!already_minimizing_from_os) ShowWindowAsync(target, SW_MINIMIZE);
+            return;
+        }
+        const double now_ms = NowAnimMs();
+        render::DockWindowSnapshot snap;
+        bool have_snap = false;
+        if (!IsIconic(target) && render::CaptureWindowSnapshotForDock(
+                                     target, snap, 1280,
+                                     render::WindowCaptureMode::PreferScreenFallbackPrint,
+                                     mount_.Hwnd())) {
+            RememberWindowSnap(target, snap, IsZoomed(target) != FALSE, now_ms);
+            have_snap = true;
+        } else if (auto* cached = FindRecentSnap(target); cached && cached->snap.Valid()) {
+            snap = cached->snap;
+            have_snap = true;
+        }
+
+        if (!have_snap || !EnsureDockGenieReady()) {
+            if (!already_minimizing_from_os) ShowWindowAsync(target, SW_MINIMIZE);
+            return;
+        }
+
+        if (slot_idx < 0) slot_idx = live_data_.dock.FindItemIndexForHwnd(target);
+        const RECT slot_rect = DockItemScreenRectPx(slot_idx);
+        const RECT src_rect = snap.screen_rect;
+        suppress_genie_hwnd_ = target;
+        suppress_genie_until_ms_ = now_ms + 750.0;
+
+        if (dock_genie_.Start(snap, src_rect, slot_rect, /*reverse=*/false, fx, [this, target]() {
+                if (IsWindow(target) && !IsIconic(target)) {
+                    ShowWindowAsync(target, SW_MINIMIZE);
+                }
+                InvalidateDockBar();
+            }, state_.settings.dock_position)) {
+            if (!already_minimizing_from_os) {
+                // Use non-blocking ShowWindowAsync so a busy target (e.g. CAD/modal dialog) never
+                // stalls the desktop host UI thread or freezes the Genie overlay.
+                ShowWindowAsync(target, SW_SHOWMINNOACTIVE);
+            }
+            StartAnimClock();
+        } else if (!already_minimizing_from_os) {
+            ShowWindowAsync(target, SW_MINIMIZE);
+        }
+    }
+
+    void RestoreWindowWithGenie(HWND target, int slot_idx) {
+        if (!target || !IsWindow(target)) return;
+        const auto fx = static_cast<render::DockMinimizeEffect>(state_.settings.dock_minimize_effect);
+        auto* cached = FindRecentSnap(target);
+        if (fx == render::DockMinimizeEffect::Off || !state_.settings.dock_enabled || !mount_.Hwnd() ||
+            !cached || !cached->snap.Valid() || !EnsureDockGenieReady()) {
+            ActivateWindowReliably(target);
+            return;
+        }
+
+        if (slot_idx < 0) slot_idx = live_data_.dock.FindItemIndexForHwnd(target);
+        const RECT slot_rect = DockItemScreenRectPx(slot_idx);
+        const RECT dst_rect = ComputeWindowRestoreRect(target, cached);
+        const render::DockWindowSnapshot snap = cached->snap;
+        suppress_genie_hwnd_ = target;
+        suppress_genie_until_ms_ = NowAnimMs() + 750.0;
+
+        if (dock_genie_.Start(snap, dst_rect, slot_rect, /*reverse=*/true, fx, [this, target]() {
+                ActivateWindowReliably(target);
+                RefreshLiquidDockBar(true, false);
+            }, state_.settings.dock_position)) {
+            StartAnimClock();
+        } else {
+            ActivateWindowReliably(target);
+        }
+    }
+
+    void PinPathsToDock(const std::vector<std::wstring>& raw_paths) {
+        if (raw_paths.empty()) return;
+        const model::RectI wa = PrimaryWorkAreaClient();
+        const model::RectI old_dmg = live_data_.dock.DamageRect(wa);
+        if (state_.settings.dock_pinned_paths.empty()) {
+            state_.settings.dock_pinned_paths = render::LiquidDockBarState::DiscoverDefaultPinnedApps();
+        }
+        auto to_lower = [](std::wstring s) {
+            for (auto& ch : s) ch = static_cast<wchar_t>(std::towlower(ch));
+            return s;
+        };
+        int added = 0;
+        for (const auto& raw : raw_paths) {
+            if (raw.empty()) continue;
+            const std::wstring norm = render::LiquidDockBarState::NormalizePathForPin(raw);
+            if (norm.empty()) continue;
+            const std::wstring key = to_lower(norm);
+            bool exists = false;
+            for (const auto& existing : state_.settings.dock_pinned_paths) {
+                if (to_lower(existing) == key) { exists = true; break; }
+            }
+            if (!exists) {
+                state_.settings.dock_pinned_paths.push_back(norm);
+                ++added;
+            }
+        }
+        state_.settings.dock_enabled = true;
+        RefreshLiquidDockBar(false, false);
+        SaveModel();
+        InvalidateDockBar(old_dmg);
+        ShowUndoToast(added > 0 ? L"已固定到程序坞（原文件保留）" : L"已在程序坞中");
+    }
+
+    void PinOrUnpinDockPath(const std::wstring& path, bool pin, const std::wstring& fallback_key = {}) {
+        if (path.empty() && fallback_key.empty()) return;
+        const model::RectI wa = PrimaryWorkAreaClient();
+        const model::RectI old_dmg = live_data_.dock.DamageRect(wa);
+        if (state_.settings.dock_pinned_paths.empty()) {
+            state_.settings.dock_pinned_paths = render::LiquidDockBarState::DiscoverDefaultPinnedApps();
+        }
+        auto to_lower = [](std::wstring s) {
+            for (auto& ch : s) ch = static_cast<wchar_t>(std::towlower(ch));
+            return s;
+        };
+        const std::wstring key = to_lower(path);
+        const std::wstring fkey = to_lower(fallback_key);
+        auto it = std::find_if(state_.settings.dock_pinned_paths.begin(),
+                               state_.settings.dock_pinned_paths.end(),
+                               [&](const std::wstring& s) {
+                                   const std::wstring sl = to_lower(s);
+                                   if (!key.empty() && sl == key) return true;
+                                   if (!fkey.empty() && sl == fkey) return true;
+                                   const std::wstring resolved = to_lower(render::LiquidDockBarState::NormalizePathForPin(s));
+                                   return (!key.empty() && resolved == key) || (!fkey.empty() && resolved == fkey);
+                               });
+        bool mutated = false;
+        if (pin) {
+            const std::wstring to_add = !path.empty() ? path : fallback_key;
+            if (it == state_.settings.dock_pinned_paths.end() && !to_add.empty()) {
+                state_.settings.dock_pinned_paths.push_back(to_add);
+                mutated = true;
+            }
+        } else {
+            if (it != state_.settings.dock_pinned_paths.end()) {
+                state_.settings.dock_pinned_paths.erase(it);
+                mutated = true;
+            }
+        }
+        RefreshLiquidDockBar(false, false);
+        SaveModel();
+        SyncSettingsToPlugin();
+        InvalidateDockBar(old_dmg);
+        StartAnimClock();
+        if (mutated) {
+            ShowUndoToast(pin ? L"已固定到程序坞" : L"已从程序坞移除（原文件保留）");
+        }
+    }
+
+    void ReorderOrInsertDockPin(const std::wstring& path, int target_slot) {
+        if (path.empty()) return;
+        const model::RectI wa = PrimaryWorkAreaClient();
+        const model::RectI old_dmg = live_data_.dock.DamageRect(wa);
+        if (state_.settings.dock_pinned_paths.empty()) {
+            state_.settings.dock_pinned_paths = render::LiquidDockBarState::DiscoverDefaultPinnedApps();
+        }
+        auto to_lower = [](std::wstring s) {
+            for (auto& ch : s) ch = static_cast<wchar_t>(std::towlower(ch));
+            return s;
+        };
+        const std::wstring key = to_lower(path);
+        auto& pins = state_.settings.dock_pinned_paths;
+        auto it = std::find_if(pins.begin(), pins.end(), [&](const std::wstring& s) { return to_lower(s) == key; });
+        std::wstring entry = path;
+        if (it != pins.end()) {
+            entry = *it;
+            pins.erase(it);
+        }
+        const int clamped = std::clamp(target_slot, 0, static_cast<int>(pins.size()));
+        pins.insert(pins.begin() + clamped, std::move(entry));
+        RefreshLiquidDockBar(false, false);
+        SaveModel();
+        InvalidateDockBar(old_dmg);
+    }
+
+    static bool IsCurrentProcessElevated() noexcept {
+        static const bool elevated = []() {
+            HANDLE tok = nullptr;
+            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+            TOKEN_ELEVATION te{};
+            DWORD bytes = 0;
+            const bool ok = GetTokenInformation(tok, TokenElevation, &te, sizeof(te), &bytes) != FALSE;
+            CloseHandle(tok);
+            return ok && te.TokenIsElevated != 0;
+        }();
+        return elevated;
+    }
+
+    // Unlocks Windows foreground lock safely without triggering any window's Alt menu bar
+    // (same technique proven in renzyxx/WacOS shell::LiberaFrente).
+    static void UnlockForegroundLock() noexcept {
+        constexpr ULONG_PTR kTag = 0x504C5344u; // "PLSD"
+        INPUT in[4]{};
+        in[0].type = INPUT_KEYBOARD;
+        in[0].ki.wVk = VK_MENU;
+        in[0].ki.dwExtraInfo = kTag;
+        in[1].type = INPUT_KEYBOARD;
+        in[1].ki.wVk = 0xE8; // unassigned VK suppresses bare-Alt menu activation
+        in[1].ki.dwExtraInfo = kTag;
+        in[2].type = INPUT_KEYBOARD;
+        in[2].ki.wVk = 0xE8;
+        in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+        in[2].ki.dwExtraInfo = kTag;
+        in[3].type = INPUT_KEYBOARD;
+        in[3].ki.wVk = VK_MENU;
+        in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+        in[3].ki.dwExtraInfo = kTag;
+        SendInput(4, in, sizeof(INPUT));
+    }
+
+    // Reliably restores and pops a running application window to the foreground from the desktop layer.
+    static bool ActivateWindowReliably(HWND target) noexcept {
+        if (!target || !IsWindow(target)) return false;
+        const bool hung = IsHungAppWindow(target) != FALSE;
+        if (IsIconic(target)) {
+            ShowWindowAsync(target, SW_RESTORE);
+            if (!hung && IsIconic(target)) {
+                PostMessageW(target, WM_SYSCOMMAND, SC_RESTORE, 0);
+            }
+        }
+        if (hung) return true;
+        DWORD target_pid = 0;
+        const DWORD target_tid = GetWindowThreadProcessId(target, &target_pid);
+        AllowSetForegroundWindow(target_pid ? target_pid : ASFW_ANY);
+        SetWindowPos(target, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+        BringWindowToTop(target);
+        if (SetForegroundWindow(target) && GetForegroundWindow() == target) return true;
+
+        // Fallback 1: temporary AttachThreadInput handoff with current foreground thread.
+        const HWND fg = GetForegroundWindow();
+        const DWORD fg_tid = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+        const DWORD cur_tid = GetCurrentThreadId();
+        bool attached_fg = false;
+        bool attached_target = false;
+        if (fg_tid && fg_tid != cur_tid) attached_fg = AttachThreadInput(cur_tid, fg_tid, TRUE) != FALSE;
+        if (target_tid && target_tid != cur_tid && target_tid != fg_tid) {
+            attached_target = AttachThreadInput(cur_tid, target_tid, TRUE) != FALSE;
+        }
+        BringWindowToTop(target);
+        SetForegroundWindow(target);
+        if (attached_target) AttachThreadInput(cur_tid, target_tid, FALSE);
+        if (attached_fg) AttachThreadInput(cur_tid, fg_tid, FALSE);
+        if (GetForegroundWindow() == target) return true;
+
+        // Fallback 2: release Windows foreground lock + SwitchToThisWindow.
+        UnlockForegroundLock();
+        BringWindowToTop(target);
+        const bool ok = SetForegroundWindow(target) != FALSE;
+        if (!ok || GetForegroundWindow() != target) {
+            SwitchToThisWindow(target, TRUE);
+        }
+        return GetForegroundWindow() == target || ok;
+    }
+
+    static bool SupportsNewWindowArg(const std::wstring& path) noexcept {
+        const size_t slash = path.find_last_of(L"\\/");
+        const std::wstring file = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+        for (const wchar_t* name : {L"chrome.exe", L"msedge.exe", L"brave.exe", L"vivaldi.exe", L"opera.exe",
+                                    L"code.exe", L"antigravity.exe", L"firefox.exe"}) {
+            if (_wcsicmp(file.c_str(), name) == 0) return true;
+        }
+        return false;
+    }
+
+    static bool IsExplorerExePath(const std::wstring& path) noexcept {
+        const size_t slash = path.find_last_of(L"\\/");
+        const std::wstring file = (slash == std::wstring::npos) ? path : path.substr(slash + 1);
+        return _wcsicmp(file.c_str(), L"explorer.exe") == 0;
+    }
+
+    int ResolveLiveDockItemIndex(const overlays::ContextMenuSpec& spec) const noexcept {
+        if (!spec.dock_item_key.empty()) {
+            const int by_key = live_data_.dock.FindItemIndexByKey(spec.dock_item_key);
+            if (by_key >= 0) return by_key;
+        }
+        if (spec.dock_item_index >= 0 &&
+            static_cast<size_t>(spec.dock_item_index) < live_data_.dock.items.size()) {
+            return spec.dock_item_index;
+        }
+        return -1;
+    }
+
+    model::RectI DockItemClientRect(int idx) const noexcept {
+        if (idx < 0 || static_cast<size_t>(idx) >= live_data_.dock.items.size()) return {};
+        const auto& it = live_data_.dock.items[static_cast<size_t>(idx)];
+        const int sz = std::max(1, static_cast<int>(std::lround(it.draw_size)));
+        return model::RectI{static_cast<int>(std::lround(it.draw_cx - it.draw_size * 0.5f)),
+                            static_cast<int>(std::lround(it.draw_cy - it.draw_size * 0.5f)), sz, sz};
+    }
+
+    // Dock stacks (叠放): a Dock folder (下载, a pinned folder) or the 应用程序 stack opens as a Fan /
+    // Grid / List above its icon instead of a window, as on the Mac. A second click closes it.
+    overlays::DockStackRequest BuildDockStackRequest(size_t idx) const {
+        overlays::DockStackRequest rq;
+        const auto& item = live_data_.dock.items[idx];
+        rq.key = item.key;
+        rq.title = item.title;
+        rq.is_apps = item.key == L"special:apps";
+        rq.folder = rq.is_apps ? std::wstring{} : item.launch_path;
+        rq.view = static_cast<overlays::DockStackView>(std::min<uint8_t>(state_.settings.dock_stack_view, 3));
+        rq.sort = static_cast<overlays::DockStackSort>(std::min<uint8_t>(state_.settings.dock_stack_sort, 3));
+        const model::RectI rc = DockItemClientRect(static_cast<int>(idx));
+        const POINT tl = mount_.ClientDipToScreenPx(POINT{rc.x, rc.y});
+        const POINT br = mount_.ClientDipToScreenPx(POINT{rc.right(), rc.bottom()});
+        rq.icon_screen = RECT{tl.x, tl.y, std::max(tl.x + 1, br.x), std::max(tl.y + 1, br.y)};
+        const POINT o0 = mount_.ClientDipToScreenPx(POINT{0, 0});
+        const POINT o1 = mount_.ClientDipToScreenPx(POINT{1000, 0});
+        rq.scale = std::clamp(static_cast<float>(o1.x - o0.x) / 1000.0f, 0.5f, 4.0f);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        const POINT c{(tl.x + br.x) / 2, (tl.y + br.y) / 2};
+        if (GetMonitorInfoW(MonitorFromPoint(c, MONITOR_DEFAULTTONEAREST), &mi)) rq.work_screen = mi.rcWork;
+        else rq.work_screen = RECT{0, 0, 1920, 1080};
+        rq.dock_edge = std::min<uint8_t>(state_.settings.dock_position, 2);
+        rq.dark = state_.settings.dark_mode;
+        return rq;
+    }
+
+    void ToggleDockStack(size_t idx) {
+        if (idx >= live_data_.dock.items.size()) return;
+        const auto& item = live_data_.dock.items[idx];
+        if (item.key != L"special:apps" && item.launch_path.empty()) return;
+        if (dock_stack_.IsOpenFor(item.key)) {
+            dock_stack_.Close(true);
+            return;
+        }
+        // The press on this icon already closed its stack (it took the focus away): stay closed.
+        if (dock_stack_.RecentlyClosedFor(item.key)) return;
+        dock_stack_.SetOpenHandler([this, key = item.key](const overlays::DockStackEntry& e) {
+            if (e.is_dir) {
+                const int i = live_data_.dock.FindItemIndexByKey(key);
+                const model::RectI origin = DockItemClientRect(i);
+                OpenPathInPulseOrShell(e.path, i >= 0 ? &origin : nullptr);
+            } else {
+                // Files open in their app; .lnk / .exe / Start menu apps launch directly.
+                LaunchDetached(e.path);
+            }
+        });
+        dock_stack_.Show(BuildDockStackRequest(idx));
+    }
+
+    void ActivateDockBarItem(size_t idx, bool force_new_instance, bool allow_minimize_if_front = true) {
+        if (idx >= live_data_.dock.items.size()) return;
+        auto& item = live_data_.dock.items[idx];
+        if (item.kind == render::DockBarItemKind::Divider) return;
+
+        // Capture fields up front so any live refresh cannot invalidate references.
+        const render::DockBarItemKind kind = item.kind;
+        const std::wstring key = item.key;
+        const std::wstring launch_path = item.launch_path;
+        const model::RectI icon_origin{
+            static_cast<int>(std::lround(item.draw_cx - item.draw_size * 0.5f)),
+            static_cast<int>(std::lround(item.draw_cy - item.draw_size * 0.5f)),
+            std::max(1, static_cast<int>(std::lround(item.draw_size))),
+            std::max(1, static_cast<int>(std::lround(item.draw_size))),
+        };
+
+        item.bounce_start_ms = NowAnimMs();
+        StartAnimClock();
+        InvalidateDockBar();
+
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        test_dock_activations_.push_back(
+            (force_new_instance ? std::wstring(L"new:") : std::wstring(L"act:")) +
+            (launch_path.empty() ? key : launch_path));
+        if (kind != render::DockBarItemKind::WidgetsToggle) return;
+#endif
+
+        if (kind == render::DockBarItemKind::WidgetsToggle) {
+            state_.settings.tiles_enabled = !state_.settings.tiles_enabled;
+            if (state_.settings.tiles_enabled) RefreshLiveTileData();
+            RecomputeLayout();
+            SaveModel();
+            renderer_.InvalidateAll();
+            ShowUndoToast(state_.settings.tiles_enabled ? L"已显示桌面小组件" : L"已隐藏桌面小组件");
+            return;
+        }
+        if (kind == render::DockBarItemKind::Trash) {
+            LaunchDetached(L"shell:RecycleBinFolder");
+            return;
+        }
+        if (kind == render::DockBarItemKind::Folder) {
+            (void)icon_origin;
+            ToggleDockStack(idx);
+            return;
+        }
+
+        // Running app: live-filter windows (rejects destroyed/invisible/cloaked UWP hosts like Settings/Calc!)
+        if (!force_new_instance && item.running) {
+            auto collect_live = [](const std::vector<HWND>& raw) {
+                std::vector<HWND> out;
+                for (HWND wh : raw) {
+                    if (render::LiquidDockBarState::IsWindowLiveForActivation(wh)) out.push_back(wh);
+                }
+                return out;
+            };
+            std::vector<HWND> live_wins = collect_live(item.windows);
+            if (live_wins.empty()) {
+                // Re-scan once in case the app created/replaced its HWND within the last heartbeat interval.
+                RefreshLiquidDockBar(false, false);
+                const int re_idx = live_data_.dock.FindItemIndexByKey(key);
+                if (re_idx >= 0 && static_cast<size_t>(re_idx) < live_data_.dock.items.size()) {
+                    live_wins = collect_live(live_data_.dock.items[static_cast<size_t>(re_idx)].windows);
+                }
+            }
+
+            if (!live_wins.empty()) {
+                const HWND fg_now = GetForegroundWindow();
+                const HWND prev_ext = last_external_fg_hwnd_;
+                last_external_fg_hwnd_ = nullptr;
+                const HWND fg_check = (fg_now && fg_now != mount_.Hwnd()) ? fg_now : prev_ext;
+                const HWND fg_owner = fg_check ? GetAncestor(fg_check, GA_ROOTOWNER) : nullptr;
+
+                bool was_front = false;
+                std::vector<HWND> visible_wins;
+                HWND first_iconic = nullptr;
+                for (HWND wh : live_wins) {
+                    const bool iconic = IsIconic(wh) != FALSE;
+                    if (!iconic && fg_check && (wh == fg_check || wh == fg_owner)) {
+                        was_front = true;
+                    }
+                    if (iconic) {
+                        if (!first_iconic) first_iconic = wh;
+                    } else {
+                        visible_wins.push_back(wh);
+                    }
+                }
+
+                // If this app was literally the active front app right before clicking the Dock, collapse it into the Dock icon!
+                if (allow_minimize_if_front && was_front && !visible_wins.empty()) {
+                    MinimizeWindowWithGenie(visible_wins.front(), static_cast<int>(idx), /*already_minimizing_from_os=*/false);
+                    for (size_t wi = 1; wi < visible_wins.size(); ++wi) {
+                        ShowWindowAsync(visible_wins[wi], SW_MINIMIZE);
+                    }
+                    return;
+                }
+
+                if (!visible_wins.empty()) {
+                    // Bring all visible windows of this app forward back-to-front (matching macOS & WacOS).
+                    for (size_t wi = visible_wins.size(); wi > 1; --wi) {
+                        SetWindowPos(visible_wins[wi - 1], HWND_TOP, 0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                    }
+                    ActivateWindowReliably(visible_wins.front());
+                    return;
+                }
+                if (first_iconic) {
+                    RestoreWindowWithGenie(first_iconic, static_cast<int>(idx));
+                    return;
+                }
+            }
+        }
+
+        if (!launch_path.empty()) {
+            std::wstring args;
+            if (force_new_instance && SupportsNewWindowArg(launch_path)) {
+                args = L"--new-window";
+            } else if (IsExplorerExePath(launch_path)) {
+                args = L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+            }
+            LaunchDetached(launch_path, args);
+            if (mount_.Hwnd()) {
+                SetTimer(mount_.Hwnd(), kTimerDockFollowup, 450, nullptr);
+            }
+        }
+    }
+
+    void OpenDockBarContextMenu(int hit_idx, POINT scr) {
+        overlays::ContextMenuSpec spec{};
+        spec.target_kind = overlays::ContextMenuTargetKind::DockBar;
+        spec.screen_anchor = scr;
+        spec.dock_item_index = hit_idx;
+        if (hit_idx >= 0 && static_cast<size_t>(hit_idx) < live_data_.dock.items.size() &&
+            live_data_.dock.items[static_cast<size_t>(hit_idx)].kind == render::DockBarItemKind::Trash) {
+            SHQUERYRBINFO rb_info{sizeof(rb_info)};
+            if (SUCCEEDED(SHQueryRecycleBinW(nullptr, &rb_info))) {
+                live_data_.dock.trash_not_empty = (rb_info.i64NumItems > 0);
+                if (dock_trash_state_) dock_trash_state_->cached.store(live_data_.dock.trash_not_empty ? 1 : 0);
+            }
+        }
+        spec.recycle_bin_empty = !live_data_.dock.trash_not_empty;
+        if (hit_idx >= 0 && static_cast<size_t>(hit_idx) < live_data_.dock.items.size()) {
+            const auto& it = live_data_.dock.items[static_cast<size_t>(hit_idx)];
+            spec.dock_item_key = it.key;
+            spec.dock_item_aumid = it.aumid;
+            spec.dock_item_kind = static_cast<uint8_t>(it.kind);
+            spec.target_path = it.launch_path;
+            spec.target_name = it.title;
+            spec.dock_item_pinned = it.pinned && it.key != L"special:downloads";
+            spec.dock_item_running = it.running;
+            bool any_visible = false;
+            bool all_minimized = !it.windows.empty();
+            for (HWND wh : it.windows) {
+                if (!render::LiquidDockBarState::IsWindowLiveForActivation(wh)) continue;
+                if (IsIconic(wh)) {
+                    // stays minimized
+                } else {
+                    any_visible = true;
+                    all_minimized = false;
+                }
+            }
+            spec.dock_item_has_visible_window = any_visible;
+            spec.dock_item_minimized = all_minimized;
+            const HWND active_ref = (last_external_fg_hwnd_ && IsWindow(last_external_fg_hwnd_))
+                ? last_external_fg_hwnd_
+                : GetForegroundWindow();
+            spec.dock_active_hwnd = reinterpret_cast<uint64_t>(active_ref);
+
+            if (it.kind == render::DockBarItemKind::App && !it.windows.empty()) {
+                for (HWND wh : it.windows) {
+                    if (spec.dock_item_windows.size() >= 6) break;
+                    if (!render::LiquidDockBarState::IsWindowLiveForActivation(wh)) continue;
+                    wchar_t buf[128]{};
+                    GetWindowTextW(wh, buf, ARRAYSIZE(buf));
+                    std::wstring wt = buf[0] ? std::wstring(buf) : it.title;
+                    if (wt.size() > 36) wt = wt.substr(0, 35) + L"…";
+                    spec.dock_item_windows.emplace_back(reinterpret_cast<uint64_t>(wh), std::move(wt));
+                }
+            } else if (it.kind == render::DockBarItemKind::Folder && it.key == L"special:downloads") {
+                if (!live_data_.download_items.empty()) {
+                    for (const auto& dl : live_data_.download_items) {
+                        if (spec.dock_recent_downloads.size() >= 8) break;
+                        std::wstring nm = dl.name;
+                        if (nm.size() > 34) nm = nm.substr(0, 33) + L"…";
+                        spec.dock_recent_downloads.emplace_back(dl.path, std::move(nm));
+                    }
+                } else if (!live_data_.dock.downloads_path.empty()) {
+                    // Scan recent downloads directly even when Desktop Widgets are disabled.
+                    struct DlFile { uint64_t ts; std::wstring path; std::wstring name; };
+                    std::vector<DlFile> found;
+                    WIN32_FIND_DATAW fd{};
+                    HANDLE hf = FindFirstFileW((live_data_.dock.downloads_path + L"\\*").c_str(), &fd);
+                    if (hf != INVALID_HANDLE_VALUE) {
+                        do {
+                            if (fd.cFileName[0] == L'.') continue;
+                            if (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) continue;
+                            const uint64_t ts = (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
+                                                static_cast<uint64_t>(fd.ftLastWriteTime.dwLowDateTime);
+                            found.push_back({ts, live_data_.dock.downloads_path + L"\\" + fd.cFileName, fd.cFileName});
+                        } while (FindNextFileW(hf, &fd) && found.size() < 64);
+                        FindClose(hf);
+                    }
+                    std::sort(found.begin(), found.end(),
+                              [](const DlFile& a, const DlFile& b) { return a.ts > b.ts; });
+                    for (size_t i = 0; i < std::min<size_t>(8, found.size()); ++i) {
+                        std::wstring nm = found[i].name;
+                        if (nm.size() > 34) nm = nm.substr(0, 33) + L"…";
+                        spec.dock_recent_downloads.emplace_back(found[i].path, std::move(nm));
+                    }
+                }
+            }
+        }
+        overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+        overlays_.SetHostMaterial(interaction_.host_material);
+        overlays_.OpenContextMenu(spec, state_.settings);
+        SyncOverlayInteractionFlags();
+    }
+
+    bool HasActiveMotion() const noexcept {
+        return !tile_springs_.Empty() || !group_springs_.Empty() ||
+               tile_ghost_.visible || group_ghost_.visible ||
+               HasActiveDockMotion(NowAnimMs());
+    }
+
+    render::DockLayoutInput MakeDockLayoutInput(const std::string& tile_id, double now_ms) const noexcept {
+        render::DockLayoutInput in{};
+        in.apps_page = interaction_.apps_page;
+        in.pressed_app_index = interaction_.pressed_app_index;
+        if (interaction_.dock_anim_tile_id == tile_id && interaction_.dock_hover_presence > 0.001f) {
+            in.hover_presence = interaction_.dock_hover_presence;
+            in.smooth_cursor_x = interaction_.dock_smooth_cursor_x;
+            in.cursor_y = interaction_.dock_cursor_y;
+        }
+        if (!interaction_.dock_bounce_path.empty() &&
+            render::IsDockBounceActive(interaction_.dock_bounce_start_ms, now_ms)) {
+            const auto apps = AppsInTile();
+            for (size_t i = 0; i < apps.size(); ++i) {
+                if (state_.items[apps[i]].path == interaction_.dock_bounce_path) {
+                    in.bouncing_app_index = static_cast<int>(i);
+                    in.bounce_offset_dip = render::EvaluateDockBounceDip(interaction_.dock_bounce_start_ms, now_ms);
+                    break;
+                }
+            }
+        }
+        return in;
+    }
+
+    void InvalidateDockTile(const std::string& tile_id) noexcept {
+        if (tile_id.empty()) return;
+        for (const auto& t : state_.tiles) {
+            if (t.id != tile_id) continue;
+            const model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
+            renderer_.InvalidateRect({tr.x - 44, tr.y - 78, tr.w + 88, tr.h + 108});
+            return;
+        }
+    }
+
+    void RefreshDockAppMetadata() {
+        std::unordered_set<std::wstring> active_paths;
+        for (const auto& it : state_.items) {
+            if (!it.in_apps_tile) continue;
+            active_paths.insert(it.path);
+            if (!live_data_.app_exe_basenames.contains(it.path)) {
+                live_data_.app_exe_basenames[it.path] = render::ResolveShortcutExeBasename(it.path);
+            }
+        }
+        for (auto it = live_data_.app_exe_basenames.begin(); it != live_data_.app_exe_basenames.end();) {
+            if (!active_paths.contains(it->first)) it = live_data_.app_exe_basenames.erase(it);
+            else ++it;
+        }
+    }
+
+    void RefreshDockRunningApps(bool invalidate_if_changed) {
+        if (!model::BoardHasKind(state_.tiles, model::TileKind::Apps)) return;
+        RefreshDockAppMetadata();
+        auto snap = render::QueryRunningAppSnapshot();
+        const bool changed = (snap.running_exes != live_data_.running_app_exes) ||
+                             (snap.active_exe != live_data_.active_app_exe);
+        if (!changed) return;
+        live_data_.running_app_exes = std::move(snap.running_exes);
+        live_data_.active_app_exe = std::move(snap.active_exe);
+        if (invalidate_if_changed) {
+            for (const auto& t : state_.tiles) {
+                if (model::ActiveTileView(t).kind == model::TileKind::Apps) {
+                    InvalidateDockTile(t.id);
+                }
+            }
+        }
+    }
+
+    void UpdateDesktopActivity() noexcept {
+        const HWND fg = GetForegroundWindow();
+        const bool fg_is_desktop = video::IsForegroundDesktopShell(
+            fg, mount_.Hwnd(), overlays_.OverlayHwnd(), GetCurrentProcessId());
+        const bool automatic_pause = state_.settings.pause_on_fullscreen_or_battery &&
+            (render::DesktopRenderer::ShouldPauseLiveActivity(true, fg_is_desktop) ||
+             video::IsWindowCoveringDesktop(fg, mount_.Hwnd(), overlays_.OverlayHwnd(), GetCurrentProcessId()));
+        const bool suspended = session_locked_ || display_off_ || automatic_pause;
+        if (suspended != renderer_.ActivitySuspended()) {
+            renderer_.SetActivitySuspended(suspended);
+            suspended_since_ms_ = suspended ? GetTickCount64() : 0;
+            suspended_resources_trimmed_ = false;
+            if (suspended && !dock_genie_.IsActive()) StopAnimClock();
+            SyncHoverGlassTimer();
+        }
+        if (suspended && !suspended_resources_trimmed_ && suspended_since_ms_ &&
+            GetTickCount64() - suspended_since_ms_ >= 30000) {
+            overlays_.TrimIdleResources();
+            renderer_.Backdrop().ReleaseMenuMaterialCache();
+            renderer_.TrimDxgiMemory();
+            suspended_resources_trimmed_ = true;
+        }
+    }
+
+    void StartAnimClock() noexcept {
+        if (renderer_.ActivitySuspended() && !dock_genie_.IsActive()) return;
+        if (vsync_wake_event_) {
+            if (!vsync_active_.load()) {
+                last_motion_ms_ = NowAnimMs();
+                vsync_frame_pending_.store(false);
+                vsync_active_.store(true);
+                SetEvent(vsync_wake_event_);
+            }
+            return;
+        }
+        SyncHoverGlassTimer();
+    }
+
+    void StopAnimClock() noexcept {
+        if (vsync_wake_event_) {
+            vsync_active_.store(false);
+            ResetEvent(vsync_wake_event_);
+        }
     }
 
     void SyncHoverGlassTimer() noexcept {
         const HWND hwnd = mount_.Hwnd();
         if (!hwnd) return;
-        const bool want = renderer_.HasDirtyWork();
+        const bool want = dock_genie_.IsActive() ||
+                          (!renderer_.ActivitySuspended() && (renderer_.HasDirtyWork() || HasActiveMotion()));
+        if (vsync_wake_event_) {
+            if (want) StartAnimClock();
+            else StopAnimClock();
+            if (hover_glass_timer_active_) {
+                KillTimer(hwnd, kTimerHoverGlass);
+                hover_glass_timer_active_ = false;
+            }
+            return;
+        }
         if (want && !hover_glass_timer_active_) {
             SetTimer(hwnd, kTimerHoverGlass, 16, nullptr);
             hover_glass_timer_active_ = true;
@@ -1592,6 +3260,221 @@ private:
             KillTimer(hwnd, kTimerHoverGlass);
             hover_glass_timer_active_ = false;
         }
+    }
+
+    bool TickMotionAnimations(double now_ms) {
+        const double dt_ms = (last_motion_ms_ <= 0.0)
+            ? 16.0
+            : std::clamp(now_ms - last_motion_ms_, 4.0, 50.0);
+        last_motion_ms_ = now_ms;
+
+        const bool had_drag_motion = !tile_springs_.Empty() || !group_springs_.Empty() ||
+                                     tile_ghost_.visible || group_ghost_.visible;
+        const bool had_dock_motion = HasActiveDockMotion(now_ms);
+        if (!had_drag_motion && !had_dock_motion) return false;
+
+        bool tiles_moving = false;
+        bool groups_moving = false;
+        bool tile_ghost_active = false;
+        bool group_ghost_active = false;
+        if (had_drag_motion) {
+            const auto before = CaptureDragDamage();
+            tiles_moving = tile_springs_.Step(now_ms, interaction_.tile_anim_positions);
+            groups_moving = group_springs_.Step(now_ms, interaction_.group_anim_positions);
+            tile_ghost_active = tile_ghost_.Step(dt_ms, interaction_.dragging_tile, tiles_moving);
+            group_ghost_active = group_ghost_.Step(dt_ms, interaction_.dragging_group, groups_moving);
+
+            interaction_.drag_tile_preview_rect = tile_ghost_.CurrentRect();
+            interaction_.drag_tile_merge_armed = tile_ghost_.merge_armed;
+            interaction_.drag_group_preview_rect = group_ghost_.CurrentRect();
+            interaction_.drag_group_merge_armed = group_ghost_.merge_armed;
+
+            InvalidateDragDamage(before);
+        }
+
+        // Liquid Glass Dock fisheye magnification, floating tooltip fade, and 3-hop launch bounce.
+        bool dock_active = false;
+        if (had_dock_motion) {
+            const float dt_sec = static_cast<float>(dt_ms / 1000.0);
+            const std::string prev_tile = interaction_.dock_anim_tile_id;
+            const float prev_pres = interaction_.dock_hover_presence;
+            const float prev_cx = interaction_.dock_smooth_cursor_x;
+            const float prev_cy = interaction_.dock_cursor_y;
+            const float prev_tip = interaction_.dock_tooltip_alpha;
+            const int prev_tip_idx = interaction_.dock_tooltip_index;
+
+            if (dock_target_hover_ && !dock_target_tile_id_.empty()) {
+                if (interaction_.dock_anim_tile_id != dock_target_tile_id_) {
+                    InvalidateDockTile(prev_tile);
+                    interaction_.dock_anim_tile_id = dock_target_tile_id_;
+                    interaction_.dock_smooth_cursor_x = dock_target_cursor_x_;
+                }
+                interaction_.dock_cursor_y = dock_target_cursor_y_;
+            }
+
+            const float target_pres = dock_target_hover_ ? 1.0f : 0.0f;
+            const float kp = 1.0f - std::exp(-dt_sec * 16.0f);
+            interaction_.dock_hover_presence += (target_pres - interaction_.dock_hover_presence) * kp;
+            if (std::fabs(target_pres - interaction_.dock_hover_presence) < 0.002f) {
+                interaction_.dock_hover_presence = target_pres;
+            }
+
+            if (dock_target_hover_) {
+                const float kx = 1.0f - std::exp(-dt_sec * 24.0f);
+                interaction_.dock_smooth_cursor_x += (dock_target_cursor_x_ - interaction_.dock_smooth_cursor_x) * kx;
+                if (std::fabs(dock_target_cursor_x_ - interaction_.dock_smooth_cursor_x) < 0.25f) {
+                    interaction_.dock_smooth_cursor_x = dock_target_cursor_x_;
+                }
+            }
+
+            const bool want_tip = dock_target_hover_ && (dock_target_hovered_idx_ >= 0);
+            if (want_tip) {
+                interaction_.dock_hovered_index = dock_target_hovered_idx_;
+                interaction_.dock_tooltip_index = dock_target_hovered_idx_;
+            } else {
+                interaction_.dock_hovered_index = -1;
+            }
+            const float tip_target = want_tip ? 1.0f : 0.0f;
+            const float kt = 1.0f - std::exp(-dt_sec * 18.0f);
+            interaction_.dock_tooltip_alpha += (tip_target - interaction_.dock_tooltip_alpha) * kt;
+            if (std::fabs(tip_target - interaction_.dock_tooltip_alpha) < 0.004f) {
+                interaction_.dock_tooltip_alpha = tip_target;
+                if (!want_tip) interaction_.dock_tooltip_index = -1;
+            }
+
+            interaction_.dock_now_ms = now_ms;
+            const bool bouncing = render::IsDockBounceActive(interaction_.dock_bounce_start_ms, now_ms);
+            if (!bouncing && !interaction_.dock_bounce_path.empty()) {
+                interaction_.dock_bounce_path.clear();
+                interaction_.dock_bounce_start_ms = 0.0;
+                for (const auto& t : state_.tiles) {
+                    if (model::ActiveTileView(t).kind == model::TileKind::Apps) InvalidateDockTile(t.id);
+                }
+            }
+
+            const bool visual_changed =
+                bouncing ||
+                std::fabs(interaction_.dock_hover_presence - prev_pres) > 0.0005f ||
+                std::fabs(interaction_.dock_smooth_cursor_x - prev_cx) > 0.1f ||
+                std::fabs(interaction_.dock_cursor_y - prev_cy) > 0.5f ||
+                std::fabs(interaction_.dock_tooltip_alpha - prev_tip) > 0.001f ||
+                interaction_.dock_tooltip_index != prev_tip_idx;
+
+            if (visual_changed) {
+                if (!interaction_.dock_anim_tile_id.empty()) {
+                    InvalidateDockTile(interaction_.dock_anim_tile_id);
+                } else {
+                    for (const auto& t : state_.tiles) {
+                        if (model::ActiveTileView(t).kind == model::TileKind::Apps) InvalidateDockTile(t.id);
+                    }
+                }
+            }
+
+            const bool hover_settling = std::fabs(target_pres - interaction_.dock_hover_presence) >= 0.002f;
+            const bool cursor_settling = dock_target_hover_ &&
+                std::fabs(dock_target_cursor_x_ - interaction_.dock_smooth_cursor_x) >= 0.25f;
+            const bool tip_settling = std::fabs(tip_target - interaction_.dock_tooltip_alpha) >= 0.004f;
+            dock_active = bouncing || hover_settling || cursor_settling || tip_settling;
+            if (!dock_target_hover_ && !hover_settling && !tip_settling && !bouncing) {
+                interaction_.dock_anim_tile_id.clear();
+            }
+        }
+
+        // Bottom-center Liquid Glass Dock bar: smooth vertical collapse/expand reveal slide,
+        // icon enter/exit slot expand/collapse, fisheye magnification, tooltip fade, bounce, poof,
+        // and D3D11 Genie/Scale window minimize/restore warp overlay.
+        bool dock_bar_active = false;
+        if (dock_genie_.Tick(now_ms)) {
+            dock_bar_active = true;
+        }
+        if ((state_.settings.dock_enabled || dock_bar_reveal_ > 0.002f) && HasActiveDockBarMotion(now_ms)) {
+            const float dt_sec = static_cast<float>(dt_ms / 1000.0);
+            const model::RectI wa = PrimaryWorkAreaClient();
+            const model::RectI before_dmg = live_data_.dock.DamageRect(wa);
+            bool bar_changed = false;
+
+            // 1. macOS 0.30s EaseInOutCubic vertical reveal (1) <-> collapse (0) slide
+            const float target_reveal = TargetDockReveal();
+            if (std::fabs(target_reveal - dock_bar_reveal_) > 0.0005f) {
+                const float step = dt_sec / 0.30f;
+                if (target_reveal > dock_bar_reveal_) {
+                    dock_bar_reveal_ = std::min(target_reveal, dock_bar_reveal_ + step);
+                } else {
+                    dock_bar_reveal_ = std::max(target_reveal, dock_bar_reveal_ - step);
+                }
+                interaction_.dock_bar_reveal = dock_bar_reveal_;
+                bar_changed = true;
+                if (std::fabs(target_reveal - dock_bar_reveal_) > 0.001f) {
+                    dock_bar_active = true;
+                }
+            }
+
+            const float target_pres = (dock_bar_pointer_inside_ && !dock_bar_sys_hover_ && dock_bar_reveal_ > 0.7f) ? 1.0f : 0.0f;
+            const float kp = dock_bar_pointer_inside_ ? 18.0f : 12.0f;
+            const float next_pres = dock_bar_hover_presence_ + (target_pres - dock_bar_hover_presence_) * (1.0f - std::exp(-dt_sec * kp));
+            if (std::fabs(next_pres - dock_bar_hover_presence_) > 0.001f) {
+                dock_bar_hover_presence_ = next_pres;
+                bar_changed = true;
+                dock_bar_active = true;
+            } else if (std::fabs(target_pres - dock_bar_hover_presence_) > 0.0005f) {
+                dock_bar_hover_presence_ = target_pres;
+                bar_changed = true;
+            }
+
+            if (dock_bar_pointer_inside_ && dock_bar_target_x_ >= 0.0f) {
+                if (dock_bar_smooth_x_ < 0.0f) {
+                    dock_bar_smooth_x_ = dock_bar_target_x_;
+                    bar_changed = true;
+                } else {
+                    const float next_x = dock_bar_smooth_x_ + (dock_bar_target_x_ - dock_bar_smooth_x_) * (1.0f - std::exp(-dt_sec * 28.0f));
+                    if (std::fabs(next_x - dock_bar_smooth_x_) > 0.08f) {
+                        dock_bar_smooth_x_ = next_x;
+                        bar_changed = true;
+                        dock_bar_active = true;
+                    } else {
+                        dock_bar_smooth_x_ = dock_bar_target_x_;
+                    }
+                }
+            }
+
+            const bool want_tip = dock_bar_pointer_inside_ && dock_bar_reveal_ > 0.85f && (dock_bar_hovered_idx_ >= 0);
+            if (want_tip) interaction_.dock_bar_tooltip_index = dock_bar_hovered_idx_;
+            const float target_tip = want_tip ? 1.0f : 0.0f;
+            const float next_tip = interaction_.dock_bar_tooltip_alpha + (target_tip - interaction_.dock_bar_tooltip_alpha) * (1.0f - std::exp(-dt_sec * 18.0f));
+            if (std::fabs(next_tip - interaction_.dock_bar_tooltip_alpha) > 0.004f) {
+                interaction_.dock_bar_tooltip_alpha = next_tip;
+                bar_changed = true;
+                dock_bar_active = true;
+            } else {
+                if (std::fabs(target_tip - interaction_.dock_bar_tooltip_alpha) > 0.0005f) bar_changed = true;
+                interaction_.dock_bar_tooltip_alpha = target_tip;
+                if (interaction_.dock_bar_tooltip_alpha <= 0.01f) interaction_.dock_bar_tooltip_index = -1;
+            }
+
+            const bool slots_moving = live_data_.dock.HasActiveSlotMotion(now_ms);
+            if (live_data_.dock.HasActiveBounce(now_ms) ||
+                live_data_.dock.HasActivePoof(now_ms) ||
+                slots_moving ||
+                interaction_.dock_bar_drag.active) {
+                bar_changed = true;
+                dock_bar_active = true;
+            } else if (!live_data_.dock.leaving_ghosts.empty()) {
+                // Prune finished shrinking ghosts once their collapse animation completes.
+                RefreshLiquidDockBar(false, false);
+                bar_changed = true;
+            }
+
+            if (bar_changed) {
+                interaction_.dock_now_ms = now_ms;
+                live_data_.dock.ComputeGeometry(
+                    wa, state_.settings, dock_bar_smooth_x_, dock_bar_hover_presence_, now_ms,
+                    interaction_.dock_bar_drag.active ? &interaction_.dock_bar_drag : nullptr, dt_sec,
+                    dock_bar_reveal_);
+                InvalidateDockBar(before_dmg);
+            }
+        }
+
+        return tiles_moving || groups_moving || tile_ghost_active || group_ghost_active || dock_active || dock_bar_active;
     }
 
     static std::wstring PresetWallpaperPngPath() {
@@ -1756,6 +3639,12 @@ private:
             model::ApplyWidgetDefaults(state_);
             if (state_.todos.empty() && saved.find("\"todos\"") == std::string::npos) state_.todos = model::MakeDefaultTodos();
             if (state_.settings.weather_city.empty()) state_.settings.weather_city = L"北京";
+#ifndef PULSE_DESKTOP_PERSISTENCE_TEST
+            if (saved.find("\"dock_enabled\"") == std::string::npos) {
+                state_.settings.dock_enabled = true;
+            }
+            MigrateLegacyAppsTileToDock();
+#endif
             return;
         }
         const model::RectI wa = state_.monitors.empty()
@@ -1766,6 +3655,10 @@ private:
         state_.todos = model::MakeDefaultTodos();
         state_.settings.weather_city = L"北京";
         state_.widget_defaults_applied = true;
+#ifndef PULSE_DESKTOP_PERSISTENCE_TEST
+        state_.settings.dock_enabled = true;
+        MigrateLegacyAppsTileToDock();
+#endif
     }
 
     std::string CommittedModelJson() const {
@@ -2161,6 +4054,8 @@ private:
         if (live_data_.drives.empty()) {
             live_data_.drives = {mount::QueryDriveSpaceStats(L"C:\\")};
         }
+        RefreshDockRunningApps(false);
+        RefreshLiquidDockBar(false);
     }
 
     void ApplySystemAppearance() {
@@ -2196,15 +4091,47 @@ private:
         const bool show_board = state_.settings.tiles_enabled &&
                                 state_.settings.organize_enabled &&
                                 !interaction_.side_drawer_open;
-        return model::CollectTileObstacleRects(state_.tiles, tile_board_rect_, show_board);
+        auto rects = model::CollectTileObstacleRects(state_.tiles, tile_board_rect_, show_board);
+        if (state_.settings.dock_enabled && !interaction_.side_drawer_open) {
+            const model::RectI dock_rc = live_data_.dock.RestingObstacleRect();
+            if (!dock_rc.empty()) rects.push_back(dock_rc);
+        }
+        return rects;
     }
 
     model::DragDamageSnapshot CaptureDragDamage() const {
         model::DragDamageSnapshot snapshot;
-        snapshot.frames = CurrentGroupFrames();
-        const auto tiles = CurrentTileObstacles();
-        snapshot.frames.insert(snapshot.frames.end(), tiles.begin(), tiles.end());
-        snapshot.preview = interaction_.dragging_tile ? interaction_.drag_tile_preview_rect : model::RectI{};
+        const bool focus_scene = (state_.settings.active_scene == model::DesktopScene::Focus);
+        for (size_t i = 0; i < group_views_.size() && i < state_.groups.size(); ++i) {
+            model::RectI f = group_views_[i].frame;
+            if (f.empty()) continue;
+            if (auto it = interaction_.group_anim_positions.find(state_.groups[i].id);
+                it != interaction_.group_anim_positions.end()) {
+                f.x = it->second.x;
+                f.y = it->second.y;
+            }
+            if (state_.groups[i].collapsed || (focus_scene && !state_.groups[i].focus_visible)) {
+                f.h = model::kGroupHeaderHeight;
+            }
+            snapshot.frames.push_back(f);
+        }
+        if (state_.settings.tiles_enabled && state_.settings.organize_enabled && !interaction_.side_drawer_open) {
+            for (const auto& t : state_.tiles) {
+                model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
+                if (auto it = interaction_.tile_anim_positions.find(t.id);
+                    it != interaction_.tile_anim_positions.end()) {
+                    tr.x = it->second.x;
+                    tr.y = it->second.y;
+                }
+                // Include generous ambient shadow & Dock tooltip/magnification bounds.
+                const bool is_dock = (model::ActiveTileView(t).kind == model::TileKind::Apps);
+                snapshot.frames.push_back(is_dock
+                    ? model::RectI{tr.x - 44, tr.y - 78, tr.w + 88, tr.h + 114}
+                    : model::RectI{tr.x - 40, tr.y - 32, tr.w + 80, tr.h + 88});
+            }
+        }
+        snapshot.frames.push_back(interaction_.drag_group_preview_rect);
+        snapshot.preview = interaction_.drag_tile_preview_rect;
         snapshot.stack_target = interaction_.stack_drop_target_tile_id;
         return snapshot;
     }
@@ -2212,8 +4139,8 @@ private:
     void InvalidateDragDamage(const model::DragDamageSnapshot& before) {
         const auto damage = model::ComputeDragDamage(before, CaptureDragDamage());
         if (damage.empty()) return;
-        // Native acrylic records the complete card visual list each frame.
-        if (renderer_.NativeAcrylicActive()) renderer_.InvalidateAll();
+        // Native acrylic records the complete card visual list only when Acrylic visuals are active.
+        if (renderer_.NativeAcrylicVisualCount() > 0) renderer_.InvalidateAll();
         else renderer_.InvalidateRect(damage);
     }
 
@@ -2266,6 +4193,10 @@ private:
         if (index >= state_.groups.size()) return;
         CancelTileDrag(false);
         if (group_hover_.Pending()) { group_hover_.Reset(); RefreshGroupViews(); }
+        for (size_t member : model::TabMembers(state_.groups, state_.groups[index].id)) {
+            group_springs_.Cancel(state_.groups[member].id);
+            interaction_.group_anim_positions.erase(state_.groups[member].id);
+        }
         drag_group_undo_snapshot_ = state_;
         group_drag_session_.Begin(state_.groups, group_views_, index, {x, y}, resize,
                                   PrimaryWorkAreaClient(), state_.settings.icon_size, CurrentTileObstacles());
@@ -2278,8 +4209,27 @@ private:
     void UpdateGroupDrag(int x, int y, uint64_t now) {
         if (!group_drag_session_.Pending()) return;
         const auto before = CaptureDragDamage();
+        const bool was_active = group_drag_session_.Active();
         if (group_drag_session_.Update(state_.groups, {x, y}, now)) {
-            if (!group_drag_session_.Resizing()) dragging_group_idx_ = pending_group_idx_;
+            if (!group_drag_session_.Resizing()) {
+                dragging_group_idx_ = pending_group_idx_;
+                interaction_.dragging_group = true;
+                interaction_.dragging_group_id = group_drag_session_.DraggingGroupId();
+                const bool merge_ready = group_drag_session_.MergeReady(now);
+                const model::RectI target_rc = group_drag_session_.TargetRect();
+                if (!was_active && !target_rc.empty()) {
+                    group_ghost_.StartAt(target_rc, 14.0f);
+                } else {
+                    group_ghost_.SetTarget(target_rc, true, merge_ready);
+                }
+                if (!mount_.Hwnd() && group_ghost_.visible) {
+                    group_ghost_.current_x = static_cast<double>(group_ghost_.target.x);
+                    group_ghost_.current_y = static_cast<double>(group_ghost_.target.y);
+                }
+                interaction_.drag_group_preview_rect = group_ghost_.CurrentRect();
+                interaction_.drag_group_merge_armed = merge_ready;
+                StartAnimClock();
+            }
             if (group_drag_session_.Resizing() || !model::UpdateMovedGroupViewOrigins(state_.groups, group_views_))
                 RefreshGroupViews();
             const std::string target = group_drag_session_.MergeReady(now) ? group_drag_session_.MergeTarget() : std::string();
@@ -2295,6 +4245,11 @@ private:
         if (!group_drag_session_.Pending()) return;
         group_drag_session_.Cancel(state_.groups);
         interaction_.drop_target_group_id.clear();
+        interaction_.dragging_group = false;
+        interaction_.dragging_group_id.clear();
+        interaction_.drag_group_preview_rect = {};
+        interaction_.drag_group_merge_armed = false;
+        group_ghost_.Hide();
         pending_group_idx_.reset(); dragging_group_idx_.reset(); resizing_group_idx_.reset();
         pending_group_tab_id_.clear();
         drag_group_undo_snapshot_ = {};
@@ -2304,18 +4259,30 @@ private:
 
     void FinishGroupDrag(int x, int y) {
         if (!group_drag_session_.Pending()) return;
-        UpdateGroupDrag(x, y, GetTickCount64());
+        const uint64_t now = GetTickCount64();
+        UpdateGroupDrag(x, y, now);
         const bool resize = group_drag_session_.Resizing();
-        if (group_drag_session_.MergeReady(GetTickCount64()) && pending_group_idx_ &&
+        const bool was_active = group_drag_session_.Active();
+        const std::string moved_group_id = group_drag_session_.DraggingGroupId();
+        if (group_drag_session_.MergeReady(now) && pending_group_idx_ &&
             model::TabMembers(group_drag_session_.Original(), group_drag_session_.Original()[*pending_group_idx_].id).size() +
             model::TabMembers(group_drag_session_.Original(), group_drag_session_.MergeTarget()).size() > model::kMaxGroupTabs) {
             CancelGroupDrag();
             ShowUndoToast(l10n::Get(l10n::StringId::DesktopGroupTabsFull));
             return;
         }
+        std::unordered_map<std::string, model::PointI> visual_before;
+        if (was_active && !resize) {
+            for (const auto& g : state_.groups) {
+                visual_before[g.id] = {g.x, g.y};
+            }
+        }
+
         interaction_.drop_target_group_id.clear();
+        interaction_.dragging_group = false;
+        interaction_.dragging_group_id.clear();
         bool merged = false;
-        const bool changed = group_drag_session_.Commit(state_.groups, GetTickCount64(), merged);
+        const bool changed = group_drag_session_.Commit(state_.groups, now, merged);
         bool selected = false;
         if (!pending_group_tab_id_.empty()) {
             const auto tab = std::find_if(state_.groups.begin(), state_.groups.end(),
@@ -2336,6 +4303,40 @@ private:
             SaveModel();
         } else RefreshGroupViews();
         drag_group_undo_snapshot_ = {};
+
+        // Reference-aligned SwiftUI spring snap-back from drop position to final snapped slot.
+        if (was_active && !resize && !merged) {
+            const double anim_now = NowAnimMs();
+            bool any_spring = false;
+            model::RectI settled_ghost_rc{};
+            for (size_t i = 0; i < state_.groups.size() && i < group_views_.size(); ++i) {
+                const auto& g = state_.groups[i];
+                if (group_views_[i].frame.empty()) continue;
+                auto it = visual_before.find(g.id);
+                if (it != visual_before.end() && it->second != model::PointI{g.x, g.y}) {
+                    group_springs_.AddOrReplace(g.id, it->second, {g.x, g.y}, anim_now);
+                    interaction_.group_anim_positions[g.id] = it->second;
+                    any_spring = true;
+                }
+                if (g.id == moved_group_id) {
+                    settled_ghost_rc = group_views_[i].frame;
+                }
+            }
+            if (any_spring && !settled_ghost_rc.empty()) {
+                group_ghost_.SetTarget(settled_ghost_rc, true, false);
+                interaction_.drag_group_preview_rect = group_ghost_.CurrentRect();
+                interaction_.drag_group_merge_armed = false;
+                StartAnimClock();
+            } else {
+                group_ghost_.Hide();
+                interaction_.drag_group_preview_rect = {};
+                interaction_.drag_group_merge_armed = false;
+            }
+        } else {
+            group_ghost_.Hide();
+            interaction_.drag_group_preview_rect = {};
+            interaction_.drag_group_merge_armed = false;
+        }
         renderer_.InvalidateAll();
     }
 
@@ -2350,7 +4351,19 @@ private:
                                 state_.settings.organize_enabled &&
                                 !interaction_.side_drawer_open;
         tile_board_rect_ = model::ComputeTileBoardRect(wa, show_board);
-        const auto tile_obs = model::CollectTileObstacleRects(state_.tiles, tile_board_rect_, show_board);
+        if (state_.settings.dock_enabled) {
+            if (!live_data_.dock.HasItems()) {
+                live_data_.dock.apps_stack_enabled = state_.settings.dock_apps_stack;
+                live_data_.dock.RefreshSystemItems(state_.settings.dock_pinned_paths, GetCurrentProcessId(), -1, NowAnimMs());
+            }
+            live_data_.dock.ComputeGeometry(wa, state_.settings, dock_bar_smooth_x_,
+                                            dock_bar_hover_presence_, NowAnimMs(), nullptr, 0.016f, dock_bar_reveal_);
+        }
+        auto tile_obs = model::CollectTileObstacleRects(state_.tiles, tile_board_rect_, show_board);
+        if (state_.settings.dock_enabled && !interaction_.side_drawer_open) {
+            const model::RectI dock_rc = live_data_.dock.RestingObstacleRect();
+            if (!dock_rc.empty()) tile_obs.push_back(dock_rc);
+        }
         model::UpdateAppsTileMembership(state_);
         model::UpdateGroupContentCounts(state_, NowUnixMs());
         model::ResolveGroupCollisions(state_.groups, std::nullopt, wa, model::RectI{}, state_.settings.icon_size, tile_obs);
@@ -2566,17 +4579,41 @@ private:
         auto apply_beautify = [this](const model::BeautifySettings& s, bool dragging) {
             const bool wp_changed = (s.wallpaper_preset != state_.settings.wallpaper_preset) ||
                                     (s.dark_mode != state_.settings.dark_mode);
+            const bool dock_pos_changed = (s.dock_position != state_.settings.dock_position);
+            const bool dock_vis_changed =
+                (s.dock_enabled != state_.settings.dock_enabled) ||
+                (s.dock_hide_mode != state_.settings.dock_hide_mode) ||
+                dock_pos_changed;
             const bool layout_changed =
                 (s.icon_size != state_.settings.icon_size) ||
                 (s.tiles_enabled != state_.settings.tiles_enabled) ||
+                (s.dock_enabled != state_.settings.dock_enabled) ||
+                dock_pos_changed ||
                 (s.organize_enabled != state_.settings.organize_enabled) ||
                 (s.active_scene != state_.settings.active_scene) ||
                 (s.icons_hidden != state_.settings.icons_hidden);
             state_.settings = s;
+            if (dock_pos_changed) {
+                dock_bar_pointer_inside_ = false;
+                dock_bar_hover_presence_ = 0.0f;
+                dock_bar_target_x_ = -1.0f;
+                dock_bar_smooth_x_ = -1.0f;
+                dock_bar_hovered_idx_ = -1;
+                interaction_.dock_bar_hovered = false;
+                interaction_.dock_bar_tooltip_index = -1;
+                interaction_.dock_bar_tooltip_alpha = 0.0f;
+            }
+            if (dock_vis_changed) {
+                dock_bar_last_reveal_touch_ms_ = NowAnimMs();
+                EvaluateDockAutoHide(NowAnimMs());
+                StartAnimClock();
+            }
             if (wp_changed) {
+                RefreshLiveWallpaperState();
                 renderer_.ReloadWallpaper(state_.settings.wallpaper_preset, state_.settings.dark_mode);
                 SyncSystemDesktopWallpaper(state_.settings.wallpaper_preset, state_.settings.dark_mode, false);
             }
+            video_ctrl_.SetGlassLiveRate(state_.settings.glass_live_rate);
             if (!dragging) {
                 overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
             }
@@ -2593,6 +4630,20 @@ private:
             apply_beautify(s, false);
         };
         cb.on_beautify_live_changed = apply_beautify;
+        cb.on_set_video_wallpaper = [this](const std::wstring& path) { SetVideoWallpaperPath(path); };
+        cb.on_pick_video_wallpaper = [this]() { PickAndSetVideoWallpaper(); };
+        cb.on_toggle_video_pause = [this]() { video_ctrl_.ToggleManualPause(); };
+        cb.on_set_video_fill_mode = [this](video::VideoFillMode fm) { video_ctrl_.SetFillMode(fm); };
+        cb.on_cancel_video_optimize = [this]() { video_ctrl_.CancelOptimize(); };
+        cb.on_confirm_heavy_video_optimize = [this]() { video_ctrl_.ConfirmHeavyOptimize(); };
+        cb.on_open_codec_store = [](const std::wstring& uri) {
+            if (!uri.empty()) ShellExecuteW(nullptr, L"open", uri.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        };
+        cb.on_enable_icon_takeover = [this]() {
+            if (mount_.EnableIconTakeover()) {
+                video_ctrl_.SetIconTakeoverActive(true);
+            }
+        };
         cb.on_toggle_widget_tile = [this](model::TileKind wk) {
             PushUndo(L"切换桌面小工具");
             auto it = std::find_if(state_.tiles.begin(), state_.tiles.end(),
@@ -2632,6 +4683,15 @@ private:
             OpenWidgetGallery(wk, std::nullopt);
         };
         cb.on_add_widget_tile = [this](model::TileKind wk, model::TileSize sz, std::optional<model::PointI> target_cell) {
+            if (wk == model::TileKind::Apps) {
+                state_.settings.dock_enabled = true;
+                RefreshLiquidDockBar(false);
+                SaveModel();
+                overlays_.Dismiss();
+                renderer_.InvalidateAll();
+                ShowUndoToast(L"已开启底部液态玻璃程序坞");
+                return;
+            }
             if (model::BoardHasKind(state_.tiles, wk)) {
                 overlays_.UpdateWidgetGalleryTiles(state_.tiles);
                 return;
@@ -2695,6 +4755,15 @@ private:
 
             if (wk == model::TileKind::Weather) RequestWeather(true);
             if (wk == model::TileKind::System) SampleSystemMetrics();
+            if (wk == model::TileKind::MediaPlayer) {
+                media_monitor_.SetEnabled(true);
+                media_monitor_.RequestRefresh();
+            }
+            if (wk == model::TileKind::Battery) {
+                live_data_.battery = live::SampleBatteryPower(true);
+                last_battery_sample_ms_ = GetTickCount64();
+                last_bt_sample_ms_ = last_battery_sample_ms_;
+            }
             RefreshLiveTileData();
             RecomputeLayout();
             SaveModel();
@@ -2757,6 +4826,49 @@ private:
                 }
                 SaveModel();
                 renderer_.InvalidateAll();
+                return;
+            }
+            if (tid.starts_with("@countdown_title:")) {
+                const std::string target_id = tid.substr(17);
+                std::wstring line = body.substr(0, body.find(L'\n'));
+                while (!line.empty() && (line.back() == L' ' || line.back() == L'\r')) line.pop_back();
+                for (auto& t : state_.tiles) {
+                    if (t.id == target_id) {
+                        t.title = line.empty() ? L"倒数日" : line;
+                        t.look.title_override.clear();
+                        break;
+                    }
+                }
+                SaveModel();
+                RefreshWidgetDetail(model::TileKind::Countdown);
+                renderer_.InvalidateAll();
+                return;
+            }
+            if (tid.starts_with("@countdown_date:")) {
+                const std::string target_id = tid.substr(16);
+                std::wstring line = body.substr(0, body.find(L'\n'));
+                while (!line.empty() && (line.back() == L' ' || line.back() == L'\r')) line.pop_back();
+                while (!line.empty() && line.front() == L' ') line.erase(line.begin());
+                int y = 0, m = 0, d = 0;
+                if (line.empty() || live::ParseIsoDate(line, y, m, d)) {
+                    for (auto& t : state_.tiles) {
+                        if (t.id == target_id) {
+                            if (line.empty()) {
+                                t.countdown_date.clear();
+                            } else {
+                                wchar_t iso[16]{};
+                                std::swprintf(iso, ARRAYSIZE(iso), L"%04d-%02d-%02d", y, m, d);
+                                t.countdown_date = iso;
+                            }
+                            break;
+                        }
+                    }
+                    SaveModel();
+                    RefreshWidgetDetail(model::TileKind::Countdown);
+                    renderer_.InvalidateAll();
+                } else {
+                    ShowUndoToast(L"日期格式应为 YYYY-MM-DD（如 2027-01-01）");
+                }
                 return;
             }
             if (tid == "@todos") {
@@ -2846,9 +4958,40 @@ private:
             if (!RequireAiOrganizerEnabled()) return;
             OpenPathInPulseOrShell(mount::ResolveKnownFolder(FOLDERID_Desktop));
         };
+        cb.on_dock_volume_changed = [this](int new_vol_pct, bool /*dragging*/) {
+            live_data_.dock.sys_snap.volume_pct = std::clamp(new_vol_pct, 0, 100);
+            live_data_.dock.sys_snap.muted = (new_vol_pct <= 0);
+            live::SetMasterAudioVolume(new_vol_pct);
+            InvalidateDockBar();
+        };
+        cb.on_dock_panel_action = [this](const std::string& cmd) {
+            HandleDockSystemPanelAction(cmd);
+        };
+        cb.on_render_widget_preview = [this](model::TileKind kind, model::TileSize size, std::vector<uint8_t>& bgra,
+                                             uint32_t& w, uint32_t& h) -> bool {
+            // A small renderer of its own, alive only while the 添加小组件 drawer is open.
+            if (!preview_renderer_) {
+                preview_renderer_ = std::make_unique<render::DesktopRenderer>();
+                if (!preview_renderer_->InitializeOffscreen(4 * model::kTileUnitPx + 3 * model::kTileGapPx + 16,
+                                                            4 * model::kTileUnitPx + 3 * model::kTileGapPx + 16)) {
+                    preview_renderer_.reset();
+                    return false;
+                }
+            }
+            model::DesktopTile t{};
+            t.id = "gallery-preview";
+            t.kind = kind;
+            t.size = size;
+            t.live_content = true;
+            t.analog_clock = true;
+            return preview_renderer_->RenderTilePixels(t, state_, live_data_, bgra, w, h);
+        };
         cb.on_overlay_dismissed = [this]() {
+            preview_renderer_.reset();  // the drawer's preview renderer goes with it
             last_activity_tick_ = GetTickCount64();
             working_set_trimmed_ = false;
+            interaction_.dock_sys_open_kind = render::DockSysSlotKind::None;
+            interaction_.dock_sys_open_tray_idx = -1;
             if (active_ai_session_) {
                 active_ai_session_->Cancel();
                 active_ai_session_.reset();
@@ -2864,6 +5007,7 @@ private:
 
         overlays_.Initialize(std::move(cb));
         overlays_.SetBackdropSource(&renderer_.Backdrop(), renderer_.DeviceContext());
+        overlays_.SetLiveWallpaperSource(&renderer_.LiveWallpaper(), renderer_.D2dDevice());
     }
 
     void SetupDropTarget() {
@@ -2871,6 +5015,18 @@ private:
         dcb.hit_test_zone = [this](model::PointI pt) {
             overlays::DropZoneQueryResult z{};
             z.kind = overlays::DropZoneKind::BareDesktop;
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                live_data_.dock.HitTestBar(static_cast<float>(pt.x), static_cast<float>(pt.y), dock_bar_pointer_inside_)) {
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(pt.x), static_cast<float>(pt.y));
+                if (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size() &&
+                    live_data_.dock.items[static_cast<size_t>(hit)].kind == render::DockBarItemKind::Trash) {
+                    z.kind = overlays::DropZoneKind::DockTrash;
+                    return z;
+                }
+                z.kind = overlays::DropZoneKind::DockBar;
+                return z;
+            }
             for (const size_t i : GroupHitOrder()) {
                 if (group_views_[i].frame.contains(pt.x, pt.y)) {
                     z.kind = overlays::DropZoneKind::GroupCard;
@@ -2928,6 +5084,15 @@ private:
     void HandleDroppedFiles(const overlays::DropZoneQueryResult& zone, model::PointI pt,
                             const std::vector<std::wstring>& paths, bool copy_mode) {
         if (paths.empty()) return;
+
+        if (zone.kind == overlays::DropZoneKind::DockBar) {
+            PinPathsToDock(paths);
+            return;
+        }
+        if (zone.kind == overlays::DropZoneKind::DockTrash) {
+            RecyclePathsWithUndoToast(paths);
+            return;
+        }
 
         if (zone.kind == overlays::DropZoneKind::StagingTrayTile) {
             StagePathsInTray(paths);
@@ -3153,7 +5318,7 @@ private:
         case model::TileKind::Calendar:      nt.title = L"日历";     nt.size = {1, 1}; break;
         case model::TileKind::Todo:          nt.title = L"待办";     nt.size = {2, 2}; break;
         case model::TileKind::System:        nt.title = L"系统";     nt.size = {2, 2}; break;
-        case model::TileKind::Apps:          nt.title = L"应用";     nt.size = {4, 2}; break;
+        case model::TileKind::Apps:          nt.title = L"应用坞";   nt.size = {4, 1}; break;
         case model::TileKind::Photos:        nt.title = L"照片";     nt.size = {4, 2}; break;
         case model::TileKind::Downloads:     nt.title = L"下载";     nt.size = {2, 2}; break;
         case model::TileKind::Recent:        nt.title = L"最近使用"; nt.size = {2, 2}; break;
@@ -3165,6 +5330,10 @@ private:
         case model::TileKind::RecycleBin:    nt.title = L"回收站";   nt.size = {1, 1}; break;
         case model::TileKind::ThisPC:        nt.title = L"此电脑";   nt.size = {1, 1}; break;
         case model::TileKind::PulseLauncher: nt.title = L"Pulse";    nt.size = {1, 1}; break;
+        case model::TileKind::Pomodoro:      nt.title = L"番茄专注"; nt.size = {2, 2}; break;
+        case model::TileKind::MediaPlayer:   nt.title = L"正在播放"; nt.size = {4, 2}; break;
+        case model::TileKind::Countdown:     nt.title = L"倒数日";   nt.size = {2, 2}; break;
+        case model::TileKind::Battery:       nt.title = L"电池设备"; nt.size = {2, 2}; break;
         default:                             nt.title = L"磁贴";     nt.size = {1, 1}; break;
         }
         if (custom_size) nt.size = *custom_size;
@@ -3221,6 +5390,15 @@ private:
         }
         if (nt.kind == model::TileKind::Weather) RequestWeather(true);
         if (nt.kind == model::TileKind::System) SampleSystemMetrics();
+        if (nt.kind == model::TileKind::MediaPlayer) {
+            media_monitor_.SetEnabled(true);
+            media_monitor_.RequestRefresh();
+        }
+        if (nt.kind == model::TileKind::Battery) {
+            live_data_.battery = live::SampleBatteryPower(true);
+            last_battery_sample_ms_ = GetTickCount64();
+            last_bt_sample_ms_ = last_battery_sample_ms_;
+        }
         RefreshLiveTileData();
     }
 
@@ -3323,18 +5501,61 @@ private:
                                const std::wstring& directory = {}) {
         if (target.empty()) return;
         AllowSetForegroundWindow(ASFW_ANY);
-        std::thread([path = target, args = arguments, dir = directory] {
+
+        const size_t colon = target.find(L':');
+        const bool is_uri = (colon != std::wstring::npos) && !(target.size() >= 2 && target[1] == L':');
+
+        std::wstring work_dir = directory;
+        if (work_dir.empty() && !is_uri && target.size() > 4 &&
+            _wcsicmp(target.c_str() + target.size() - 4, L".exe") == 0) {
+            std::wstring lower_path = target;
+            for (auto& ch : lower_path) ch = static_cast<wchar_t>(std::towlower(ch));
+            // Do not set CWD inside WindowsApps (restricted ACL AppExecutionAliases) or System32.
+            if (lower_path.find(L"\\windowsapps\\") == std::wstring::npos &&
+                lower_path.find(L"\\windows\\system32\\") == std::wstring::npos &&
+                lower_path.find(L"\\windows\\explorer.exe") == std::wstring::npos) {
+                const size_t slash = target.find_last_of(L"\\/");
+                if (slash != std::wstring::npos && slash > 2) {
+                    const std::wstring parent = target.substr(0, slash);
+                    const DWORD attr = GetFileAttributesW(parent.c_str());
+                    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                        work_dir = parent;
+                    }
+                }
+            }
+        }
+
+        const bool should_deelevate = IsCurrentProcessElevated() && !is_uri;
+        std::thread([path = target, args = arguments, dir = std::move(work_dir), should_deelevate, is_uri] {
             const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-            const HRESULT delegated = SUCCEEDED(com) ? LaunchViaDesktopExplorer(path, args, dir) : E_FAIL;
-            if (FAILED(delegated)) {
-                SHELLEXECUTEINFOW sei{};
-                sei.cbSize = sizeof(sei);
-                sei.fMask = SEE_MASK_NOASYNC;
-                sei.lpFile = path.c_str();
-                if (!args.empty()) sei.lpParameters = args.c_str();
-                if (!dir.empty()) sei.lpDirectory = dir.c_str();
-                sei.nShow = SW_SHOWNORMAL;
-                ShellExecuteExW(&sei);
+            bool launched = false;
+            if (should_deelevate && SUCCEEDED(com)) {
+                launched = SUCCEEDED(LaunchViaDesktopExplorer(path, args, dir));
+            }
+            if (!launched) {
+                auto try_shell_exec = [&](const wchar_t* verb) -> bool {
+                    SHELLEXECUTEINFOW sei{};
+                    sei.cbSize = sizeof(sei);
+                    sei.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+                    sei.lpVerb = verb;
+                    sei.lpFile = path.c_str();
+                    if (!args.empty()) sei.lpParameters = args.c_str();
+                    if (!dir.empty()) sei.lpDirectory = dir.c_str();
+                    sei.nShow = SW_SHOWNORMAL;
+                    if (ShellExecuteExW(&sei)) {
+                        if (sei.hProcess) {
+                            const DWORD pid = GetProcessId(sei.hProcess);
+                            if (pid != 0) AllowSetForegroundWindow(pid);
+                            CloseHandle(sei.hProcess);
+                        }
+                        return true;
+                    }
+                    return false;
+                };
+                // URIs (ms-settings:, shell:...) require "open"; filesystem items use default verb first.
+                launched = is_uri
+                    ? (try_shell_exec(L"open") || try_shell_exec(nullptr))
+                    : (try_shell_exec(nullptr) || try_shell_exec(L"open"));
             }
             if (SUCCEEDED(com)) CoUninitialize();
         }).detach();
@@ -3526,8 +5747,16 @@ private:
             renderer_.InvalidateAll();
         } else if (cmd.starts_with("add-tile:")) {
             const int kind_val = std::stoi(cmd.substr(9));
-            PushUndo(L"添加小组件");
             const auto wk = static_cast<model::TileKind>(std::clamp(kind_val, 0, static_cast<int>(model::kLastTileKind)));
+            if (wk == model::TileKind::Apps) {
+                state_.settings.dock_enabled = true;
+                RefreshLiquidDockBar(false);
+                SaveModel();
+                renderer_.InvalidateAll();
+                ShowUndoToast(L"已开启底部液态玻璃程序坞");
+                return;
+            }
+            PushUndo(L"添加小组件");
             InsertOrStackWidgetKind(wk);
             RecomputeLayout();
             SaveModel();
@@ -3579,6 +5808,272 @@ private:
             RecomputeLayout();
             SaveModel();
             renderer_.InvalidateAll();
+        } else if (cmd == "toggle-dock") {
+            state_.settings.dock_enabled = !state_.settings.dock_enabled;
+            if (state_.settings.dock_enabled) {
+                dock_bar_should_hide_ = false;
+                RefreshLiquidDockBar(false);
+            }
+            StartAnimClock();
+            SaveModel();
+            renderer_.InvalidateAll();
+        } else if (cmd.starts_with("dock-focus-win:")) {
+            const uint64_t raw = std::strtoull(cmd.c_str() + 15, nullptr, 10);
+            HWND wh = reinterpret_cast<HWND>(static_cast<uintptr_t>(raw));
+            const int slot = ResolveLiveDockItemIndex(spec);
+            if (wh && IsWindow(wh)) {
+                if (IsIconic(wh)) {
+                    RestoreWindowWithGenie(wh, slot);
+                } else {
+                    ActivateWindowReliably(wh);
+                }
+            }
+        } else if (cmd == "dock-open" || cmd == "dock-new-instance") {
+            const int slot = ResolveLiveDockItemIndex(spec);
+            if (slot >= 0) {
+                ActivateDockBarItem(static_cast<size_t>(slot), cmd == "dock-new-instance",
+                                    /*allow_minimize_if_front=*/false);
+            } else if (!spec.target_path.empty()) {
+                LaunchDetached(spec.target_path);
+            }
+        } else if (cmd == "dock-restore-app") {
+            const int slot = ResolveLiveDockItemIndex(spec);
+            std::vector<HWND> wins;
+            if (slot >= 0) wins = live_data_.dock.items[static_cast<size_t>(slot)].windows;
+            if (wins.empty()) {
+                for (const auto& [raw_wh, _] : spec.dock_item_windows) {
+                    wins.push_back(reinterpret_cast<HWND>(static_cast<uintptr_t>(raw_wh)));
+                }
+            }
+            bool restored_first = false;
+            for (HWND wh : wins) {
+                if (!wh || !IsWindow(wh)) continue;
+                if (!restored_first) {
+                    if (IsIconic(wh)) RestoreWindowWithGenie(wh, slot);
+                    else ActivateWindowReliably(wh);
+                    restored_first = true;
+                } else if (IsIconic(wh)) {
+                    ShowWindowAsync(wh, SW_RESTORE);
+                }
+            }
+            if (!restored_first && slot >= 0) {
+                ActivateDockBarItem(static_cast<size_t>(slot), false, /*allow_minimize_if_front=*/false);
+            }
+        } else if (cmd == "dock-reveal") {
+            if (!spec.target_path.empty()) {
+                if (pipe_.IsConnected()) {
+                    // If Pulse main window is currently minimized, bring it up so the revealed file is visible!
+                    for (const auto& it : live_data_.dock.items) {
+                        if (it.kind == render::DockBarItemKind::App &&
+                            it.title == L"Pulse" && !it.windows.empty()) {
+                            if (IsIconic(it.windows.front())) ActivateWindowReliably(it.windows.front());
+                            break;
+                        }
+                    }
+                    AllowSetForegroundWindow(ASFW_ANY);
+                    pipe_.Send(ipc::MessageType::OpenInPulseReq, ++next_req_id_,
+                               "{\"mode\":\"reveal\",\"path\":" + ipc::JsonQuoteWide(spec.target_path) + "}");
+                } else {
+                    LaunchDetached(L"explorer.exe", L"/select,\"" + spec.target_path + L"\"");
+                }
+            }
+        } else if (cmd == "dock-hide-app") {
+            const int slot = ResolveLiveDockItemIndex(spec);
+            std::vector<HWND> wins;
+            if (slot >= 0) wins = live_data_.dock.items[static_cast<size_t>(slot)].windows;
+            if (wins.empty()) {
+                for (const auto& [raw_wh, _] : spec.dock_item_windows) {
+                    wins.push_back(reinterpret_cast<HWND>(static_cast<uintptr_t>(raw_wh)));
+                }
+            }
+            bool animated_first = false;
+            for (HWND wh : wins) {
+                if (wh && IsWindow(wh) && !IsIconic(wh)) {
+                    if (!animated_first) {
+                        MinimizeWindowWithGenie(wh, slot, false);
+                        animated_first = true;
+                    } else {
+                        ShowWindowAsync(wh, SW_MINIMIZE);
+                    }
+                }
+            }
+            if (animated_first) {
+                RefreshLiquidDockBar(true, false);
+            }
+        } else if (cmd.starts_with("dock-open-download:")) {
+            const size_t di = static_cast<size_t>(std::strtoull(cmd.c_str() + 19, nullptr, 10));
+            if (di < spec.dock_recent_downloads.size() && !spec.dock_recent_downloads[di].first.empty()) {
+                LaunchDetached(spec.dock_recent_downloads[di].first);
+            }
+        } else if (cmd == "dock-pin-toggle") {
+            const int slot = ResolveLiveDockItemIndex(spec);
+            if (slot >= 0) {
+                const auto it = live_data_.dock.items[static_cast<size_t>(slot)];
+                PinOrUnpinDockPath(it.launch_path, !it.pinned, it.key);
+            } else if (!spec.target_path.empty() || !spec.dock_item_key.empty()) {
+                PinOrUnpinDockPath(spec.target_path, !spec.dock_item_pinned, spec.dock_item_key);
+            }
+        } else if (cmd == "dock-close-app") {
+            const int slot = ResolveLiveDockItemIndex(spec);
+            std::vector<HWND> wins;
+            if (slot >= 0) wins = live_data_.dock.items[static_cast<size_t>(slot)].windows;
+            if (wins.empty()) {
+                for (const auto& [raw_wh, _] : spec.dock_item_windows) {
+                    wins.push_back(reinterpret_cast<HWND>(static_cast<uintptr_t>(raw_wh)));
+                }
+            }
+            int sent = 0;
+            int denied = 0;
+            for (HWND wh : wins) {
+                if (!wh || !IsWindow(wh)) continue;
+                SetLastError(0);
+                if (PostMessageW(wh, WM_SYSCOMMAND, SC_CLOSE, 0) || PostMessageW(wh, WM_CLOSE, 0, 0)) {
+                    ++sent;
+                } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+                    ++denied;
+                }
+            }
+            if (denied > 0 && sent == 0) {
+                ShowUndoToast(L"该窗口以管理员权限运行，请在窗口内关闭");
+            } else if (sent > 0 && mount_.Hwnd()) {
+                SetTimer(mount_.Hwnd(), kTimerDockFollowup, 320, nullptr);
+            }
+        } else if (cmd == "dock-empty-trash") {
+            EmptyRecycleBinAsync();
+        } else if (cmd == "dock-toggle-widgets") {
+            state_.settings.tiles_enabled = !state_.settings.tiles_enabled;
+            if (state_.settings.tiles_enabled) RefreshLiveTileData();
+            RecomputeLayout();
+            SaveModel();
+            SyncSettingsToPlugin();
+            renderer_.InvalidateAll();
+            ShowUndoToast(state_.settings.tiles_enabled ? L"已显示桌面小组件" : L"已隐藏桌面小组件");
+        } else if (cmd == "dock-mag-toggle") {
+            const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+            state_.settings.dock_magnification = !state_.settings.dock_magnification;
+            RefreshLiquidDockBar(false, false);
+            SaveModel();
+            SyncSettingsToPlugin();
+            InvalidateDockBar(old_dmg);
+            renderer_.InvalidateAll();
+            ShowUndoToast(state_.settings.dock_magnification ? L"已开启程序坞悬停放大" : L"已关闭程序坞悬停放大");
+        } else if (cmd == "dock-sys-toggle") {
+            const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+            state_.settings.dock_system_area = !state_.settings.dock_system_area;
+            RefreshLiquidDockBar(false, false);
+            RecomputeLayout();
+            SaveModel();
+            SyncSettingsToPlugin();
+            InvalidateDockBar(old_dmg);
+            renderer_.InvalidateAll();
+            ShowUndoToast(state_.settings.dock_system_area ? L"已开启程序坞系统状态与托盘区" : L"已隐藏程序坞系统状态与托盘区");
+        } else if (cmd.starts_with("dock-pos:")) {
+            const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+            const int pos = std::clamp(std::atoi(cmd.c_str() + 9), 0, 2);
+            state_.settings.dock_position = static_cast<uint8_t>(pos);
+            dock_bar_pointer_inside_ = false;
+            dock_bar_hover_presence_ = 0.0f;
+            dock_bar_target_x_ = -1.0f;
+            dock_bar_smooth_x_ = -1.0f;
+            dock_bar_hovered_idx_ = -1;
+            interaction_.dock_bar_hovered = false;
+            interaction_.dock_bar_tooltip_index = -1;
+            interaction_.dock_bar_tooltip_alpha = 0.0f;
+            RefreshLiquidDockBar(false, false);
+            RecomputeLayout();
+            dock_bar_last_reveal_touch_ms_ = NowAnimMs();
+            EvaluateDockAutoHide(NowAnimMs());
+            StartAnimClock();
+            SaveModel();
+            SyncSettingsToPlugin();
+            InvalidateDockBar(old_dmg);
+            renderer_.InvalidateAll();
+            ShowUndoToast(pos == 1 ? L"程序坞位置：屏幕左侧"
+                          : (pos == 2 ? L"程序坞位置：屏幕右侧" : L"程序坞位置：屏幕底部"));
+        } else if (cmd.starts_with("dock-size:")) {
+            const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+            const int sz = std::clamp(std::atoi(cmd.c_str() + 10), 36, 64);
+            state_.settings.dock_icon_size = static_cast<uint8_t>(sz);
+            RefreshLiquidDockBar(false, false);
+            RecomputeLayout();
+            SaveModel();
+            SyncSettingsToPlugin();
+            InvalidateDockBar(old_dmg);
+            renderer_.InvalidateAll();
+            ShowUndoToast(L"程序坞图标大小：" + std::to_wstring(sz));
+        } else if (cmd.starts_with("dock-scale:")) {
+            const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+            const int sc = std::clamp(std::atoi(cmd.c_str() + 11), 100, 195);
+            state_.settings.dock_max_scale_x100 = static_cast<uint16_t>(sc);
+            state_.settings.dock_magnification = true;
+            RefreshLiquidDockBar(false, false);
+            SaveModel();
+            SyncSettingsToPlugin();
+            InvalidateDockBar(old_dmg);
+            renderer_.InvalidateAll();
+            wchar_t msg[64]{};
+            std::swprintf(msg, ARRAYSIZE(msg), L"悬停放大倍数：%.2f×", static_cast<double>(sc) / 100.0);
+            ShowUndoToast(msg);
+        } else if (cmd.starts_with("dock-hide:")) {
+            const int mode = std::clamp(std::atoi(cmd.c_str() + 10), 0, 2);
+            state_.settings.dock_hide_mode = static_cast<uint8_t>(mode);
+            dock_bar_pointer_inside_ = false;
+            dock_bar_last_reveal_touch_ms_ = (mode == 2) ? (NowAnimMs() - 500.0) : NowAnimMs();
+            EvaluateDockAutoHide(NowAnimMs());
+            StartAnimClock();
+            SaveModel();
+            SyncSettingsToPlugin();
+            ShowUndoToast(mode == 0 ? L"程序坞：常驻显示"
+                          : (mode == 1 ? L"程序坞：智能隐藏（有窗口遮挡时收回）"
+                                       : L"程序坞：自动隐藏（鼠标贴边唤出）"));
+        } else if (cmd == "dock-open-folder") {
+            if (!spec.target_path.empty()) {
+                const int slot = ResolveLiveDockItemIndex(spec);
+                const model::RectI origin = DockItemClientRect(slot);
+                OpenPathInPulseOrShell(spec.target_path, slot >= 0 ? &origin : nullptr);
+            }
+        } else if (cmd.starts_with("dock-stack-view:")) {
+            const int v = std::clamp(std::atoi(cmd.c_str() + 16), 0, 3);
+            state_.settings.dock_stack_view = static_cast<uint8_t>(v);
+            SaveModel();
+            const l10n::StringId names[] = {l10n::StringId::TextRenderAuto, l10n::StringId::DockStackViewFan,
+                                            l10n::StringId::DockStackViewGrid, l10n::StringId::ViewList};
+            ShowUndoToast(std::wstring(l10n::Get(l10n::StringId::DockStackViewAs)) + L" \u00B7 " +
+                          std::wstring(l10n::Get(names[v])));
+        } else if (cmd.starts_with("dock-stack-sort:")) {
+            const int v = std::clamp(std::atoi(cmd.c_str() + 16), 0, 3);
+            state_.settings.dock_stack_sort = static_cast<uint8_t>(v);
+            SaveModel();
+            const l10n::StringId names[] = {l10n::StringId::ColumnCreated, l10n::StringId::ColumnName,
+                                            l10n::StringId::ColumnModified, l10n::StringId::ColumnType};
+            ShowUndoToast(std::wstring(l10n::Get(l10n::StringId::SortBy)) + L" \u00B7 " +
+                          std::wstring(l10n::Get(names[v])));
+        } else if (cmd.starts_with("dock-apps-stack:")) {
+            const bool on = std::atoi(cmd.c_str() + 16) != 0;
+            if (!on) dock_stack_.Close(false);
+            state_.settings.dock_apps_stack = on;
+            RefreshLiquidDockBar(true, false);
+            StartAnimClock();
+            SaveModel();
+        } else if (cmd.starts_with("dock-minfx:")) {
+            const int fx = std::clamp(std::atoi(cmd.c_str() + 11), 0, 2);
+            state_.settings.dock_minimize_effect = static_cast<uint8_t>(fx);
+            SaveModel();
+            SyncSettingsToPlugin();
+            ShowUndoToast(fx == 1 ? L"窗口收回/展开：神奇效果（Genie）"
+                          : (fx == 2 ? L"窗口收回/展开：缩放效果（Scale）"
+                                     : L"已关闭窗口收回/展开动画"));
+        } else if (cmd == "dock-disable") {
+            state_.settings.dock_enabled = false;
+            dock_bar_pointer_inside_ = false;
+            dock_bar_hover_presence_ = 0.0f;
+            interaction_.dock_bar_hovered = false;
+            interaction_.dock_bar_tooltip_alpha = 0.0f;
+            RecomputeLayout();
+            StartAnimClock(); // Smoothly slide Dock downward off-screen instead of snapping out
+            SaveModel();
+            SyncSettingsToPlugin();
+            ShowUndoToast(L"已隐藏程序坞（桌面右键 → 查看可重新开启）");
         } else if (cmd == "toggle-grid") {
             state_.settings.align_to_grid = !state_.settings.align_to_grid;
             RecomputeLayout();
@@ -3934,11 +6429,13 @@ private:
                     AdvancePhoto(t.photo_shuffle);
                     photo_last_switch_ms_ = GetTickCount64();
                 } else if (cmd.starts_with("photo-interval:")) {
-                    const int seconds = std::clamp(std::atoi(cmd.c_str() + 15), 0, 24 * 3600);
+                    const int seconds = std::clamp(std::atoi(cmd.c_str() + 15), 0, 3600);
                     for (auto& x : state_.tiles)
                         if (x.id == t.id) x.photo_interval_s = seconds;
+                    state_.settings.widgets.photo_interval_s = static_cast<uint16_t>(seconds);
                     photo_last_switch_ms_ = GetTickCount64();
                     SaveModel();
+                    SyncSettingsToPlugin();
                     EnsurePhotoTimer();
                     return;
                 } else if (cmd == "open-clock-app") {
@@ -3958,9 +6455,16 @@ private:
                     renderer_.InvalidateAll();
                     return;
                 } else if (cmd == "photo-shuffle") {
-                    for (auto& x : state_.tiles)
-                        if (x.id == t.id) x.photo_shuffle = !x.photo_shuffle;
+                    bool new_shuf = !state_.settings.widgets.photo_shuffle;
+                    for (auto& x : state_.tiles) {
+                        if (x.id == t.id) {
+                            x.photo_shuffle = !x.photo_shuffle;
+                            new_shuf = x.photo_shuffle;
+                        }
+                    }
+                    state_.settings.widgets.photo_shuffle = new_shuf;
                     SaveModel();
+                    SyncSettingsToPlugin();
                     return;
                 } else if (cmd == "photo-folder-reset") {
                     for (auto& x : state_.tiles)
@@ -4048,7 +6552,70 @@ private:
                 } else if (cmd == "open-sys-about") {
                     ShellExecuteW(nullptr, L"open", L"ms-settings:about", nullptr, nullptr, SW_SHOWNORMAL);
                     return;
-                } else if (cmd == "apps-all-out") {
+                }
+                if (cmd == "open-power-settings") {
+                    ShellExecuteW(nullptr, L"open", L"ms-settings:powersleep", nullptr, nullptr, SW_SHOWNORMAL);
+                    return;
+                } else if (cmd == "pomo-toggle") {
+                    live_data_.pomodoro.Toggle();
+                    renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                    return;
+                } else if (cmd == "pomo-reset") {
+                    live_data_.pomodoro.Reset();
+                    renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                    return;
+                } else if (cmd == "pomo-25") {
+                    live_data_.pomodoro.SetPreset(live::PomodoroPhase::Focus, 25);
+                    renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                    return;
+                } else if (cmd == "pomo-45") {
+                    live_data_.pomodoro.SetPreset(live::PomodoroPhase::Focus, 45);
+                    renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                    return;
+                } else if (cmd == "pomo-break") {
+                    live_data_.pomodoro.SetPreset(live::PomodoroPhase::ShortBreak, live_data_.pomodoro.focus_minutes);
+                    renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                    return;
+                } else if (cmd == "media-play") {
+                    media_monitor_.SendCommand(live::MediaCommand::PlayPause);
+                    return;
+                } else if (cmd == "media-prev") {
+                    media_monitor_.SendCommand(live::MediaCommand::Previous);
+                    return;
+                } else if (cmd == "media-next") {
+                    media_monitor_.SendCommand(live::MediaCommand::Next);
+                    return;
+                } else if (cmd == "countdown-edit-title") {
+                    OpenTileTextEditor(t, "@countdown_title:" + t.id, t.title);
+                    return;
+                } else if (cmd == "countdown-edit-date") {
+                    SYSTEMTIME now{};
+                    GetLocalTime(&now);
+                    const auto cd = live::ComputeCountdown(t.title, t.countdown_date, now);
+                    OpenTileTextEditor(t, "@countdown_date:" + t.id, t.countdown_date.empty() ? cd.target_iso : t.countdown_date);
+                    return;
+                } else if (cmd == "countdown-plus30") {
+                    SYSTEMTIME now{};
+                    GetLocalTime(&now);
+                    FILETIME ft{};
+                    if (SystemTimeToFileTime(&now, &ft)) {
+                        ULARGE_INTEGER ul{};
+                        ul.LowPart = ft.dwLowDateTime;
+                        ul.HighPart = ft.dwHighDateTime;
+                        ul.QuadPart += 30ull * 86400ull * 10000000ull;
+                        ft.dwLowDateTime = ul.LowPart;
+                        ft.dwHighDateTime = ul.HighPart;
+                        SYSTEMTIME fut{};
+                        if (FileTimeToSystemTime(&ft, &fut)) {
+                            wchar_t iso[16]{};
+                            std::swprintf(iso, ARRAYSIZE(iso), L"%04u-%02u-%02u", fut.wYear, fut.wMonth, fut.wDay);
+                            t.countdown_date = iso;
+                            RefreshWidgetDetail(model::TileKind::Countdown);
+                        }
+                    }
+                    break;
+                }
+                if (cmd == "apps-all-out") {
                     PushUndo(L"全部放回桌面");
                     for (auto& it : state_.items) if (it.in_apps_tile) { it.pinned_group_id.clear(); it.force_loose = true; }
                     RecomputeLayout();
@@ -4064,6 +6631,7 @@ private:
                 } else if (cmd == "remove-tile") {
                     PushUndo(L"取消固定磁贴");
                     state_.tiles.erase(state_.tiles.begin() + static_cast<ptrdiff_t>(i));
+                    media_monitor_.SetEnabled(model::BoardHasKind(state_.tiles, model::TileKind::MediaPlayer));
                 } else if (cmd.starts_with("tile-size:") && cmd.size() >= 13) {
                     const size_t xp = cmd.find('x', 10);
                     if (xp != std::string::npos) {
@@ -4104,6 +6672,7 @@ private:
             model::TileKind::Photos, model::TileKind::Weather, model::TileKind::Calendar, model::TileKind::Todo,
             model::TileKind::Clock, model::TileKind::StickyNote, model::TileKind::Apps, model::TileKind::StagingTray,
             model::TileKind::Downloads, model::TileKind::Recent, model::TileKind::System, model::TileKind::DiskRing,
+            model::TileKind::Pomodoro, model::TileKind::MediaPlayer, model::TileKind::Countdown, model::TileKind::Battery,
             model::TileKind::RecycleBin, model::TileKind::ThisPC, model::TileKind::PulseLauncher};
         std::vector<std::pair<model::TileKind, bool>> out;
         for (const auto k : kWidgets) out.push_back({k, model::BoardHasKind(state_.tiles, k)});
@@ -4174,7 +6743,7 @@ private:
             return;
         }
         const uint64_t now = GetTickCount64();
-        if (!force && city == weather_fetched_city_ && weather_fetched_tick_ && now - weather_fetched_tick_ < 30ull * 60 * 1000) return;
+        if (!force && city == weather_fetched_city_ && weather_fetched_tick_ && now - weather_fetched_tick_ < static_cast<uint64_t>(std::max<uint8_t>(state_.settings.widgets.weather_refresh_min, 15)) * 60ull * 1000) return;
         if (weather_inflight_->exchange(true)) return;
         weather_fetched_city_ = city;
         weather_fetched_tick_ = now;
@@ -4192,7 +6761,9 @@ private:
         if (!r->ok) {
             // Keep the last good forecast and say why it is old only when there is none.
             if (!w.valid) w.status = r->error;
-            weather_fetched_tick_ = GetTickCount64() - 25ull * 60 * 1000;  // retry in five minutes
+            // Retry in five minutes, whatever the refresh interval (back-date the last fetch accordingly).
+            const uint64_t refresh_ms = static_cast<uint64_t>(std::max<uint8_t>(state_.settings.widgets.weather_refresh_min, 15)) * 60ull * 1000;
+            weather_fetched_tick_ = GetTickCount64() - (refresh_ms - 5ull * 60 * 1000);
         } else {
             w.valid = true;
             w.status.clear();
@@ -4200,13 +6771,15 @@ private:
             w.temp_c = r->temp_c; w.code = r->code; w.hi_c = r->hi_c; w.lo_c = r->lo_c;
             w.feels_c = r->feels_c; w.humidity_pct = r->humidity_pct; w.wind_kmh = r->wind_kmh;
             w.utc_offset_s = r->utc_offset_s; w.has_utc_offset = r->has_utc_offset;
+            w.is_day = r->is_day; w.has_sun = r->has_sun;
+            w.sunrise_min = r->sunrise_min; w.sunset_min = r->sunset_min;
             SYSTEMTIME now{};
             GetLocalTime(&now);
             wchar_t at[8]{};
             std::swprintf(at, ARRAYSIZE(at), L"%02u:%02u", now.wHour, now.wMinute);
             w.updated = at;
             w.hours.clear();
-            for (const auto& h : r->hours) w.hours.push_back({h.label, h.code, h.temp_c});
+            for (const auto& h : r->hours) w.hours.push_back({h.label, h.code, h.temp_c, h.is_day});
             w.days.clear();
             for (const auto& d : r->days) w.days.push_back({d.label, d.code, d.lo_c, d.hi_c});
         }
@@ -4215,11 +6788,51 @@ private:
                 renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
         RefreshWidgetDetail(model::TileKind::Weather);
     }
+    // 小组件 options changed (or loaded): carry them into the live widget state.
+    void ApplyWidgetPrefs() {
+        const auto& w = state_.settings.widgets;
+        auto& p = live_data_.pomodoro;
+        p.short_min = w.short_break_min;
+        p.long_min = w.long_break_min;
+        if (!p.running) {
+            p.focus_minutes = w.focus_min;
+            p.Reset();
+        }
+        if (!w.battery_bluetooth) live_data_.battery.bt_devices.clear();
+        for (auto& t : state_.tiles) {
+            if (model::ActiveTileView(t).kind == model::TileKind::Photos) {
+                t.photo_interval_s = static_cast<int>(w.photo_interval_s);
+                t.photo_shuffle = w.photo_shuffle;
+            }
+        }
+        EnsurePhotoTimer();
+        dock_sys_monitor_.SetClock24h(w.clock_24h);
+        last_bt_sample_ms_ = 0;
+        last_battery_sample_ms_ = 0;  // sample again on the next tick
+    }
     void SampleSystemMetrics() {
         const auto s = system_sampler_.Sample();
         auto& v = live_data_.system;
-        v.valid = s.valid; v.cpu_pct = s.cpu_pct; v.mem_used = s.mem_used; v.mem_total = s.mem_total;
-        v.disk_used_pct = s.disk_used_pct; v.disk_free = s.disk_free; v.net_down_bps = s.net_down_bps;
+        v.valid = s.valid;
+        v.cpu_pct = s.cpu_pct;
+        v.cpu_pct_exact = s.cpu_pct_exact;
+        v.physical_cores = s.physical_cores;
+        v.logical_cores = s.logical_cores;
+        v.mem_used = s.mem_used;
+        v.mem_total = s.mem_total;
+        v.mem_pct_exact = s.mem_pct_exact;
+        v.has_vram = s.has_vram;
+        v.vram_pct = s.vram_pct;
+        v.vram_used_gb = s.vram_used_gb;
+        v.vram_total_gb = s.vram_total_gb;
+        v.gpu_name = s.gpu_name;
+        v.disk_used_pct = s.disk_used_pct;
+        v.disk_free = s.disk_free;
+        v.net_down_bps = s.net_down_bps;
+        v.net_up_bps = s.net_up_bps;
+        v.cpu_history = s.cpu_history;
+        v.mem_history = s.mem_history;
+        v.net_history = s.net_history;
         for (const auto& t : state_.tiles)
             if (model::ActiveTileView(t).kind == model::TileKind::System)
                 renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
@@ -4231,11 +6844,18 @@ private:
         d.kind = kind;
         d.weather = live_data_.weather;
         d.system = live_data_.system;
+        d.battery = live_data_.battery;
         d.todos = state_.todos;
         d.weather_city = state_.settings.weather_city;
         d.drives = live_data_.drives;
-        for (const auto& t : state_.tiles)
-            if (t.id == detail_tile_id_) d.analog_clock = model::ActiveTileView(t).analog_clock;
+        for (const auto& t : state_.tiles) {
+            if (t.id == detail_tile_id_) {
+                const auto tv = model::ActiveTileView(t);
+                d.analog_clock = tv.analog_clock;
+                d.countdown_title = tv.title;
+                d.countdown_date = tv.countdown_date;
+            }
+        }
         return d;
     }
     void RefreshWidgetDetail(model::TileKind kind) {
@@ -4248,6 +6868,11 @@ private:
         mount_.ClientToScreenDip(&br);
         overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
         if (kind == model::TileKind::System) SampleSystemMetrics();
+        if (kind == model::TileKind::Battery) {
+            live_data_.battery = live::SampleBatteryPower(true);
+            last_battery_sample_ms_ = GetTickCount64();
+            last_bt_sample_ms_ = last_battery_sample_ms_;
+        }
         detail_tile_id_ = tile.id;
         overlays_.OpenWidgetDetail(RECT{tl.x, tl.y, br.x, br.y}, tile.id, MakeWidgetDetail(kind));
         SyncOverlayInteractionFlags();
@@ -4337,14 +6962,21 @@ private:
         const std::wstring args = L"/select,\"" + path + L"\"";
         ShellExecuteW(nullptr, L"open", L"explorer.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
     }
-    // Windows' own confirmation, then the emptying, on a worker; the tile refreshes when it is done.
+    // Windows' own confirmation, then the emptying, on a worker; the tile & Dock trash icon refresh when done.
     void EmptyRecycleBinAsync() {
         const HWND hwnd = mount_.Hwnd();
-        std::thread([hwnd] {
+        auto trash_state = dock_trash_state_;
+        std::thread([hwnd, trash_state] {
             const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
             SHEmptyRecycleBinW(nullptr, nullptr, 0);
+            SHQUERYRBINFO q{sizeof(q)};
+            const bool not_empty = SUCCEEDED(SHQueryRecycleBinW(nullptr, &q)) && q.i64NumItems > 0;
+            if (trash_state) trash_state->cached.store(not_empty ? 1 : 0);
             if (SUCCEEDED(com)) CoUninitialize();
-            PostMessageW(hwnd, kMsgFolderChanged, 0, 0);
+            if (hwnd && IsWindow(hwnd)) {
+                PostMessageW(hwnd, kMsgFolderChanged, 0, 0);
+                PostMessageW(hwnd, kMsgDockTrashReady, not_empty ? 1u : 0u, 0);
+            }
         }).detach();
     }
     // One picture back or forward (back is always the previous in order).
@@ -4382,22 +7014,26 @@ private:
         if (period) SetTimer(mount_.Hwnd(), kTimerPhotos, period, nullptr);
         else KillTimer(mount_.Hwnd(), kTimerPhotos);
     }
-    void ClearTileDrag() {
-        KillTimer(mount_.Hwnd(), kTimerTileReorder);
+    void ClearTileDrag(bool keep_ghost = false) {
+        if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerTileReorder);
         tile_drag_session_.Reset();
         dragging_tile_idx_.reset();
         drag_tile_undo_snapshot_ = {};
         interaction_.dragging_tile = false;
         interaction_.dragging_tile_id.clear();
         interaction_.stack_drop_target_tile_id.clear();
-        interaction_.drag_tile_preview_rect = {};
-        interaction_.drag_tile_valid = false;
+        interaction_.drag_tile_merge_armed = false;
+        if (!keep_ghost) {
+            tile_ghost_.Hide();
+            interaction_.drag_tile_preview_rect = {};
+            interaction_.drag_tile_valid = false;
+        }
     }
 
     void CancelTileDrag(bool recompute = true) {
         if (!tile_drag_session_.Active()) return;
         tile_drag_session_.Cancel(state_.tiles);
-        ClearTileDrag();
+        ClearTileDrag(false);
         if (mount_.Hwnd() && GetCapture() == mount_.Hwnd()) {
             releasing_capture_ = true;
             ReleaseCapture();
@@ -4414,20 +7050,28 @@ private:
         if (tile_drag_session_.Update({x - drag_offset_.x, y - drag_offset_.y},
                                      drag_tile_cursor_, GetTickCount64())) {
             state_.tiles = tile_drag_session_.Preview();
-            if (tile_drag_session_.Phase() != model::TileDragPhase::Reorder &&
-                *dragging_tile_idx_ < state_.tiles.size()) {
-                // Only the dragged card follows the pointer while a merge target
-                // is reserved. The session owns a separate insertion commit plan.
-                auto& moving = state_.tiles[*dragging_tile_idx_];
-                const auto& rect = tile_drag_session_.ProposalRect();
-                moving.free_placed = true;
-                moving.x = rect.x;
-                moving.y = rect.y;
-            }
+            const bool merge_armed = !tile_drag_session_.StackTarget().empty();
             interaction_.stack_drop_target_tile_id = tile_drag_session_.StackTarget();
-            interaction_.drag_tile_preview_rect = tile_drag_session_.Target();
             interaction_.drag_tile_valid = tile_drag_session_.Valid();
+            interaction_.drag_tile_merge_armed = merge_armed;
+
+            const model::RectI target_rc = tile_drag_session_.Target();
+            if (!tile_ghost_.visible && !target_rc.empty()) {
+                const D2D1_RECT_F trf = D2D1::RectF(static_cast<float>(target_rc.x), static_cast<float>(target_rc.y),
+                                                    static_cast<float>(target_rc.right()), static_cast<float>(target_rc.bottom()));
+                tile_ghost_.StartAt(target_rc, render::TileCornerRadiusDip(state_.tiles[*dragging_tile_idx_], trf));
+                tile_ghost_.valid = tile_drag_session_.Valid();
+                tile_ghost_.merge_armed = merge_armed;
+            } else {
+                tile_ghost_.SetTarget(target_rc, tile_drag_session_.Valid(), merge_armed);
+            }
+            if (!mount_.Hwnd() && tile_ghost_.visible) {
+                tile_ghost_.current_x = static_cast<double>(tile_ghost_.target.x);
+                tile_ghost_.current_y = static_cast<double>(tile_ghost_.target.y);
+            }
+            interaction_.drag_tile_preview_rect = tile_ghost_.CurrentRect();
             InvalidateDragDamage(before);
+            StartAnimClock();
         }
         if (mount_.Hwnd()) {
             if (tile_drag_session_.NeedsDwellTimer()) SetTimer(mount_.Hwnd(), kTimerTileReorder, 50, nullptr);
@@ -4438,8 +7082,9 @@ private:
     void FinishTileDrag(int x, int y) {
         UpdateTileDrag(x, y);
         if (!tile_drag_session_.Active() || !dragging_tile_idx_) return;
+        const model::PointI release_pos{tile_drag_session_.ProposalRect().x, tile_drag_session_.ProposalRect().y};
+        const std::string moving_id = tile_drag_session_.Original()[*dragging_tile_idx_].id;
         if (!tile_drag_session_.Valid()) { CancelTileDrag(); return; }
-        const auto moving_id = tile_drag_session_.Original()[*dragging_tile_idx_].id;
         const auto stack_on = tile_drag_session_.StackTarget();
         const bool changed = tile_drag_session_.PlacementChanged();
         auto before = std::move(drag_tile_undo_snapshot_);
@@ -4447,11 +7092,14 @@ private:
             auto stacked = tile_drag_session_.Original();
             if (!model::StackTiles(stacked, moving_id, stack_on)) { CancelTileDrag(); return; }
             state_.tiles = std::move(stacked);
-        } else if (!tile_drag_session_.Commit(state_.tiles)) {
-            CancelTileDrag();
-            return;
+            ClearTileDrag(false);
+        } else {
+            if (!tile_drag_session_.Commit(state_.tiles)) {
+                CancelTileDrag();
+                return;
+            }
+            ClearTileDrag(true);
         }
-        ClearTileDrag();
         if (changed || !stack_on.empty()) {
             undo_.Push(before, stack_on.empty() ? L"移动磁贴" : L"叠放");
             last_undo_is_ai_archive_ = false;
@@ -4459,46 +7107,74 @@ private:
             SaveModel();
             if (!stack_on.empty()) ShowUndoToast(L"已叠放 · 滚动滚轮切换");
         }
+        // Reference-aligned SwiftUI spring snap-back from drop position to final snapped cell.
+        if (stack_on.empty()) {
+            model::RectI committed_rc{};
+            for (const auto& t : state_.tiles) {
+                if (t.id == moving_id) {
+                    committed_rc = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
+                    break;
+                }
+            }
+            if (!committed_rc.empty() && release_pos != model::PointI{committed_rc.x, committed_rc.y}) {
+                const double anim_now = NowAnimMs();
+                tile_springs_.AddOrReplace(moving_id, release_pos, {committed_rc.x, committed_rc.y}, anim_now);
+                interaction_.tile_anim_positions[moving_id] = release_pos;
+                tile_ghost_.SetTarget(committed_rc, true, false);
+                interaction_.drag_tile_preview_rect = tile_ghost_.CurrentRect();
+                interaction_.drag_tile_valid = true;
+                interaction_.drag_tile_merge_armed = false;
+                StartAnimClock();
+            } else {
+                tile_ghost_.Hide();
+                interaction_.drag_tile_preview_rect = {};
+                interaction_.drag_tile_valid = false;
+                interaction_.drag_tile_merge_armed = false;
+            }
+        }
         renderer_.InvalidateAll();
     }
 
-    // Index into AppsInTile() under (x, y) for an 应用 tile drawn at tr, or -1 (mirrors DrawLiveTile).
+    // Index into AppsInTile() under (x, y) for an 应用坞 Dock tile drawn at tr, or -1 (mirrors DrawLiveTile).
     int AppCellAt(const model::DesktopTile& t, const model::RectI& tr, int x, int y) const {
         const auto view = model::ActiveTileView(t);
         if (view.kind != model::TileKind::Apps || t.size.cols < 2) return -1;
         const size_t n = AppsInTile().size();
         const D2D1_RECT_F rf = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
                                            static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
-        const auto pg = render::DesktopRenderer::AppsTilePaging(t, rf, n);
-        const float cell_w = (static_cast<float>(tr.w) - 16.0f) / static_cast<float>(pg.cols);
-        if (x < tr.x + 8 || x >= tr.right() - 8 || y < pg.top) return -1;
-        const int c = static_cast<int>((static_cast<float>(x - tr.x) - 8.0f) / cell_w);
-        const int r = static_cast<int>((static_cast<float>(y) - pg.top) / pg.cell_h);
-        if (c < 0 || c >= pg.cols || r < 0 || r >= pg.rows) return -1;
-        const size_t i = static_cast<size_t>(std::min(interaction_.apps_page, pg.pages - 1)) * pg.room +
-                         static_cast<size_t>(r * pg.cols + c);
-        return i < n ? static_cast<int>(i) : -1;
+        return render::HitTestDockTileApp(t, rf, n, MakeDockLayoutInput(t.id, NowAnimMs()),
+                                          static_cast<float>(x), static_cast<float>(y));
     }
-    int TodoRowAt(const model::DesktopTile& t, const model::RectI& tr, int y) const {
+    // 待办: the to-do (index into state_.todos) under (x, y), laid out as the face draws it (open first,
+    // done below; two columns from 4 wide), or -1. Mirrors DesktopRenderer::TodoRowRect.
+    int TodoRowAt(const model::DesktopTile& t, const model::RectI& tr, int x, int y) const {
         const auto view = model::ActiveTileView(t);
-        if (view.kind != model::TileKind::Todo || t.size.cols < 2) return -1;
-        const int top = tr.y + (t.look.show_title ? 46 : 12);
-        if (y < top) return -1;
-        const int i = (y - top) / 29;
-        return i < static_cast<int>(state_.todos.size()) && top + i * 29 + 26 <= tr.bottom() - 6 ? i : -1;
+        if (view.kind != model::TileKind::Todo || t.size.cols < 2 || t.size.rows < 2) return -1;
+        const D2D1_RECT_F rf = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
+                                           static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
+        const auto order = render::DesktopRenderer::TodoDisplayOrder(state_.todos);
+        const size_t shown = std::min(order.size(), render::DesktopRenderer::TodoRowCapacity(t, rf));
+        for (size_t row = 0; row < shown; ++row) {
+            const D2D1_RECT_F r = render::DesktopRenderer::TodoRowRect(t, rf, row);
+            if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return static_cast<int>(order[row]);
+        }
+        return -1;
+    }
+    // The row a to-do is shown on (for its × button), or -1.
+    int TodoDisplayRow(int todo) const {
+        const auto order = render::DesktopRenderer::TodoDisplayOrder(state_.todos);
+        for (size_t row = 0; row < order.size(); ++row)
+            if (static_cast<int>(order[row]) == todo) return static_cast<int>(row);
+        return -1;
     }
     bool IsTodoAddButtonAt(const model::DesktopTile& t, const model::RectI& tr, int x, int y) const {
         const auto view = model::ActiveTileView(t);
-        if (view.kind != model::TileKind::Todo || t.size.cols < 2) return false;
-        if (x < tr.x + 10 || x > tr.right() - 10) return false;
-        const int top = tr.y + (t.look.show_title ? 46 : 12);
-        int shown = 0;
-        for (size_t i = 0; i < state_.todos.size(); ++i) {
-            if (top + static_cast<int>(i) * 29 + 26 > tr.bottom() - 6) break;
-            ++shown;
-        }
-        const int add_y = top + shown * 29;
-        return add_y + 24 <= tr.bottom() - 6 && y >= add_y && y <= add_y + 24;
+        if (view.kind != model::TileKind::Todo || t.size.cols < 2 || t.size.rows < 2) return false;
+        const D2D1_RECT_F rf = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
+                                           static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
+        const size_t shown = std::min(state_.todos.size(), render::DesktopRenderer::TodoRowCapacity(t, rf));
+        const D2D1_RECT_F r = render::DesktopRenderer::TodoAddRect(t, rf, shown);
+        return r.bottom > r.top && x >= r.left && x < r.right && y >= r.top && y < r.bottom;
     }
     int ListTileRowAt(const model::DesktopTile& t, const model::RectI& tr, int x, int y,
                       std::wstring* out_path = nullptr, bool* out_is_folder = nullptr, bool* out_action = nullptr) const {
@@ -4594,7 +7270,7 @@ private:
         renderer_.InvalidateAll();
     }
     void RotateStacks() {
-        if (interaction_.tile_edit_mode) return;
+        if (interaction_.tile_edit_mode || !state_.settings.widgets.stack_rotate) return;
         for (auto& t : state_.tiles) {
             if (t.stack.size() < 2 || !t.smart_rotate || interaction_.hovered_tile_id == t.id) continue;
             t.stack_index = (t.stack_index + 1) % static_cast<int>(t.stack.size());
@@ -4650,8 +7326,15 @@ private:
         case model::TileKind::Calendar:
         case model::TileKind::Clock:
         case model::TileKind::DiskRing:
+        case model::TileKind::Countdown:
+        case model::TileKind::Battery:
             OpenWidgetDetailForTile(t_in, t.kind, tr);
             return;
+        case model::TileKind::Pomodoro:
+            live_data_.pomodoro.Toggle();
+            renderer_.InvalidateRect(tr);
+            return;
+        case model::TileKind::MediaPlayer:
         case model::TileKind::Todo:
             return;
         default:
@@ -4743,7 +7426,11 @@ private:
     }
 
     void OpenBeautifyOverlay() {
+        video_ctrl_.SetIconTakeoverActive(mount_.NativeIconsHidden());
+        video_ctrl_.SetGlassConsumers(renderer_.HasLiveGlassConsumers(), true);
+        overlays_.SetLiveWallpaperSource(&renderer_.LiveWallpaper(), renderer_.D2dDevice());
         overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+        overlays_.SetBeautifyVideoState(video_ctrl_.BuildUiState(), false);
         overlays_.OpenBeautifyDrawer(PrimaryWorkAreaScreen(), state_.settings, ActiveWidgetKinds());
         RecomputeLayout();
         renderer_.InvalidateAll();
@@ -5159,7 +7846,14 @@ private:
         synced += GlassOpticalJson(state_.settings.glass_options);
         synced += ",\"glass_reference\":" + std::string(state_.settings.glass_reference ? "true" : "false") +
             ",\"glass_blur_radius\":" + std::to_string(state_.settings.glass_blur_radius) +
-            ",\"glass_blur_edge\":" + (state_.settings.glass_blur_edge ? "true" : "false") + "}";
+            ",\"glass_blur_edge\":" + (state_.settings.glass_blur_edge ? "true" : "false") +
+            ",\"weather_city\":" + ipc::JsonQuoteWide(state_.settings.weather_city) +
+            ",\"widgets\":" + ipc::JsonQuoteWide(EncodeWidgetPrefs(state_.settings.widgets)) +
+            ",\"dock\":" + ipc::JsonQuoteWide(EncodeDockPrefs(model::ExtractDockPrefs(state_.settings))) +
+            ",\"wallpaper_kind\":" + std::to_string(video_ctrl_.IsVideoActive() ? 1 : 0) +
+            ",\"video_fill\":" + std::to_string(static_cast<unsigned>(video_ctrl_.PersistedState().fill_mode)) +
+            ",\"video_name\":" + ipc::JsonQuote(video_ctrl_.DisplayNameUtf8()) +
+            ",\"video_status\":" + ipc::JsonQuote(video_ctrl_.StatusSummaryUtf8()) + "}";
         pipe_.Send(ipc::MessageType::SettingsSync, ++next_req_id_, synced);
     }
 
@@ -5235,6 +7929,23 @@ private:
                 }
                 if (ipc::JsonFindUint64(json, "glass_rate", u)) {
                     state_.settings.glass_live_rate = static_cast<uint8_t>(std::min<uint64_t>(u, 2));
+                    video_ctrl_.SetGlassLiveRate(state_.settings.glass_live_rate);
+                }
+                if (ipc::JsonFindUint64(json, "video_fill", u)) {
+                    video_ctrl_.SetFillMode(u == 1 ? video::VideoFillMode::Fit : video::VideoFillMode::Fill);
+                }
+                if (ipc::JsonFindUint64(json, "wallpaper_kind", u)) {
+                    if (u == 0 && video_ctrl_.IsVideoActive()) {
+                        video_ctrl_.StopVideoWallpaper(true);
+                    } else if (u == 1 && !video_ctrl_.IsVideoActive()) {
+                        if (!state_.video_wallpaper.source_path.empty()) {
+                            SetVideoWallpaperPath(state_.video_wallpaper.source_path);
+                        } else if (!state_.video_wallpaper.recent.empty()) {
+                            SetVideoWallpaperPath(state_.video_wallpaper.recent.front().path);
+                        } else {
+                            PickAndSetVideoWallpaper();
+                        }
+                    }
                 }
                 if (ipc::JsonFindUint64(json, "scene", u)) state_.settings.active_scene = static_cast<model::DesktopScene>(std::min<uint64_t>(u, 2));
                 if (ipc::JsonFindUint64(json, "label_style", u)) state_.settings.label_style = static_cast<model::IconLabelStyle>(std::min<uint64_t>(u, static_cast<uint64_t>(model::IconLabelStyle::Normal)));
@@ -5243,6 +7954,7 @@ private:
                     const auto np = static_cast<model::WallpaperPreset>(std::min<uint64_t>(u, 4));
                     if (np != state_.settings.wallpaper_preset) {
                         state_.settings.wallpaper_preset = np;
+                        RefreshLiveWallpaperState();
                         renderer_.ReloadWallpaper(np, state_.settings.dark_mode);
                         SyncSystemDesktopWallpaper(np, state_.settings.dark_mode, false);
                     }
@@ -5258,6 +7970,44 @@ private:
                     live_data_.weather = {};
                     live_data_.weather.status = city.empty() ? L"在设置里选一个城市" : L"正在获取天气…";
                     SetTimer(mount_.Hwnd(), kTimerWeatherCity, 1200, nullptr);
+                }
+                if (std::wstring enc; ipc::JsonFindWide(json, "widgets", enc)) {
+                    pulse::desktop::WidgetPrefs next = state_.settings.widgets;
+                    if (pulse::desktop::DecodeWidgetPrefs(enc, next) && !(next == state_.settings.widgets)) {
+                        state_.settings.widgets = next;
+                        ApplyWidgetPrefs();
+                    }
+                }
+                if (std::wstring enc; ipc::JsonFindWide(json, "dock", enc)) {
+                    pulse::desktop::DockPrefs next = model::ExtractDockPrefs(state_.settings);
+                    if (pulse::desktop::DecodeDockPrefs(enc, next) &&
+                        !(next == model::ExtractDockPrefs(state_.settings))) {
+                        const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+                        const uint8_t prev_pos = state_.settings.dock_position;
+                        const bool prev_en = state_.settings.dock_enabled;
+                        model::ApplyDockPrefs(next, state_.settings);
+                        if (prev_pos != state_.settings.dock_position) {
+                            dock_bar_pointer_inside_ = false;
+                            dock_bar_hover_presence_ = 0.0f;
+                            dock_bar_target_x_ = -1.0f;
+                            dock_bar_smooth_x_ = -1.0f;
+                            dock_bar_hovered_idx_ = -1;
+                            interaction_.dock_bar_hovered = false;
+                            interaction_.dock_bar_tooltip_index = -1;
+                            interaction_.dock_bar_tooltip_alpha = 0.0f;
+                        }
+                        if (state_.settings.dock_enabled && !prev_en) {
+                            dock_bar_should_hide_ = false;
+                            dock_bar_last_reveal_touch_ms_ = NowAnimMs();
+                        }
+                        if (state_.settings.dock_enabled) {
+                            RefreshLiquidDockBar(false, false);
+                        }
+                        dock_sys_monitor_.SetEnabled(state_.settings.dock_enabled && state_.settings.dock_system_area);
+                        EvaluateDockAutoHide(NowAnimMs());
+                        StartAnimClock();
+                        InvalidateDockBar(old_dmg);
+                    }
                 }
                 if (overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer &&
                     !overlays_.IsDraggingBeautifySlider() &&
@@ -5466,6 +8216,38 @@ private:
                     renderer_.InvalidateAll();
                 } else if (act == "restore-native-icons") {
                     mount::RestoreNativeIconSnapshot(mount_.InitialSnapshot());
+                } else if (act == "set-video-wallpaper") {
+                    std::wstring vpath;
+                    if (ipc::JsonFindWide(json, "path", vpath) && !vpath.empty()) {
+                        SetVideoWallpaperPath(vpath);
+                    }
+                } else if (act == "pick-video-wallpaper") {
+                    PickAndSetVideoWallpaper();
+                } else if (act == "cancel-video-optimize") {
+                    video_ctrl_.CancelOptimize();
+                } else if (act == "pick-photo-folder") {
+                    const std::wstring dir = PickFolderDialog(L"选择照片轮播文件夹");
+                    if (!dir.empty()) {
+                        bool updated = false;
+                        for (auto& x : state_.tiles) {
+                            if (model::ActiveTileView(x).kind == model::TileKind::Photos) {
+                                x.target_path = dir;
+                                updated = true;
+                            }
+                        }
+                        if (!updated) {
+                            InsertOrStackWidgetKind(model::TileKind::Photos);
+                            for (auto& x : state_.tiles) {
+                                if (model::ActiveTileView(x).kind == model::TileKind::Photos) {
+                                    x.target_path = dir;
+                                    break;
+                                }
+                            }
+                        }
+                        SaveModel();
+                        RefreshLiveTileData();
+                        renderer_.InvalidateAll();
+                    }
                 }
                 break;
             }
@@ -5492,18 +8274,129 @@ private:
             working_set_trimmed_ = false;
         }
         switch (msg) {
+        case WM_ACTIVATE: {
+            if (LOWORD(wp) != WA_INACTIVE) {
+                HWND prev = reinterpret_cast<HWND>(lp);
+                if (prev && prev != hwnd && IsWindow(prev)) {
+                    DWORD prev_pid = 0;
+                    GetWindowThreadProcessId(prev, &prev_pid);
+                    if (prev_pid != 0 && prev_pid != GetCurrentProcessId()) {
+                        last_external_fg_hwnd_ = prev;
+                        dock_sys_monitor_.SetForegroundHint(prev);
+                    }
+                }
+                UpdateDesktopActivity();
+                video_ctrl_.TickSecond(
+                    state_.settings.pause_on_fullscreen_or_battery,
+                    mount_.Hwnd(),
+                    overlays_.OverlayHwnd(),
+                    overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer);
+            }
+            break;
+        }
+        case kMsgDockSysReady: {
+            handled = true;
+            if (wp == 1) {
+                dock_sys_monitor_.RequestRefresh(true);
+                return 0;
+            }
+            if (state_.settings.dock_enabled && state_.settings.dock_system_area) {
+                const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
+                const size_t prev_slots = live_data_.dock.sys_slots.size();
+                live_data_.dock.sys_snap = dock_sys_monitor_.Snapshot();
+                if (overlays_.ActiveKind() == overlays::OverlayKind::DockSystemPanel) {
+                    overlays_.UpdateDockSystemPanel(live_data_.dock.sys_snap);
+                }
+                live_data_.dock.ComputeGeometry(PrimaryWorkAreaClient(), state_.settings,
+                                                dock_bar_smooth_x_, dock_bar_hover_presence_, NowAnimMs(),
+                                                interaction_.dock_bar_drag.active ? &interaction_.dock_bar_drag : nullptr,
+                                                0.016f, dock_bar_reveal_);
+                if (live_data_.dock.sys_slots.size() != prev_slots) {
+                    RecomputeLayout();
+                }
+                InvalidateDockBar(old_dmg);
+            }
+            return 0;
+        }
+        case kMsgDockTrashReady: {
+            handled = true;
+            if (state_.settings.dock_enabled) {
+                RefreshLiquidDockBar(true, false);
+            }
+            return 0;
+        }
+        case kMsgDockWinMinimize: {
+            handled = true;
+            HWND target = reinterpret_cast<HWND>(lp);
+            const bool is_start = (wp != 0);
+            const double now_ms = NowAnimMs();
+            if (is_start && target && target != mount_.Hwnd() && state_.settings.dock_enabled &&
+                state_.settings.dock_minimize_effect != 0 &&
+                !(target == suppress_genie_hwnd_ && now_ms < suppress_genie_until_ms_)) {
+                DWORD tpid = 0;
+                GetWindowThreadProcessId(target, &tpid);
+                if (tpid != 0 && tpid != GetCurrentProcessId()) {
+                    const LONG_PTR ex = GetWindowLongPtrW(target, GWL_EXSTYLE);
+                    const LONG_PTR st = GetWindowLongPtrW(target, GWL_STYLE);
+                    if (!(ex & WS_EX_TOOLWINDOW) && (st & WS_CAPTION)) {
+                        MinimizeWindowWithGenie(target, -1, /*already_minimizing_from_os=*/true);
+                    }
+                }
+            }
+            if (state_.settings.dock_enabled && !interaction_.dock_bar_drag.active) {
+                RefreshLiquidDockBar(true, false);
+            }
+            UpdateDesktopActivity();
+            video_ctrl_.TickSecond(
+                state_.settings.pause_on_fullscreen_or_battery,
+                mount_.Hwnd(),
+                overlays_.OverlayHwnd(),
+                overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer);
+            return 0;
+        }
         case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:
             CancelHoverPreview();
             break;
+        case WM_MBUTTONUP: {
+            const int x = GET_X_LPARAM(lp);
+            const int y = GET_Y_LPARAM(lp);
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                live_data_.dock.HitTestBar(static_cast<float>(x), static_cast<float>(y), dock_bar_pointer_inside_)) {
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                if (hit >= 0) {
+                    handled = true;
+                    ActivateDockBarItem(static_cast<size_t>(hit), /*force_new_instance=*/true);
+                    return 0;
+                }
+            }
+            break;
+        }
         case WM_SHOWWINDOW:
             if (!wp) CancelHoverPreview();
             break;
         case WM_POWERBROADCAST:
+            if (wp == PBT_POWERSETTINGCHANGE && lp != 0) {
+                const auto* pbs = reinterpret_cast<const POWERBROADCAST_SETTING*>(lp);
+                if (IsEqualGUID(pbs->PowerSetting, GUID_CONSOLE_DISPLAY_STATE) && pbs->DataLength >= sizeof(DWORD)) {
+                    const DWORD state_val = *reinterpret_cast<const DWORD*>(pbs->Data);
+                    display_off_ = (state_val == 0);
+                    if (display_off_) dock_genie_.ForceComplete();
+                    video_ctrl_.OnDisplayOffChanged(display_off_);
+                    UpdateDesktopActivity();
+                    return TRUE;
+                }
+            }
+            [[fallthrough]];
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
         case WM_DWMCOLORIZATIONCOLORCHANGED:
             ApplySystemAppearance();
+            if (msg == WM_SETTINGCHANGE && state_.settings.wallpaper_preset == model::WallpaperPreset::System) {
+                last_sys_wallpaper_token_ = render::WallpaperBackdrop::QuerySystemWallpaperChangeToken();
+                RecordExternalSystemWallpaperIfChanged();
+            }
             RefreshLiveWallpaperState();
             renderer_.ReloadWallpaper(state_.settings.wallpaper_preset, state_.settings.dark_mode);
             renderer_.InvalidateAll();
@@ -5512,13 +8405,33 @@ private:
         case WM_WTSSESSION_CHANGE:
             if (wp == WTS_SESSION_LOCK) {
                 session_locked_ = true;
+                dock_genie_.ForceComplete();
+                video_ctrl_.OnSessionLockChanged(true);
                 renderer_.OnLiveWallpaperFrameNotification(true);
             } else if (wp == WTS_SESSION_UNLOCK) {
                 session_locked_ = false;
+                video_ctrl_.OnSessionLockChanged(false);
                 RefreshLiveWallpaperState();
                 renderer_.InvalidateGlassOnly();
             }
+            UpdateDesktopActivity();
             break;
+
+        case kMsgForegroundChanged:
+            handled = true;
+            g_fg_change_posted.store(false, std::memory_order_release);
+            UpdateDesktopActivity();
+            video_ctrl_.TickSecond(
+                state_.settings.pause_on_fullscreen_or_battery,
+                mount_.Hwnd(),
+                overlays_.OverlayHwnd(),
+                overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer);
+            return 0;
+
+        case kMsgVideoWallpaper:
+            handled = true;
+            video_ctrl_.DrainUiEvents();
+            return 0;
 
         case kMsgLiveWallpaperProbe:
             handled = true;
@@ -5530,6 +8443,29 @@ private:
             const bool paused = session_locked_ ||
                 render::DesktopRenderer::ShouldPauseLiveActivity(state_.settings.pause_on_fullscreen_or_battery);
             renderer_.OnLiveWallpaperFrameNotification(paused);
+            return 0;
+        }
+
+        case kMsgAnimFrame: {
+            handled = true;
+            vsync_frame_pending_.store(false);
+            if (renderer_.ActivitySuspended()) {
+                // Keep ticking an in-flight Dock Genie warp even if the desktop became covered
+                // underneath (e.g. minimizing a window over maximized AutoCAD), so the topmost
+                // Genie overlay and its completion callback can never freeze on screen.
+                if (dock_genie_.IsActive()) {
+                    if (!dock_genie_.Tick(NowAnimMs())) {
+                        StopAnimClock();
+                    }
+                } else {
+                    StopAnimClock();
+                }
+                return 0;
+            }
+            const bool motion_active = TickMotionAnimations(NowAnimMs());
+            if (!motion_active && !renderer_.HasDirtyWork()) {
+                StopAnimClock();
+            }
             return 0;
         }
 
@@ -5563,18 +8499,46 @@ private:
             ApplyWeather(std::unique_ptr<live::WeatherResult>(reinterpret_cast<live::WeatherResult*>(lp)));
             return 0;
 
+        case kMsgMediaReady:
+            handled = true;
+            live_data_.media = media_monitor_.Snapshot();
+            for (const auto& t : state_.tiles) {
+                if (model::ActiveTileView(t).kind == model::TileKind::MediaPlayer) {
+                    renderer_.InvalidateRect(render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                }
+            }
+            return 0;
+
         case WM_TIMER:
             if (wp == kTimerHoverGlass) {
                 handled = true;
+                if (renderer_.ActivitySuspended()) {
+                    if (dock_genie_.IsActive()) {
+                        (void)dock_genie_.Tick(NowAnimMs());
+                    }
+                    return 0;
+                }
+                (void)TickMotionAnimations(NowAnimMs());
                 return 0;
             }
             if (wp == kTimerGroupInteraction) {
                 handled = true;
-                const std::string merge_target = group_drag_session_.MergeReady(GetTickCount64())
+                const uint64_t now_tick = GetTickCount64();
+                const std::string merge_target = group_drag_session_.MergeReady(now_tick)
                     ? group_drag_session_.MergeTarget() : std::string();
-                if (group_drag_session_.Pending() && interaction_.drop_target_group_id != merge_target) {
-                    interaction_.drop_target_group_id = merge_target;
-                    renderer_.InvalidateAll();
+                if (group_drag_session_.Pending()) {
+                    const bool target_changed = group_drag_session_.RefreshTargetRect(now_tick);
+                    if (interaction_.drop_target_group_id != merge_target || target_changed) {
+                        interaction_.drop_target_group_id = merge_target;
+                        if (group_drag_session_.Active() && !group_drag_session_.Resizing()) {
+                            group_ghost_.SetTarget(group_drag_session_.TargetRect(), true,
+                                                   group_drag_session_.MergeReady(now_tick));
+                            interaction_.drag_group_preview_rect = group_ghost_.CurrentRect();
+                            interaction_.drag_group_merge_armed = group_drag_session_.MergeReady(now_tick);
+                            StartAnimClock();
+                        }
+                        renderer_.InvalidateAll();
+                    }
                 }
                 POINT screen{};
                 if (GetCursorPos(&screen)) {
@@ -5588,8 +8552,30 @@ private:
             }
             if (wp == kTimerHeartbeat) {
                 handled = true;
+                UpdateDesktopActivity();
                 if (active_ai_session_ || overlays_.IsAiOrganizeUiOpen()) RequireAiOrganizerEnabled();
-                RefreshWidgetDetail(model::TileKind::Clock);
+                video_ctrl_.TickSecond(
+                    state_.settings.pause_on_fullscreen_or_battery,
+                    mount_.Hwnd(),
+                    overlays_.OverlayHwnd(),
+                    overlays_.ActiveKind() == overlays::OverlayKind::BeautifyDrawer);
+                if (!video_ctrl_.IsVideoActive() && state_.settings.wallpaper_preset == model::WallpaperPreset::System) {
+                    const std::wstring wp_token = render::WallpaperBackdrop::QuerySystemWallpaperChangeToken();
+                    if (!wp_token.empty() && wp_token != last_sys_wallpaper_token_) {
+                        last_sys_wallpaper_token_ = wp_token;
+                        RecordExternalSystemWallpaperIfChanged();
+                        RefreshLiveWallpaperState();
+                        renderer_.ReloadWallpaper(model::WallpaperPreset::System, state_.settings.dark_mode);
+                        renderer_.InvalidateAll();
+                    } else if ((heartbeat_tick_ % 2) == 0) {
+                        RefreshLiveWallpaperState();
+                    }
+                }
+                if (!renderer_.ActivitySuspended()) {
+                    RefreshWidgetDetail(model::TileKind::Clock);
+                    RefreshDockRunningApps(true);
+                    RefreshLiquidDockBar(true);
+                }
                 // Release temporary overlay contexts and D2D/DXGI staging buffers after idle,
                 // without evicting working-set pages via SetProcessWorkingSetSize.
                 if (!working_set_trimmed_ && !overlays_.IsOpen() && GetTickCount64() - last_activity_tick_ > 8000) {
@@ -5612,20 +8598,95 @@ private:
                         pipe_.Send(ipc::MessageType::Ping, ++next_req_id_, "{\"tick\":1}");
                     }
                 }
-                if (!tile_board_rect_.empty() &&
+                if (!renderer_.ActivitySuspended() && !tile_board_rect_.empty() &&
                     !render::DesktopRenderer::ShouldPauseLiveActivity(state_.settings.pause_on_fullscreen_or_battery)) {
                     SYSTEMTIME st{};
                     GetLocalTime(&st);
                     for (const auto& t : state_.tiles) {
                         const auto tv = model::ActiveTileView(t);
                         if (tv.kind != model::TileKind::Clock) continue;
-                        const bool is_analog = tv.analog_clock;
-                        if (is_analog || st.wMinute != last_clock_minute_) {
+                        // Every second only while a sweep hand shows; otherwise once a minute.
+                        const bool sweep = (tv.analog_clock || tv.size.cols >= 4) && state_.settings.widgets.clock_seconds;
+                        if (sweep || st.wMinute != last_clock_minute_) {
                             renderer_.InvalidateRect(
                                 render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
                         }
                     }
                     last_clock_minute_ = st.wMinute;
+                    if ((model::BoardHasKind(state_.tiles, model::TileKind::System) ||
+                         overlays_.WidgetDetailShows(model::TileKind::System)) &&
+                        heartbeat_tick_ % std::max<uint8_t>(state_.settings.widgets.system_refresh_s, 1) == 0) {
+                        SampleSystemMetrics();
+                    }
+                    if (live_data_.pomodoro.running) {
+                        bool finished_focus = false;
+                        const bool transitioned = live_data_.pomodoro.TickOneSecond(finished_focus);
+                        for (const auto& t : state_.tiles) {
+                            if (model::ActiveTileView(t).kind == model::TileKind::Pomodoro) {
+                                renderer_.InvalidateRect(
+                                    render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                            }
+                        }
+                        if (transitioned) {
+                            if (state_.settings.widgets.chime) MessageBeep(MB_OK);
+                            ShowUndoToast(finished_focus ? L"番茄专注完成！休息一下吧" : L"休息结束，准备下一轮专注");
+                        }
+                    }
+                    if (model::BoardHasKind(state_.tiles, model::TileKind::Battery) ||
+                        overlays_.WidgetDetailShows(model::TileKind::Battery)) {
+                        const uint64_t now_ms = GetTickCount64();
+                        if (!live_data_.battery.valid || now_ms - last_battery_sample_ms_ >= 5000) {
+                            const bool want_bt = state_.settings.widgets.battery_bluetooth;
+                            const bool poll_bt = want_bt && (!live_data_.battery.valid || (now_ms - last_bt_sample_ms_ >= 15000));
+                            auto next_bat = live::SampleBatteryPower(poll_bt);
+                            if (!want_bt) next_bat.bt_devices.clear();
+                            else if (!poll_bt) next_bat.bt_devices = live_data_.battery.bt_devices;
+                            else last_bt_sample_ms_ = now_ms;
+                            live_data_.battery = std::move(next_bat);
+                            last_battery_sample_ms_ = now_ms;
+                            for (const auto& t : state_.tiles) {
+                                if (model::ActiveTileView(t).kind == model::TileKind::Battery) {
+                                    renderer_.InvalidateRect(
+                                        render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                                }
+                            }
+                            RefreshWidgetDetail(model::TileKind::Battery);
+                        }
+                    }
+                    if ((model::BoardHasKind(state_.tiles, model::TileKind::Countdown) ||
+                         overlays_.WidgetDetailShows(model::TileKind::Countdown)) &&
+                        st.wMinute != last_countdown_minute_) {
+                        last_countdown_minute_ = st.wMinute;
+                        for (const auto& t : state_.tiles) {
+                            if (model::ActiveTileView(t).kind == model::TileKind::Countdown) {
+                                renderer_.InvalidateRect(
+                                    render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t));
+                            }
+                        }
+                        RefreshWidgetDetail(model::TileKind::Countdown);
+                    }
+                    media_monitor_.SetEnabled(model::BoardHasKind(state_.tiles, model::TileKind::MediaPlayer));
+                }
+                return 0;
+            }
+            if (wp == kTimerDockFollowup) {
+                handled = true;
+                KillTimer(hwnd, kTimerDockFollowup);
+                RefreshLiquidDockBar(true, false);
+                return 0;
+            }
+            if (wp == kTimerDockAutoHide) {
+                if (renderer_.ActivitySuspended()) { handled = true; return 0; }
+                handled = true;
+                const double now_ms = NowAnimMs();
+                EvaluateDockAutoHide(now_ms);
+                SampleForegroundWindowSnapshot(now_ms);
+                if (state_.settings.dock_enabled && !interaction_.dock_bar_drag.active) {
+                    const HWND fg_now = GetForegroundWindow();
+                    if (fg_now != last_dock_fg_hwnd_) {
+                        last_dock_fg_hwnd_ = fg_now;
+                        RefreshLiquidDockBar(true, false);
+                    }
                 }
                 return 0;
             }
@@ -5660,30 +8721,35 @@ private:
                 handled = true;
                 interaction_.edit_phase += 0.033f / 0.56f;
                 if (interaction_.edit_phase >= 1.0f) interaction_.edit_phase -= 1.0f;
-                if (!tile_board_rect_.empty()) {
-                    renderer_.InvalidateRect(model::RectI{tile_board_rect_.x - 16, tile_board_rect_.y - 40,
-                                                          tile_board_rect_.w + 32, tile_board_rect_.h + 56});
+                const model::RectI hdr_anchor = !tile_board_rect_.empty()
+                    ? tile_board_rect_
+                    : render::DesktopRenderer::ComputeBoardRectFallback(PrimaryWorkAreaClient(), true);
+                if (!hdr_anchor.empty()) {
+                    renderer_.InvalidateRect(model::RectI{hdr_anchor.x - 16, hdr_anchor.y - 42,
+                                                          hdr_anchor.w + 32, 46});
                 }
                 for (const auto& t : state_.tiles) {
                     const model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
-                    renderer_.InvalidateRect(model::RectI{tr.x - 20, tr.y - 20, tr.w + 40, tr.h + 40});
+                    // Cover rotated LiquidGlass hollowed drop shadow + top-left remove badge cleanly.
+                    renderer_.InvalidateRect(model::RectI{tr.x - 58, tr.y - 50, tr.w + 116, tr.h + 122});
                 }
                 return 0;
             }
             if (wp == kTimerLiveTiles) {
                 handled = true;
+                if (renderer_.ActivitySuspended()) return 0;
                 if (tile_board_rect_.empty()) return 0;
                 ++live_tick_;
                 if (live_tick_ % 3 == 0 && state_.settings.live_tiles_enabled &&
                     !render::DesktopRenderer::ShouldPauseLiveActivity(state_.settings.pause_on_fullscreen_or_battery))
                     RotateStacks();
-                if (model::BoardHasKind(state_.tiles, model::TileKind::System)) SampleSystemMetrics();
                 if (model::BoardHasKind(state_.tiles, model::TileKind::Weather)) RequestWeather(false);
                 EnsurePhotoTimer();
                 return 0;
             }
             if (wp == kTimerPhotos) {
                 handled = true;
+                if (renderer_.ActivitySuspended()) return 0;
                 const model::DesktopTile* photo = PhotoTile();
                 if (photo && state_.settings.live_tiles_enabled &&
                     !render::DesktopRenderer::ShouldPauseLiveActivity(state_.settings.pause_on_fullscreen_or_battery)) {
@@ -5698,7 +8764,9 @@ private:
             if (LOWORD(lp) == HTCLIENT) {
                 handled = true;
                 LPCTSTR cursor_id = IDC_ARROW;
-                if (resizing_group_idx_ || interaction_.hovered_group_zone == render::GroupHeaderHitZone::ResizeGrip) {
+                if (dock_bar_resizing_ || dock_bar_divider_hover_) {
+                    cursor_id = live_data_.dock.IsVertical() ? IDC_SIZEWE : IDC_SIZENS;
+                } else if (resizing_group_idx_ || interaction_.hovered_group_zone == render::GroupHeaderHitZone::ResizeGrip) {
                     cursor_id = IDC_SIZENWSE;
                 } else if (resizing_tile_idx_) {
                     if (resizing_tile_zone_ == render::TileResizeZone::Right) cursor_id = IDC_SIZEWE;
@@ -5743,21 +8811,60 @@ private:
                 return 0;
             }
 
+            // 0.5. Bottom-center Liquid Glass Dock bar divider resize, .dk-sys system slot, or icon press
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                live_data_.dock.HitTestBar(static_cast<float>(x), static_cast<float>(y), dock_bar_pointer_inside_)) {
+                if (const auto* sys_slot = live_data_.dock.HitTestSysSlot(static_cast<float>(x), static_cast<float>(y))) {
+                    OpenDockSystemPanelForSlot(*sys_slot, /*right_click=*/false);
+                    return 0;
+                }
+                if (live_data_.dock.IsPointInSysArea(static_cast<float>(x), static_cast<float>(y))) {
+                    return 0;
+                }
+                if (live_data_.dock.HitTestDivider(static_cast<float>(x), static_cast<float>(y)) >= 0) {
+                    dock_bar_resizing_ = true;
+                    dock_bar_resize_start_x_ = x;
+                    dock_bar_resize_start_y_ = y;
+                    dock_bar_resize_start_size_ = state_.settings.dock_icon_size;
+                    SetCapture(hwnd);
+                    return 0;
+                }
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                dock_bar_pressed_idx_ = hit;
+                dock_bar_press_pt_ = {x, y};
+                dock_bar_pressed_key_ = (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size())
+                    ? live_data_.dock.items[static_cast<size_t>(hit)].key
+                    : std::wstring{};
+                interaction_.dock_bar_pressed_index = hit;
+                if (hit >= 0) {
+                    SetCapture(hwnd);
+                    InvalidateDockBar();
+                }
+                return 0;
+            }
+
             // 1. Check group header chips, action buttons, footer & resize grips
             if (state_.settings.organize_enabled && !state_.settings.icons_hidden &&
                 state_.settings.active_scene != model::DesktopScene::Present) {
                 const bool focus_scene = (state_.settings.active_scene == model::DesktopScene::Focus);
                 for (const size_t i : GroupHitOrder()) {
                     const auto& gv = group_views_[i];
-                    if (!gv.frame.contains(x, y)) continue;
+                    int hit_x = x, hit_y = y;
+                    if (auto anim_it = interaction_.group_anim_positions.find(state_.groups[i].id);
+                        anim_it != interaction_.group_anim_positions.end()) {
+                        hit_x -= (anim_it->second.x - gv.frame.x);
+                        hit_y -= (anim_it->second.y - gv.frame.y);
+                    }
+                    if (!gv.frame.contains(hit_x, hit_y)) continue;
 
                     const auto zone = renderer_.HitTestGroupCard(
                         state_.groups[i], gv, focus_scene, interaction_.cleanable_installer_bytes,
-                        interaction_.hovered_group_id == state_.groups[i].id, x, y);
+                        interaction_.hovered_group_id == state_.groups[i].id, hit_x, hit_y);
 
                     if (zone == render::GroupHeaderHitZone::Tab ||
                         zone == render::GroupHeaderHitZone::TabPrev || zone == render::GroupHeaderHitZone::TabNext) {
-                        const auto target = render::HitTestGroupTab(gv, x, y);
+                        const auto target = render::HitTestGroupTab(gv, hit_x, hit_y);
                         if (target.empty()) return 0;
                         if (zone == render::GroupHeaderHitZone::Tab) {
                             // Defer selection until release so an inactive-tab drag
@@ -5857,7 +8964,7 @@ private:
                         SetCapture(hwnd);
                         return 0;
                     }
-                    if (y < gv.frame.y + model::kGroupHeaderHeight) {
+                    if (hit_y < gv.frame.y + model::kGroupHeaderHeight) {
                         BeginGroupDrag(i, x, y, false);
                         SetCapture(hwnd);
                         return 0;
@@ -5971,7 +9078,12 @@ private:
                     return 0;
                 }
                 for (size_t i = 0; i < state_.tiles.size(); ++i) {
-                    const model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, state_.tiles[i]);
+                    model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, state_.tiles[i]);
+                    if (auto anim_it = interaction_.tile_anim_positions.find(state_.tiles[i].id);
+                        anim_it != interaction_.tile_anim_positions.end()) {
+                        tr.x = anim_it->second.x;
+                        tr.y = anim_it->second.y;
+                    }
                     if (!tr.contains(x, y)) continue;
                     const render::TileResizeZone rzone = render::DesktopRenderer::HitTestTileResize(state_.tiles[i], tr, x, y);
                     if (rzone != render::TileResizeZone::None) {
@@ -5989,7 +9101,7 @@ private:
                     {
                         const int app_cell = interaction_.tile_edit_mode ? -1 : AppCellAt(state_.tiles[i], tr, x, y);
                         const bool inner_control = !interaction_.tile_edit_mode &&
-                            (app_cell >= 0 || TodoRowAt(state_.tiles[i], tr, y) >= 0 || IsTodoAddButtonAt(state_.tiles[i], tr, x, y) ||
+                            (app_cell >= 0 || TodoRowAt(state_.tiles[i], tr, x, y) >= 0 || IsTodoAddButtonAt(state_.tiles[i], tr, x, y) ||
                              ListTileRowAt(state_.tiles[i], tr, x, y) >= 0);
                         if (app_cell >= 0) {
                             interaction_.pressed_app_index = app_cell;
@@ -6040,6 +9152,66 @@ private:
                 tme.hwndTrack = hwnd;
                 if (TrackMouseEvent(&tme)) tracking_mouse_leave_ = true;
             }
+            if (dock_bar_resizing_) {
+                const model::RectI wa = PrimaryWorkAreaClient();
+                const model::RectI old_dmg = live_data_.dock.DamageRect(wa);
+                int delta = dock_bar_resize_start_y_ - y; // Bottom: upward = larger
+                if (state_.settings.dock_position == 1) {
+                    delta = x - dock_bar_resize_start_x_; // Left: rightward = larger
+                } else if (state_.settings.dock_position == 2) {
+                    delta = dock_bar_resize_start_x_ - x; // Right: leftward = larger
+                }
+                const uint8_t next_sz = static_cast<uint8_t>(std::clamp(static_cast<int>(dock_bar_resize_start_size_) + delta / 3, 36, 64));
+                if (next_sz != state_.settings.dock_icon_size) {
+                    state_.settings.dock_icon_size = next_sz;
+                    live_data_.dock.ComputeGeometry(wa, state_.settings, -1.0f, 0.0f, NowAnimMs());
+                    InvalidateDockBar(old_dmg);
+                }
+                return 0;
+            }
+
+            if (dock_bar_pressed_idx_ >= 0) {
+                if ((wp & MK_LBUTTON) != 0) {
+                    const int dist = std::abs(x - dock_bar_press_pt_.x) + std::abs(y - dock_bar_press_pt_.y);
+                    if (!interaction_.dock_bar_drag.active && dist >= 8 &&
+                        static_cast<size_t>(dock_bar_pressed_idx_) < live_data_.dock.items.size()) {
+                        const auto& pressed_item = live_data_.dock.items[static_cast<size_t>(dock_bar_pressed_idx_)];
+                        const bool draggable = (pressed_item.kind == render::DockBarItemKind::App) ||
+                            (pressed_item.kind == render::DockBarItemKind::Folder &&
+                             pressed_item.pinned && pressed_item.key != L"special:downloads");
+                        if (draggable) {
+                            interaction_.dock_bar_drag.active = true;
+                            interaction_.dock_bar_drag.source_index = dock_bar_pressed_idx_;
+                            interaction_.dock_bar_drag.source_key = pressed_item.key;
+                            interaction_.dock_bar_tooltip_alpha = 0.0f;
+                            interaction_.dock_bar_tooltip_index = -1;
+                            StartAnimClock();
+                        }
+                    }
+                    if (interaction_.dock_bar_drag.active) {
+                        const model::RectI wa = PrimaryWorkAreaClient();
+                        const model::RectI before_dmg = live_data_.dock.DamageRect(wa);
+                        interaction_.dock_bar_drag.cursor_x = static_cast<float>(x);
+                        interaction_.dock_bar_drag.cursor_y = static_cast<float>(y);
+                        const float pull_dist = live_data_.dock.effective_base_icon * 1.15f;
+                        if (state_.settings.dock_position == 1) {
+                            interaction_.dock_bar_drag.drag_out = (static_cast<float>(x) > live_data_.dock.pill_rect.right + pull_dist);
+                        } else if (state_.settings.dock_position == 2) {
+                            interaction_.dock_bar_drag.drag_out = (static_cast<float>(x) < live_data_.dock.pill_rect.left - pull_dist);
+                        } else {
+                            interaction_.dock_bar_drag.drag_out = (static_cast<float>(y) < live_data_.dock.pill_rect.top - pull_dist);
+                        }
+                        live_data_.dock.ComputeGeometry(wa, state_.settings, -1.0f, 0.0f, NowAnimMs(),
+                                                        &interaction_.dock_bar_drag, 0.016f);
+                        StartAnimClock();
+                        InvalidateDockBar(before_dmg);
+                        renderer_.InvalidateAll();
+                    }
+                }
+                // Keep icon anchored while pressed so fisheye drift cannot break click release.
+                return 0;
+            }
+
             UpdateGroupHoverAt(x, y, true, GetTickCount64());
             if (group_drag_session_.Pending()) {
                 if ((wp & MK_LBUTTON) != 0) UpdateGroupDrag(x, y, GetTickCount64());
@@ -6092,6 +9264,27 @@ private:
                 interaction_.drag_cursor_pos = {x, y};
                 interaction_.drop_target_group_id.clear();
                 interaction_.drop_target_tile_id.clear();
+                interaction_.drop_target_dock = 0;
+                interaction_.drop_hint_visible = false;
+                if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                    state_.settings.active_scene != model::DesktopScene::Present &&
+                    live_data_.dock.HitTestBar(static_cast<float>(x), static_cast<float>(y), true)) {
+                    const int hit = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                    if (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size() &&
+                        live_data_.dock.items[static_cast<size_t>(hit)].kind == render::DockBarItemKind::Trash) {
+                        interaction_.drop_target_dock = 2;
+                        interaction_.drop_hint_visible = true;
+                        interaction_.drop_hint_pos = {x, y};
+                        interaction_.drop_hint_label = L"移入回收站";
+                    } else {
+                        interaction_.drop_target_dock = 1;
+                        interaction_.drop_hint_visible = true;
+                        interaction_.drop_hint_pos = {x, y};
+                        interaction_.drop_hint_label = L"固定到程序坞";
+                    }
+                    renderer_.InvalidateAll();
+                    return 0;
+                }
                 for (const size_t gi : GroupHitOrder()) {
                     if (group_views_[gi].frame.contains(x, y)) {
                         interaction_.drop_target_group_id = state_.groups[gi].id;
@@ -6129,17 +9322,29 @@ private:
                 (std::abs(x - drag_start_pt_.x) >= 6 || std::abs(y - drag_start_pt_.y) >= 6)) {
                 KillTimer(hwnd, kTimerLongPress);
                 ReleaseTilePress();
+                const auto& picked = state_.tiles[*pending_tile_idx_];
+                tile_springs_.Cancel(picked.id);
+                interaction_.tile_anim_positions.erase(picked.id);
                 drag_tile_undo_snapshot_ = state_;
                 dragging_tile_idx_ = *pending_tile_idx_;
                 tile_drag_session_.Begin(state_.tiles, *dragging_tile_idx_, TileDragWorkAreaClient(drag_start_pt_),
                                          tile_board_rect_, CurrentGroupFrames());
                 pending_tile_idx_.reset();
                 const auto& t = state_.tiles[*dragging_tile_idx_];
+                const model::RectI start_rc = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
+                const D2D1_RECT_F start_rf = D2D1::RectF(static_cast<float>(start_rc.x), static_cast<float>(start_rc.y),
+                                                         static_cast<float>(start_rc.right()), static_cast<float>(start_rc.bottom()));
+                tile_ghost_.StartAt(start_rc, render::TileCornerRadiusDip(t, start_rf));
+                if (dock_target_hover_ && dock_target_tile_id_ == t.id) {
+                    dock_target_hover_ = false;
+                    dock_target_hovered_idx_ = -1;
+                }
                 interaction_.dragging_tile = true;
                 interaction_.dragging_tile_id = t.id;
-                interaction_.drag_tile_preview_rect =
-                    render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
+                interaction_.drag_tile_preview_rect = tile_ghost_.CurrentRect();
                 interaction_.drag_tile_valid = true;
+                interaction_.drag_tile_merge_armed = false;
+                StartAnimClock();
             }
 
             if (resizing_tile_idx_ && *resizing_tile_idx_ < state_.tiles.size()) {
@@ -6228,10 +9433,83 @@ private:
             std::string new_hover_tile;
             int new_todo = -1;
             int new_tile_row = -1;
+            int new_widget_btn = -1;
             bool new_tile_action = false;
             bool new_tile_edit_btn = false;
             render::TileResizeZone new_tile_resize = render::TileResizeZone::None;
             int new_tile_hdr_btn = 0;
+            // Bottom-center Liquid Glass Dock bar hover, bottom-edge wake, and fisheye magnification tracking
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                !dragging_tile_idx_ && !resizing_tile_idx_ && !group_drag_session_.Active() &&
+                !interaction_.marquee_active && !interaction_.dragging_items) {
+                const model::RectI wa_dock = PrimaryWorkAreaClient();
+                const bool edge_wake = (state_.settings.dock_position == 1) ? (x <= wa_dock.x + 12)
+                                     : (state_.settings.dock_position == 2) ? (x >= wa_dock.right() - 12)
+                                                                            : (y >= wa_dock.bottom() - 12);
+                if (state_.settings.dock_hide_mode != 0 && dock_bar_should_hide_ && edge_wake) {
+                    dock_bar_should_hide_ = false;
+                    dock_bar_last_reveal_touch_ms_ = NowAnimMs();
+                    StartAnimClock();
+                }
+                const bool over_dock = (dock_bar_reveal_ > 0.35f) && live_data_.dock.HitTestBar(
+                    static_cast<float>(x), static_cast<float>(y), dock_bar_pointer_inside_);
+                if (over_dock) {
+                    const bool fresh = !dock_bar_pointer_inside_ || dock_bar_hover_presence_ < 0.02f;
+                    dock_bar_pointer_inside_ = true;
+                    dock_bar_should_hide_ = false;
+                    dock_bar_last_reveal_touch_ms_ = NowAnimMs();
+                    const auto* sys_slot = live_data_.dock.HitTestSysSlot(static_cast<float>(x), static_cast<float>(y));
+                    const bool in_sys = (sys_slot != nullptr) ||
+                                        live_data_.dock.IsPointInSysArea(static_cast<float>(x), static_cast<float>(y));
+                    const auto new_sys_kind = sys_slot ? sys_slot->kind : render::DockSysSlotKind::None;
+                    const int new_sys_tray = sys_slot ? sys_slot->tray_index : -1;
+                    const bool sys_changed = (new_sys_kind != interaction_.dock_sys_hovered_kind ||
+                                              new_sys_tray != interaction_.dock_sys_hovered_tray_idx);
+                    interaction_.dock_sys_hovered_kind = new_sys_kind;
+                    interaction_.dock_sys_hovered_tray_idx = new_sys_tray;
+                    dock_bar_sys_hover_ = in_sys;
+                    if (in_sys) {
+                        dock_bar_hovered_idx_ = -1;
+                        dock_bar_divider_hover_ = false;
+                        if (sys_changed) InvalidateDockBar();
+                    } else {
+                        const float cursor_axis = live_data_.dock.IsVertical() ? static_cast<float>(y) : static_cast<float>(x);
+                        dock_bar_target_x_ = cursor_axis;
+                        if (fresh) dock_bar_smooth_x_ = cursor_axis;
+                        dock_bar_hovered_idx_ = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                        dock_bar_divider_hover_ = (live_data_.dock.HitTestDivider(static_cast<float>(x), static_cast<float>(y)) >= 0);
+                        if (dock_bar_hovered_idx_ >= 0) interaction_.dock_bar_tooltip_index = dock_bar_hovered_idx_;
+                        if (sys_changed) InvalidateDockBar();
+                    }
+                    interaction_.dock_bar_hovered = true;
+                    StartAnimClock();
+                } else if (dock_bar_pointer_inside_) {
+                    dock_bar_pointer_inside_ = false;
+                    dock_bar_sys_hover_ = false;
+                    dock_bar_hovered_idx_ = -1;
+                    dock_bar_divider_hover_ = false;
+                    dock_bar_last_reveal_touch_ms_ = NowAnimMs();
+                    interaction_.dock_bar_hovered = false;
+                    interaction_.dock_sys_hovered_kind = render::DockSysSlotKind::None;
+                    interaction_.dock_sys_hovered_tray_idx = -1;
+                    StartAnimClock();
+                }
+            } else if (dock_bar_pointer_inside_) {
+                dock_bar_pointer_inside_ = false;
+                dock_bar_sys_hover_ = false;
+                dock_bar_hovered_idx_ = -1;
+                dock_bar_divider_hover_ = false;
+                interaction_.dock_bar_hovered = false;
+                interaction_.dock_sys_hovered_kind = render::DockSysSlotKind::None;
+                interaction_.dock_sys_hovered_tray_idx = -1;
+                StartAnimClock();
+            }
+
+            if (dock_target_hover_ && !state_.settings.tiles_enabled) {
+                dock_target_hover_ = false;
+                dock_target_hovered_idx_ = -1;
+            }
             if (state_.settings.tiles_enabled && state_.settings.organize_enabled && !interaction_.side_drawer_open) {
                 const model::RectI hdr_anchor = !tile_board_rect_.empty()
                     ? tile_board_rect_
@@ -6243,6 +9521,7 @@ private:
                         new_tile_hdr_btn = 2;
                     }
                 }
+                bool hit_dock = false;
                 for (const auto& t : state_.tiles) {
                     const model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
                     if (tr.contains(x, y)) {
@@ -6257,7 +9536,31 @@ private:
                             } else {
                                 const int app = AppCellAt(t, tr, x, y);
                                 if (app >= 0) new_hover_path = state_.items[AppsInTile()[static_cast<size_t>(app)]].path;
-                                new_todo = TodoRowAt(t, tr, y);
+                                const auto tv_kind = model::ActiveTileView(t).kind;
+                                if (tv_kind == model::TileKind::Apps && t.size.cols >= 2) {
+                                    hit_dock = true;
+                                    const bool fresh_enter = !dock_target_hover_ ||
+                                        dock_target_tile_id_ != t.id ||
+                                        interaction_.dock_hover_presence < 0.02f;
+                                    dock_target_hover_ = true;
+                                    dock_target_tile_id_ = t.id;
+                                    dock_target_cursor_x_ = static_cast<float>(x);
+                                    dock_target_cursor_y_ = static_cast<float>(y);
+                                    dock_target_hovered_idx_ = app;
+                                    if (fresh_enter) {
+                                        interaction_.dock_anim_tile_id = t.id;
+                                        interaction_.dock_smooth_cursor_x = static_cast<float>(x);
+                                        interaction_.dock_cursor_y = static_cast<float>(y);
+                                    }
+                                    StartAnimClock();
+                                } else if (tv_kind == model::TileKind::Pomodoro) {
+                                    new_widget_btn = render::DesktopRenderer::HitTestPomodoroButton(
+                                        t, trf, static_cast<float>(x), static_cast<float>(y));
+                                } else if (tv_kind == model::TileKind::MediaPlayer) {
+                                    new_widget_btn = render::DesktopRenderer::HitTestMediaButton(
+                                        t, trf, static_cast<float>(x), static_cast<float>(y));
+                                }
+                                new_todo = TodoRowAt(t, tr, x, y);
                                 if (new_todo < 0 && IsTodoAddButtonAt(t, tr, x, y)) {
                                     new_tile_action = true;
                                 }
@@ -6267,6 +9570,15 @@ private:
                         break;
                     }
                 }
+                if (!hit_dock && dock_target_hover_) {
+                    dock_target_hover_ = false;
+                    dock_target_hovered_idx_ = -1;
+                    StartAnimClock();
+                }
+            } else if (dock_target_hover_) {
+                dock_target_hover_ = false;
+                dock_target_hovered_idx_ = -1;
+                StartAnimClock();
             }
             auto invalidate_hover_tiles = [&] {
                 for (const auto& tile : state_.tiles) {
@@ -6277,12 +9589,14 @@ private:
             };
             if (new_todo != interaction_.hovered_todo_index ||
                 new_tile_row != interaction_.hovered_tile_row ||
+                new_widget_btn != interaction_.hovered_widget_btn ||
                 new_tile_action != interaction_.hovered_tile_action ||
                 new_tile_edit_btn != interaction_.hovered_tile_edit_btn ||
                 new_tile_resize != interaction_.hovered_tile_resize ||
                 new_tile_hdr_btn != interaction_.hovered_tile_header_btn) {
                 interaction_.hovered_todo_index = new_todo;
                 interaction_.hovered_tile_row = new_tile_row;
+                interaction_.hovered_widget_btn = new_widget_btn;
                 interaction_.hovered_tile_action = new_tile_action;
                 interaction_.hovered_tile_edit_btn = new_tile_edit_btn;
                 interaction_.hovered_tile_resize = new_tile_resize;
@@ -6356,6 +9670,22 @@ private:
             handled = true;
             tracking_mouse_leave_ = false;
             interaction_.cursor_inside = false;
+            if (dock_target_hover_) {
+                dock_target_hover_ = false;
+                dock_target_hovered_idx_ = -1;
+                StartAnimClock();
+            }
+            if (dock_bar_pointer_inside_ && dock_bar_pressed_idx_ < 0 &&
+                !interaction_.dock_bar_drag.active && !dock_bar_resizing_) {
+                dock_bar_pointer_inside_ = false;
+                dock_bar_sys_hover_ = false;
+                dock_bar_hovered_idx_ = -1;
+                dock_bar_divider_hover_ = false;
+                interaction_.dock_bar_hovered = false;
+                interaction_.dock_sys_hovered_kind = render::DockSysSlotKind::None;
+                interaction_.dock_sys_hovered_tray_idx = -1;
+                StartAnimClock();
+            }
             return 0;
         }
 
@@ -6367,6 +9697,61 @@ private:
             releasing_capture_ = true;
             if (GetCapture() == hwnd) ReleaseCapture();
             releasing_capture_ = false;
+            if (dock_bar_resizing_) {
+                dock_bar_resizing_ = false;
+                RecomputeLayout();
+                SaveModel();
+                renderer_.InvalidateAll();
+                return 0;
+            }
+            if (dock_bar_pressed_idx_ >= 0) {
+                const int prev = dock_bar_pressed_idx_;
+                const std::wstring prev_key = dock_bar_pressed_key_;
+                const model::PointI press_pt = dock_bar_press_pt_;
+                dock_bar_pressed_idx_ = -1;
+                dock_bar_pressed_key_.clear();
+                interaction_.dock_bar_pressed_index = -1;
+
+                if (interaction_.dock_bar_drag.active) {
+                    const render::DockBarDragState finished = interaction_.dock_bar_drag;
+                    interaction_.dock_bar_drag = {};
+                    int src_idx = live_data_.dock.FindItemIndexByKey(finished.source_key);
+                    if (src_idx < 0) src_idx = finished.source_index;
+                    if (src_idx >= 0 && static_cast<size_t>(src_idx) < live_data_.dock.items.size()) {
+                        const auto src_copy = live_data_.dock.items[static_cast<size_t>(src_idx)];
+                        if (finished.drag_out && src_copy.pinned && src_copy.key != L"special:downloads") {
+                            PinOrUnpinDockPath(src_copy.launch_path, false);
+                            const double poof_ms = NowAnimMs();
+                            live_data_.dock.TriggerPoof(static_cast<float>(x), static_cast<float>(y), poof_ms);
+                            interaction_.dock_now_ms = poof_ms;
+                            StartAnimClock();
+                        } else if (!finished.drag_out && finished.target_pinned_slot >= 0 && !src_copy.launch_path.empty()) {
+                            ReorderOrInsertDockPin(src_copy.launch_path, finished.target_pinned_slot);
+                            if (!src_copy.pinned) {
+                                ShowUndoToast(L"已固定到程序坞");
+                            }
+                        } else {
+                            live_data_.dock.ComputeGeometry(PrimaryWorkAreaClient(), state_.settings,
+                                                            dock_bar_smooth_x_, dock_bar_hover_presence_, NowAnimMs());
+                        }
+                    }
+                    renderer_.InvalidateAll();
+                    return 0;
+                }
+
+                int resolved = live_data_.dock.FindItemIndexByKey(prev_key);
+                if (resolved < 0) resolved = prev;
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                const float move_dist = std::hypot(static_cast<float>(x - press_pt.x), static_cast<float>(y - press_pt.y));
+                const bool in_bar = live_data_.dock.HitTestBar(static_cast<float>(x), static_cast<float>(y), true);
+                InvalidateDockBar();
+                if (resolved >= 0 && static_cast<size_t>(resolved) < live_data_.dock.items.size() &&
+                    (hit == resolved || (move_dist <= 14.0f && in_bar))) {
+                    const bool shift_new = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    ActivateDockBarItem(static_cast<size_t>(resolved), shift_new);
+                }
+                return 0;
+            }
             if (group_drag_session_.Pending()) {
                 FinishGroupDrag(x, y);
                 return 0;
@@ -6377,9 +9762,24 @@ private:
                                                       interaction_.selected_paths.end());
                 const std::string dst_grp = interaction_.drop_target_group_id;
                 const std::string dst_tile = interaction_.drop_target_tile_id;
+                const int dst_dock = interaction_.drop_target_dock;
                 interaction_.dragging_items = false;
                 interaction_.drop_target_group_id.clear();
                 interaction_.drop_target_tile_id.clear();
+                interaction_.drop_target_dock = 0;
+                interaction_.drop_hint_visible = false;
+
+                if (dst_dock == 2) {
+                    RecyclePathsWithUndoToast(paths);
+                    renderer_.InvalidateAll();
+                    return 0;
+                }
+                if (dst_dock == 1) {
+                    // Non-destructive pin to Dock: original desktop icon / group membership stays untouched!
+                    PinPathsToDock(paths);
+                    renderer_.InvalidateAll();
+                    return 0;
+                }
 
                 if (!dst_grp.empty()) {
                     std::wstring mapped_dst_dir;
@@ -6482,17 +9882,43 @@ private:
                         return 0;
                     }
                 }
+                if (model::ActiveTileView(state_.tiles[ti]).kind == model::TileKind::Apps &&
+                    state_.tiles[ti].size.cols >= 2) {
+                    const D2D1_RECT_F drf = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
+                                                        static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
+                    const auto dlay = render::ComputeDockTileLayout(state_.tiles[ti], drf, AppsInTile().size(),
+                                                                    MakeDockLayoutInput(state_.tiles[ti].id, NowAnimMs()));
+                    if (dlay.single_row && dlay.pages > 1) {
+                        const D2D1_RECT_F prev_btn = render::DockPagerArrowRect(drf, false);
+                        const D2D1_RECT_F next_btn = render::DockPagerArrowRect(drf, true);
+                        if (x >= prev_btn.left && x < prev_btn.right && y >= prev_btn.top && y < prev_btn.bottom) {
+                            const int next = std::clamp(interaction_.apps_page - 1, 0, dlay.pages - 1);
+                            if (next != interaction_.apps_page) { interaction_.apps_page = next; InvalidateDockTile(state_.tiles[ti].id); }
+                            return 0;
+                        }
+                        if (x >= next_btn.left && x < next_btn.right && y >= next_btn.top && y < next_btn.bottom) {
+                            const int next = std::clamp(interaction_.apps_page + 1, 0, dlay.pages - 1);
+                            if (next != interaction_.apps_page) { interaction_.apps_page = next; InvalidateDockTile(state_.tiles[ti].id); }
+                            return 0;
+                        }
+                    }
+                }
                 const int app = AppCellAt(state_.tiles[ti], tr, x, y);
                 if (app >= 0) {
                     const auto& it = state_.items[AppsInTile()[static_cast<size_t>(app)]];
+                    interaction_.dock_bounce_path = it.path;
+                    interaction_.dock_bounce_start_ms = NowAnimMs();
+                    interaction_.dock_now_ms = interaction_.dock_bounce_start_ms;
+                    InvalidateDockTile(state_.tiles[ti].id);
+                    StartAnimClock();
                     LaunchAsync(it.path);
                     return 0;
                 }
-                const int todo = TodoRowAt(state_.tiles[ti], tr, y);
+                const int todo = TodoRowAt(state_.tiles[ti], tr, x, y);
                 if (todo >= 0 && interaction_.hovered_todo_index == todo) {
                     const D2D1_RECT_F trf2 = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
                                                          static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
-                    const D2D1_RECT_F xb = render::DesktopRenderer::TodoDeleteRect(state_.tiles[ti], trf2, static_cast<size_t>(todo));
+                    const D2D1_RECT_F xb = render::DesktopRenderer::TodoDeleteRect(state_.tiles[ti], trf2, static_cast<size_t>(std::max(0, TodoDisplayRow(todo))));
                     if (x >= xb.left && x < xb.right && y >= xb.top && y < xb.bottom) {
                         PushUndo(L"删除待办");
                         state_.todos.erase(state_.todos.begin() + todo);
@@ -6523,6 +9949,53 @@ private:
                     else LaunchAsync(row_path);
                     return 0;
                 }
+                {
+                    const auto tv_k = model::ActiveTileView(state_.tiles[ti]).kind;
+                    const D2D1_RECT_F trf_btn = D2D1::RectF(static_cast<float>(tr.x), static_cast<float>(tr.y),
+                                                            static_cast<float>(tr.right()), static_cast<float>(tr.bottom()));
+                    if (tv_k == model::TileKind::Pomodoro) {
+                        const int pbtn = render::DesktopRenderer::HitTestPomodoroButton(
+                            state_.tiles[ti], trf_btn, static_cast<float>(x), static_cast<float>(y));
+                        if (pbtn == 0) {
+                            live_data_.pomodoro.Toggle();
+                            renderer_.InvalidateRect(tr);
+                            return 0;
+                        } else if (pbtn == 1) {
+                            live_data_.pomodoro.Reset();
+                            renderer_.InvalidateRect(tr);
+                            return 0;
+                        } else if (pbtn == 2) {
+                            live_data_.pomodoro.CyclePhase();
+                            renderer_.InvalidateRect(tr);
+                            return 0;
+                        } else if (pbtn == 3) {
+                            live_data_.pomodoro.SetPreset(live::PomodoroPhase::Focus, 25);
+                            renderer_.InvalidateRect(tr);
+                            return 0;
+                        } else if (pbtn == 4) {
+                            live_data_.pomodoro.SetPreset(live::PomodoroPhase::Focus, 45);
+                            renderer_.InvalidateRect(tr);
+                            return 0;
+                        } else if (pbtn == 5) {
+                            live_data_.pomodoro.SetPreset(live::PomodoroPhase::ShortBreak, live_data_.pomodoro.focus_minutes);
+                            renderer_.InvalidateRect(tr);
+                            return 0;
+                        }
+                    } else if (tv_k == model::TileKind::MediaPlayer) {
+                        const int mbtn = render::DesktopRenderer::HitTestMediaButton(
+                            state_.tiles[ti], trf_btn, static_cast<float>(x), static_cast<float>(y));
+                        if (mbtn == 0) {
+                            media_monitor_.SendCommand(live::MediaCommand::Previous);
+                            return 0;
+                        } else if (mbtn == 1) {
+                            media_monitor_.SendCommand(live::MediaCommand::PlayPause);
+                            return 0;
+                        } else if (mbtn == 2) {
+                            media_monitor_.SendCommand(live::MediaCommand::Next);
+                            return 0;
+                        }
+                    }
+                }
                 ActivateTileClick(ti, tr);
                 return 0;
             }
@@ -6550,6 +10023,18 @@ private:
             handled = true;
             const int x = GET_X_LPARAM(lp);
             const int y = GET_Y_LPARAM(lp);
+
+            // Double-click on the Dock bar activates the clicked icon and never hides desktop icons.
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                live_data_.dock.HitTestBar(static_cast<float>(x), static_cast<float>(y), dock_bar_pointer_inside_)) {
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                if (hit >= 0) {
+                    const bool shift_new = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    ActivateDockBarItem(static_cast<size_t>(hit), shift_new);
+                }
+                return 0;
+            }
 
             // Double-click group header -> collapse / expand!
             if (state_.settings.organize_enabled && !state_.settings.icons_hidden &&
@@ -6607,6 +10092,16 @@ private:
 
         case WM_CANCELMODE:
             CancelHoverPreview();
+            if (dock_bar_pressed_idx_ >= 0 || interaction_.dock_bar_drag.active || dock_bar_resizing_) {
+                dock_bar_pressed_idx_ = -1;
+                dock_bar_pressed_key_.clear();
+                dock_bar_resizing_ = false;
+                interaction_.dock_bar_pressed_index = -1;
+                interaction_.dock_bar_drag = {};
+                live_data_.dock.ComputeGeometry(PrimaryWorkAreaClient(), state_.settings,
+                                                dock_bar_smooth_x_, dock_bar_hover_presence_, NowAnimMs());
+                renderer_.InvalidateAll();
+            }
             if (group_drag_session_.Pending()) {
                 handled = true;
                 CancelGroupDrag();
@@ -6624,6 +10119,14 @@ private:
             ReleaseTilePress();
             if (!releasing_capture_) {
                 bool need_recompute = false;
+                if (dock_bar_pressed_idx_ >= 0 || interaction_.dock_bar_drag.active || dock_bar_resizing_) {
+                    dock_bar_pressed_idx_ = -1;
+                    dock_bar_pressed_key_.clear();
+                    dock_bar_resizing_ = false;
+                    interaction_.dock_bar_pressed_index = -1;
+                    interaction_.dock_bar_drag = {};
+                    need_recompute = true;
+                }
                 if (resizing_tile_idx_) {
                     resizing_tile_idx_.reset();
                     resizing_tile_zone_ = render::TileResizeZone::None;
@@ -6648,9 +10151,31 @@ private:
             break;
 
         case WM_MOUSEWHEEL: {
-            // Over a group card or tile stack, the wheel turns its pages.
+            // Over Dock Volume icon: scroll adjusts master volume ±2% + floating glass Volume OSD (1.2s)!
             POINT scr{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             const POINT c = mount_.ScreenPxToClientDip(scr);
+            if (state_.settings.dock_enabled && state_.settings.dock_system_area &&
+                !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present) {
+                if (const auto* slot = live_data_.dock.HitTestSysSlot(static_cast<float>(c.x), static_cast<float>(c.y));
+                    slot && slot->kind == render::DockSysSlotKind::Volume) {
+                    handled = true;
+                    const int step = (GET_WHEEL_DELTA_WPARAM(wp) > 0) ? 2 : -2;
+                    int new_pct = std::clamp(live_data_.dock.sys_snap.volume_pct + step, 0, 100);
+                    bool new_muted = (new_pct == 0);
+                    live::StepMasterAudioVolume(step, new_pct, new_muted);
+                    live_data_.dock.sys_snap.volume_pct = new_pct;
+                    live_data_.dock.sys_snap.muted = new_muted;
+                    overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+                    overlays_.SetBeautifySettings(state_.settings);
+                    overlays_.SetDockPanelLightInk(state_.settings.dark_mode);
+                    overlays_.ShowDockVolumeOsd(PrimaryWorkAreaScreen(), DockSysSlotScreenRect(*slot),
+                                                state_.settings.dock_position, new_pct, new_muted, 1200);
+                    InvalidateDockBar();
+                    return 0;
+                }
+            }
+            // Over a group card or tile stack, the wheel turns its pages.
             if (state_.settings.organize_enabled && !state_.settings.icons_hidden &&
                 state_.settings.active_scene != model::DesktopScene::Present &&
                 !interaction_.side_drawer_open && !overlays_.IsOpen()) {
@@ -6701,7 +10226,7 @@ private:
                 if (now - last_wheel_tick_ < 220) return 0;
                 last_wheel_tick_ = now;
                 const int next = std::clamp(interaction_.apps_page + (GET_WHEEL_DELTA_WPARAM(wp) < 0 ? 1 : -1), 0, pages - 1);
-                if (next != interaction_.apps_page) { interaction_.apps_page = next; renderer_.InvalidateRect(tr); }
+                if (next != interaction_.apps_page) { interaction_.apps_page = next; InvalidateDockTile(t.id); }
                 return 0;
             }
             for (auto& t : state_.tiles) {
@@ -6729,6 +10254,21 @@ private:
             const int y = GET_Y_LPARAM(lp);
             POINT scr{x, y};
             mount_.ClientToScreenDip(&scr);
+
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                live_data_.dock.HitTestBar(static_cast<float>(x), static_cast<float>(y), dock_bar_pointer_inside_)) {
+                if (const auto* sys_slot = live_data_.dock.HitTestSysSlot(static_cast<float>(x), static_cast<float>(y))) {
+                    if (sys_slot->kind == render::DockSysSlotKind::Ime ||
+                        sys_slot->kind == render::DockSysSlotKind::PinnedTrayApp) {
+                        OpenDockSystemPanelForSlot(*sys_slot, /*right_click=*/true);
+                        return 0;
+                    }
+                }
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(x), static_cast<float>(y));
+                OpenDockBarContextMenu(hit, scr);
+                return 0;
+            }
 
             overlays::ContextMenuSpec spec{};
             spec.screen_anchor = scr;
@@ -6979,7 +10519,11 @@ private:
     mount::DesktopMountHost mount_;
     mount::DesktopFolderWatcher watcher_;
     host::LiveWallpaperWatcher live_watcher_;
+    video::VideoWallpaperController video_ctrl_;
+    HPOWERNOTIFY display_power_notify_ = nullptr;
+    uint32_t video_accent_argb_ = 0;
     render::DesktopRenderer renderer_;
+    std::unique_ptr<render::DesktopRenderer> preview_renderer_;  // 添加小组件 preview, only while the drawer is open
     overlays::DesktopOverlayController overlays_;
     overlays::DesktopDropManager drop_mgr_;
     ipc::AsyncPipeEndpoint pipe_;
@@ -7016,8 +10560,15 @@ private:
     std::optional<size_t> pending_tile_idx_;
     bool tile_long_pressed_ = false;
     live::SystemSampler system_sampler_;
+    live::MediaSessionMonitor media_monitor_;
+    live::DockSystemMonitor dock_sys_monitor_;
+    bool dock_bar_sys_hover_ = false;
+    uint64_t last_battery_sample_ms_ = 0;
+    uint64_t last_bt_sample_ms_ = 0;
+    WORD last_countdown_minute_ = 65535;
     std::shared_ptr<std::atomic<bool>> weather_inflight_ = std::make_shared<std::atomic<bool>>(false);
     std::shared_ptr<std::atomic<uint64_t>> wallpaper_apply_seq_ = std::make_shared<std::atomic<uint64_t>>(0);
+    std::wstring last_sys_wallpaper_token_;
     bool items_paths_dirty_ = true;
     uint32_t heartbeat_tick_ = 0;
     uint64_t weather_fetched_tick_ = 0;
@@ -7042,8 +10593,55 @@ private:
     model::RectI resize_tile_start_rect_{};
     model::DesktopModelState drag_tile_undo_snapshot_{};
     model::TileDragSession tile_drag_session_;
+    model::SmoothGhostState tile_ghost_{};
+    model::SmoothGhostState group_ghost_{};
+    model::SpringMoveList tile_springs_{};
+    model::SpringMoveList group_springs_{};
+    double last_motion_ms_ = 0.0;
+    bool dock_target_hover_ = false;
+    std::string dock_target_tile_id_;
+    float dock_target_cursor_x_ = 0.0f;
+    float dock_target_cursor_y_ = 0.0f;
+    int dock_target_hovered_idx_ = -1;
+    bool dock_bar_pointer_inside_ = false;
+    float dock_bar_target_x_ = -1.0f;
+    float dock_bar_smooth_x_ = -1.0f;
+    float dock_bar_hover_presence_ = 0.0f;
+    int dock_bar_hovered_idx_ = -1;
+    int dock_bar_pressed_idx_ = -1;
+    std::wstring dock_bar_pressed_key_;
+    model::PointI dock_bar_press_pt_{};
+    bool dock_bar_divider_hover_ = false;
+    bool dock_bar_resizing_ = false;
+    int dock_bar_resize_start_x_ = 0;
+    int dock_bar_resize_start_y_ = 0;
+    uint8_t dock_bar_resize_start_size_ = 48;
+    float dock_bar_reveal_ = 1.0f;
+    bool dock_bar_should_hide_ = false;
+    double dock_bar_last_reveal_touch_ms_ = 0.0;
+    HWINEVENTHOOK dock_min_hook_ = nullptr;
+    HWINEVENTHOOK foreground_hook_ = nullptr;
+    render::DockGenieAnimator dock_genie_{};
+    bool dock_genie_ready_ = false;
+    overlays::DockStackPopup dock_stack_{}; // Dock stacks (叠放): Fan / Grid / List popups
+    std::vector<RecentWindowSnap> recent_win_snaps_;
+    double last_fg_snap_ms_ = 0.0;
+    double last_fg_snap_prune_ms_ = 0.0;
+    bool fg_snap_in_caption_ = false;
+    HWND fg_snap_caption_hwnd_ = nullptr;
+    HWND suppress_genie_hwnd_ = nullptr;
+    double suppress_genie_until_ms_ = 0.0;
+    HWND last_external_fg_hwnd_ = nullptr;
+    HWND last_dock_fg_hwnd_ = nullptr;
+    std::shared_ptr<DockTrashAsyncState> dock_trash_state_ = std::make_shared<DockTrashAsyncState>();
+    std::thread vsync_thread_;
+    HANDLE vsync_wake_event_ = nullptr;
+    std::atomic<bool> vsync_stop_{false};
+    std::atomic<bool> vsync_active_{false};
+    std::atomic<bool> vsync_frame_pending_{false};
 #ifdef PULSE_DESKTOP_DRAG_TEST
     std::string test_saved_model_;
+    std::vector<std::wstring> test_dock_activations_;
 #endif
 #ifdef PULSE_DESKTOP_PERSISTENCE_TEST
     std::string test_model_input_;
@@ -7068,6 +10666,9 @@ private:
     bool hover_glass_timer_active_ = false;
     bool tracking_mouse_leave_ = false;
     bool session_locked_ = false;
+    bool display_off_ = false;
+    uint64_t suspended_since_ms_ = 0;
+    bool suspended_resources_trimmed_ = false;
     std::unordered_set<std::wstring> marquee_base_selection_;
 };
 

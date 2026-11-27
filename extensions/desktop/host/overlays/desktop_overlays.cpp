@@ -2,6 +2,7 @@
 #include "host/overlays/desktop_overlays.h"
 #include "host/overlays/widget_icons.h"
 #include "host/render/vector_glyphs.h"
+#include "host/render/liquid_dock_bar.h"
 #include "../../../../src/common/localization.h"
 
 #include <dwmapi.h>
@@ -24,7 +25,7 @@ const wchar_t* WidgetName(model::TileKind k) {
     case model::TileKind::Todo: return L"待办";
     case model::TileKind::Clock: return L"时钟";
     case model::TileKind::StickyNote: return L"便笺";
-    case model::TileKind::Apps: return L"应用";
+    case model::TileKind::Apps: return L"应用坞";
     case model::TileKind::Recent: return L"最近使用";
     case model::TileKind::Downloads: return L"下载";
     case model::TileKind::System: return L"系统";
@@ -33,6 +34,10 @@ const wchar_t* WidgetName(model::TileKind k) {
     case model::TileKind::RecycleBin: return L"回收站";
     case model::TileKind::ThisPC: return L"此电脑";
     case model::TileKind::PulseLauncher: return L"Pulse";
+    case model::TileKind::Pomodoro: return L"番茄专注";
+    case model::TileKind::MediaPlayer: return L"正在播放";
+    case model::TileKind::Countdown: return L"倒数日";
+    case model::TileKind::Battery: return L"电池设备";
     default: return L"磁贴";
     }
 }
@@ -53,6 +58,10 @@ wchar_t WidgetGlyph(model::TileKind k) {
     case model::TileKind::RecycleBin: return L'\xE74D';
     case model::TileKind::ThisPC: return L'\xE977';
     case model::TileKind::PulseLauncher: return L'\xEC50';
+    case model::TileKind::Pomodoro: return L'\xE916';
+    case model::TileKind::MediaPlayer: return L'\xE8D6';
+    case model::TileKind::Countdown: return L'\xE787';
+    case model::TileKind::Battery: return L'\xE83F';
     default: return L'\xE8A5';
     }
 }
@@ -65,7 +74,7 @@ const wchar_t* WidgetDesc(model::TileKind k) {
     case model::TileKind::Todo: return L"直接在桌面上勾掉；和 Microsoft To Do 同步。";
     case model::TileKind::Clock: return L"表盘或数字，跟随系统时间和时区。";
     case model::TileKind::StickyNote: return L"随手记一句，自动保存，演示时隐藏。";
-    case model::TileKind::Apps: return L"桌面上的应用快捷方式收在一起，点一下启动。";
+    case model::TileKind::Apps: return L"macOS 风格液态玻璃程序坞，支持悬停放大、运行状态点与点击弹跳。";
     case model::TileKind::StagingTray: return L"和 Pulse 的暂存区是同一份，桌面和 Pulse 之间拖进拖出。";
     case model::TileKind::Downloads: return L"最新下载的文件排在最前，拖出来就能用。";
     case model::TileKind::Recent: return L"Pulse 和应用里最近打开的文件。";
@@ -74,6 +83,10 @@ const wchar_t* WidgetDesc(model::TileKind k) {
     case model::TileKind::RecycleBin: return L"显示回收站占用空间，右键一键清空。";
     case model::TileKind::ThisPC: return L"快速打开此电脑与系统存储管理。";
     case model::TileKind::PulseLauncher: return L"一键唤起 Pulse 主窗口与全盘秒搜。";
+    case model::TileKind::Pomodoro: return L"桌面直接开始/暂停番茄钟，支持 25/45 分钟专注与休息切换。";
+    case model::TileKind::MediaPlayer: return L"实时读取系统正在播放的音乐封面与歌名，桌面直接切歌和暂停。";
+    case model::TileKind::Countdown: return L"重要日程倒数天数与今日/本周/本月/今年时间进度条，右键可改目标。";
+    case model::TileKind::Battery: return L"本机电量、电源模式、运行时间以及已连接蓝牙外设电量一览。";
     default: return L"固定文件夹或常用项目到桌面磁贴区。";
     }
 }
@@ -86,19 +99,23 @@ struct GalleryWidgetDef {
     std::initializer_list<model::TileSize> sizes;
 };
 
-static const GalleryWidgetDef kGalleryWidgets[12] = {
+static const GalleryWidgetDef kGalleryWidgets[16] = {
     {model::TileKind::Photos,      L"照片",     L'\xEB9F', 0xFFE08A3Cu, {{2, 2}, {4, 2}, {4, 4}}},
     {model::TileKind::Weather,     L"天气",     L'\xE706', 0xFF3D9BE9u, {{1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}}},
     {model::TileKind::Calendar,    L"日历",     L'\xE787', 0xFFE5484Du, {{1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}}},
     {model::TileKind::Todo,        L"待办",     L'\xE73A', 0xFF30A46Cu, {{1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}, {4, 4}}},
     {model::TileKind::Clock,       L"时钟",     L'\xE823', 0xFFF08A3Cu, {{1, 1}, {2, 1}, {4, 1}, {2, 2}}},
     {model::TileKind::StickyNote,  L"便笺",     L'\xE70B', 0xFFD9A400u, {{1, 1}, {2, 2}, {4, 2}, {4, 4}}},
-    {model::TileKind::Apps,        L"应用",     L'\xE71D', 0xFF5B6BE0u, {{1, 1}, {2, 2}, {4, 2}, {4, 4}}},
+    {model::TileKind::Apps,        L"应用坞",   L'\xE71D', 0xFF5B6BE0u, {{4, 1}, {2, 1}, {4, 2}, {2, 2}, {1, 1}}},
     {model::TileKind::Recent,      L"最近使用", L'\xE81C', 0xFF7C66DCu, {{1, 1}, {2, 2}, {4, 2}}},
     {model::TileKind::Downloads,   L"下载",     L'\xE896', 0xFF2F8FE8u, {{1, 1}, {2, 2}, {4, 2}}},
-    {model::TileKind::System,      L"系统",     L'\xE9D9', 0xFF5A72E8u, {{1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}}},
+    {model::TileKind::System,      L"系统",     L'\xE9D9', 0xFF5A72E8u, {{1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}, {4, 4}}},
     {model::TileKind::StagingTray, L"暂存区",   L'\xE7B8', 0xFF9A6BDBu, {{1, 1}, {2, 1}, {4, 1}, {2, 2}, {4, 2}}},
     {model::TileKind::DiskRing,    L"磁盘",     L'\xEDA2', 0xFFD4952Au, {{1, 1}}},
+    {model::TileKind::Pomodoro,    L"番茄专注", L'\xE916', 0xFFFF5A52u, {{1, 1}, {2, 1}, {2, 2}, {4, 2}}},
+    {model::TileKind::MediaPlayer, L"正在播放", L'\xE8D6', 0xFFFF4D8Du, {{2, 1}, {4, 1}, {2, 2}, {4, 2}}},
+    {model::TileKind::Countdown,   L"倒数日",   L'\xE787', 0xFF6B7BFFu, {{1, 1}, {2, 1}, {2, 2}, {4, 2}}},
+    {model::TileKind::Battery,     L"电池设备", L'\xE83F', 0xFF30D158u, {{1, 1}, {2, 1}, {2, 2}, {4, 2}}},
 };
 
 const GalleryWidgetDef& FindGalleryWidgetDef(model::TileKind k) noexcept {
@@ -485,6 +502,12 @@ bool DesktopOverlayController::EnsureWindowCreated() {
 
 void DesktopOverlayController::ReleaseRenderDevices() noexcept {
     detail_text_.Reset();
+    dock_tray_icon_cache_.clear();
+    dock_tray_icon_dc_ = nullptr;
+    beautify_img_cache_.clear();
+    beautify_live_bmp_.Reset();
+    beautify_bmp_dc_ = nullptr;
+    beautify_wic_.Reset();
     DestroySwapChain();
     dcomp_visual_.Reset();
     dcomp_target_.Reset();
@@ -634,10 +657,10 @@ bool DesktopOverlayController::EnsureRenderDevices() {
         return false;
     }
 
-    if (FAILED(dwrite_->CreateTextFormat(display_family, nullptr, DWRITE_FONT_WEIGHT_LIGHT,
+    if (FAILED(dwrite_->CreateTextFormat(display_family, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                          DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                          38.0f, L"zh-CN", &fmt_gallery_big_))) {
-        if (FAILED(dwrite_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_LIGHT,
+        if (FAILED(dwrite_->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                              DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                              38.0f, L"zh-CN", &fmt_gallery_big_))) {
             return false;
@@ -898,8 +921,13 @@ void DesktopOverlayController::Dismiss() noexcept {
     rename_stem_len_ = -1;
     if (hwnd_ && IsWindow(hwnd_)) {
         KillTimer(hwnd_, kToastTimerId);
+        KillTimer(hwnd_, 8804);
         ShowWindow(hwnd_, SW_HIDE);
     }
+    dock_panel_kind_ = DockPanelKind::None;
+    dock_panel_tray_index_ = -1;
+    dock_vol_dragging_ = false;
+    dock_vol_track_ = {};
     if (shell_session_id_ != 0 && callbacks_.on_close_shell_session) {
         callbacks_.on_close_shell_session(shell_session_id_);
     }
@@ -911,6 +939,9 @@ void DesktopOverlayController::Dismiss() noexcept {
     beautify_sliders_.clear();
     beautify_scroll_y_ = 0.0f;
     beautify_max_scroll_y_ = 0.0f;
+    beautify_drop_hover_ = false;
+    beautify_drop_filename_.clear();
+    DetachBeautifyDropTarget();
     if (!dragging_beautify_slider_.empty()) {
         dragging_beautify_slider_.clear();
         if (hwnd_ && IsWindow(hwnd_) && GetCapture() == hwnd_) ReleaseCapture();
@@ -1161,6 +1192,8 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
                                              settings.organize_enabled));
             vw.submenu_rows.push_back(mk_row("toggle-tiles", 0, L"显示磁贴面板", {}, false,
                                              settings.tiles_enabled));
+            vw.submenu_rows.push_back(mk_row("toggle-dock", 0, L"显示液态玻璃程序坞", {}, false,
+                                             settings.dock_enabled));
             vw.submenu_rows.push_back(mk_row("toggle-grid", 0, L"将图标对齐到网格", {}, true,
                                              settings.align_to_grid));
             vw.submenu_rows.push_back(mk_row("toggle-icons", 0, L"显示桌面图标", {}, false,
@@ -1351,6 +1384,146 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
         break;
     }
 
+    case ContextMenuTargetKind::DockBar: {
+        const auto dk = static_cast<render::DockBarItemKind>(menu_spec_.dock_item_kind);
+        if (menu_spec_.dock_item_index >= 0 && dk != render::DockBarItemKind::Divider) {
+            if (dk == render::DockBarItemKind::App) {
+                // WacOS-style live window list for running apps
+                for (size_t wi = 0; wi < menu_spec_.dock_item_windows.size(); ++wi) {
+                    const auto& [wh, wtitle] = menu_spec_.dock_item_windows[wi];
+                    const bool is_last = (wi + 1 == menu_spec_.dock_item_windows.size());
+                    menu_rows_.push_back(mk_row("dock-focus-win:" + std::to_string(wh), L'\xE737',
+                                                wtitle.empty() ? L"窗口" : wtitle, {}, is_last,
+                                                wh != 0 && wh == menu_spec_.dock_active_hwnd));
+                }
+                menu_rows_.push_back(mk_row("dock-open", L'\xE8A7',
+                                            menu_spec_.dock_item_running
+                                                ? (menu_spec_.dock_item_has_visible_window ? L"切换到窗口" : L"还原窗口")
+                                                : L"打开应用"));
+                const bool can_new_win = menu_spec_.dock_item_running &&
+                                         !menu_spec_.target_path.empty() &&
+                                         menu_spec_.dock_item_key != L"ms-settings:";
+                if (can_new_win) {
+                    menu_rows_.push_back(mk_row("dock-new-instance", L'\xE710', L"打开新窗口"));
+                }
+                if (menu_spec_.target_path.size() >= 3 && menu_spec_.target_path[1] == L':') {
+                    menu_rows_.push_back(mk_row("dock-reveal", L'\xE8B7', L"在文件夹中显示"));
+                }
+                const bool can_pin_toggle = menu_spec_.dock_item_pinned || !menu_spec_.target_path.empty();
+                if (can_pin_toggle) {
+                    menu_rows_.push_back(mk_row("dock-pin-toggle", menu_spec_.dock_item_pinned ? L'\xE77A' : L'\xE718',
+                                                menu_spec_.dock_item_pinned ? L"从程序坞移除" : L"固定到程序坞",
+                                                {}, !menu_spec_.dock_item_running));
+                }
+                if (menu_spec_.dock_item_running) {
+                    if (menu_spec_.dock_item_has_visible_window) {
+                        menu_rows_.push_back(mk_row("dock-hide-app", L'\xE921', L"隐藏 / 最小化"));
+                    } else {
+                        menu_rows_.push_back(mk_row("dock-restore-app", L'\xE922', L"展开并还原窗口"));
+                    }
+                    MenuRow cls = mk_row("dock-close-app", L'\xE711', L"关闭窗口", {}, true);
+                    cls.is_danger = true;
+                    menu_rows_.push_back(std::move(cls));
+                }
+            } else if (dk == render::DockBarItemKind::Trash) {
+                menu_rows_.push_back(mk_row("dock-open", L'\xE74D', L"打开回收站"));
+                MenuRow emp = mk_row("dock-empty-trash", L'\xE74D', L"清空回收站", {}, true);
+                emp.enabled = !menu_spec_.recycle_bin_empty;
+                emp.is_danger = true;
+                menu_rows_.push_back(std::move(emp));
+            } else if (dk == render::DockBarItemKind::Folder) {
+                const bool apps_stack = menu_spec_.dock_item_key == L"special:apps";
+                if (!apps_stack) {
+                    // Dock stacks (叠放): sort order and how the stack opens, as on the Mac.
+                    MenuRow sort = mk_row("sub:dock-stack-sort", L'\xE8CB', std::wstring(l10n::Get(l10n::StringId::SortBy)));
+                    const l10n::StringId sort_names[] = {l10n::StringId::ColumnCreated, l10n::StringId::ColumnName,
+                                                         l10n::StringId::ColumnModified, l10n::StringId::ColumnType};
+                    for (int si = 0; si < 4; ++si) {
+                        sort.submenu_rows.push_back(mk_row("dock-stack-sort:" + std::to_string(si), 0,
+                                                           std::wstring(l10n::Get(sort_names[si])), {}, false,
+                                                           settings.dock_stack_sort == si));
+                    }
+                    menu_rows_.push_back(std::move(sort));
+                    MenuRow view = mk_row("sub:dock-stack-view", L'\xE8A9', std::wstring(l10n::Get(l10n::StringId::DockStackViewAs)),
+                                          {}, true);
+                    const l10n::StringId view_names[] = {l10n::StringId::TextRenderAuto, l10n::StringId::DockStackViewFan,
+                                                         l10n::StringId::DockStackViewGrid, l10n::StringId::ViewList};
+                    for (int vi = 0; vi < 4; ++vi) {
+                        view.submenu_rows.push_back(mk_row("dock-stack-view:" + std::to_string(vi), 0,
+                                                           std::wstring(l10n::Get(view_names[vi])), {}, vi == 0,
+                                                           settings.dock_stack_view == vi));
+                    }
+                    menu_rows_.push_back(std::move(view));
+                } else {
+                    menu_rows_.push_back(mk_row("dock-apps-stack:0", L'\xE77A',
+                                                std::wstring(l10n::Get(l10n::StringId::DockStackRemove)), {}, true));
+                }
+                if (!menu_spec_.dock_recent_downloads.empty()) {
+                    for (size_t di = 0; di < menu_spec_.dock_recent_downloads.size(); ++di) {
+                        const bool is_last = (di + 1 == menu_spec_.dock_recent_downloads.size());
+                        menu_rows_.push_back(mk_row("dock-open-download:" + std::to_string(di), L'\xE8A5',
+                                                    menu_spec_.dock_recent_downloads[di].second, {}, is_last));
+                    }
+                }
+                if (!menu_spec_.target_path.empty()) {
+                    menu_rows_.push_back(mk_row("dock-open-folder", L'\xE8B7',
+                                                std::wstring(l10n::Get(l10n::StringId::PickerPulseOpenPlaces)),
+                                                {}, !menu_spec_.dock_item_pinned));
+                }
+                if (menu_spec_.dock_item_pinned && !menu_spec_.target_path.empty()) {
+                    menu_rows_.push_back(mk_row("dock-pin-toggle", L'\xE77A', L"从程序坞移除", {}, true));
+                }
+            } else if (dk == render::DockBarItemKind::WidgetsToggle) {
+                menu_rows_.push_back(mk_row("dock-toggle-widgets", L'\xE71D',
+                                            settings.tiles_enabled ? L"隐藏桌面小组件" : L"显示桌面小组件", {}, true));
+            }
+        }
+        {
+            MenuRow sub = mk_row("sub:dock-settings", L'\xE713', L"液态玻璃程序坞设置");
+            sub.submenu_rows.push_back(mk_row("dock-mag-toggle", 0, L"启用鼠标悬停放大", {}, false,
+                                              settings.dock_magnification));
+            sub.submenu_rows.push_back(mk_row(settings.dock_apps_stack ? "dock-apps-stack:0" : "dock-apps-stack:1", 0,
+                                              std::wstring(l10n::Get(l10n::StringId::DockStackShowApps)), {}, false,
+                                              settings.dock_apps_stack));
+            sub.submenu_rows.push_back(mk_row("dock-sys-toggle", 0, L"显示系统状态与托盘区", {}, true,
+                                              settings.dock_system_area));
+            sub.submenu_rows.push_back(mk_row("dock-pos:0", 0, L"停靠在屏幕底部", {}, false,
+                                              settings.dock_position == 0));
+            sub.submenu_rows.push_back(mk_row("dock-pos:1", 0, L"停靠在屏幕左侧", {}, false,
+                                              settings.dock_position == 1));
+            sub.submenu_rows.push_back(mk_row("dock-pos:2", 0, L"停靠在屏幕右侧", {}, true,
+                                              settings.dock_position == 2));
+            sub.submenu_rows.push_back(mk_row("dock-size:42", 0, L"小图标（42）", {}, false,
+                                              settings.dock_icon_size <= 44));
+            sub.submenu_rows.push_back(mk_row("dock-size:48", 0, L"标准图标（48）", {}, false,
+                                              settings.dock_icon_size > 44 && settings.dock_icon_size < 53));
+            sub.submenu_rows.push_back(mk_row("dock-size:56", 0, L"大图标（56）", {}, true,
+                                              settings.dock_icon_size >= 53));
+            sub.submenu_rows.push_back(mk_row("dock-scale:132", 0, L"柔和放大（1.32×）", {}, false,
+                                              settings.dock_max_scale_x100 < 142));
+            sub.submenu_rows.push_back(mk_row("dock-scale:152", 0, L"经典放大（1.52×）", {}, false,
+                                              settings.dock_max_scale_x100 >= 142 && settings.dock_max_scale_x100 < 165));
+            sub.submenu_rows.push_back(mk_row("dock-scale:178", 0, L"动感放大（1.78×）", {}, true,
+                                              settings.dock_max_scale_x100 >= 165));
+            sub.submenu_rows.push_back(mk_row("dock-hide:0", 0, L"常驻显示程序坞", {}, false,
+                                              settings.dock_hide_mode == 0));
+            sub.submenu_rows.push_back(mk_row("dock-hide:1", 0, L"智能隐藏（有窗口遮挡时收回）", {}, false,
+                                              settings.dock_hide_mode == 1));
+            sub.submenu_rows.push_back(mk_row("dock-hide:2", 0, L"自动隐藏（贴边唤出展开）", {}, true,
+                                              settings.dock_hide_mode == 2));
+            sub.submenu_rows.push_back(mk_row("dock-minfx:1", 0, L"神奇效果（Genie 漏斗收回/展开）", {}, false,
+                                              settings.dock_minimize_effect == 1));
+            sub.submenu_rows.push_back(mk_row("dock-minfx:2", 0, L"缩放效果（平滑缩放收回/展开）", {}, false,
+                                              settings.dock_minimize_effect == 2));
+            sub.submenu_rows.push_back(mk_row("dock-minfx:0", 0, L"关闭窗口收回/展开动画", {}, true,
+                                              settings.dock_minimize_effect == 0));
+            sub.submenu_rows.push_back(mk_row("beautify", L'\xE790', L"打开桌面美化与程序坞面板…", {}, true));
+            sub.submenu_rows.push_back(mk_row("dock-disable", 0, L"隐藏程序坞"));
+            menu_rows_.push_back(std::move(sub));
+        }
+        break;
+    }
+
     case ContextMenuTargetKind::LiveTile: {
         const auto k = menu_spec_.tile_kind;
         switch (k) {
@@ -1454,6 +1627,9 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             break;
         }
         case model::TileKind::Calendar:
+            // 2×2 shows the big date or the month; the tile keeps the choice in its 表盘 flag.
+            if (menu_spec_.tile_size.cols >= 2 && menu_spec_.tile_size.cols < 4 && menu_spec_.tile_size.rows == 2)
+                menu_rows_.push_back(mk_row("toggle-clock", L'\xE787', L"显示整月", {}, false, !menu_spec_.tile_analog_clock));
             menu_rows_.push_back(mk_row("open-calendar-app", L'\xE787', L"打开系统日历"));
             break;
         case model::TileKind::Todo:
@@ -1464,6 +1640,27 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             menu_rows_.push_back(mk_row("open-taskmgr", L'\xE9D9', L"打开任务管理器"));
             menu_rows_.push_back(mk_row("open-resmon", L'\xE9D2', L"打开资源监视器"));
             menu_rows_.push_back(mk_row("open-sys-about", L'\xE946', L"系统信息"));
+            break;
+        case model::TileKind::Pomodoro:
+            menu_rows_.push_back(mk_row("pomo-toggle", L'\xE768', L"开始 / 暂停专注"));
+            menu_rows_.push_back(mk_row("pomo-reset", L'\xE72C', L"重置当前计时"));
+            menu_rows_.push_back(mk_row("pomo-25", L'\xE916', L"25 分钟标准专注"));
+            menu_rows_.push_back(mk_row("pomo-45", L'\xE916', L"45 分钟深度专注"));
+            menu_rows_.push_back(mk_row("pomo-break", L'\xE708', L"切换为 5 分钟短休"));
+            break;
+        case model::TileKind::MediaPlayer:
+            menu_rows_.push_back(mk_row("media-play", L'\xE768', L"播放 / 暂停"));
+            menu_rows_.push_back(mk_row("media-prev", L'\xE892', L"上一首"));
+            menu_rows_.push_back(mk_row("media-next", L'\xE893', L"下一首"));
+            break;
+        case model::TileKind::Countdown:
+            menu_rows_.push_back(mk_row("countdown-edit-title", L'\xE8AC', L"修改倒数日名称…"));
+            menu_rows_.push_back(mk_row("countdown-edit-date", L'\xE787', L"设置目标日期 (YYYY-MM-DD)…"));
+            menu_rows_.push_back(mk_row("countdown-plus30", L'\xE710', L"设为 30 天后"));
+            break;
+        case model::TileKind::Battery:
+            menu_rows_.push_back(mk_row("open-power-settings", L'\xE83F', L"电源与电池设置"));
+            menu_rows_.push_back(mk_row("open-taskmgr", L'\xE9D9', L"打开任务管理器"));
             break;
         }
         if (!menu_rows_.empty()) menu_rows_.back().separator_after = true;
@@ -1555,7 +1752,8 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             (k == model::TileKind::Photos || k == model::TileKind::Downloads ||
              k == model::TileKind::Recent || k == model::TileKind::PinnedFolder ||
              k == model::TileKind::Weather || k == model::TileKind::System ||
-             k == model::TileKind::DiskRing || k == model::TileKind::RecycleBin);
+             k == model::TileKind::DiskRing || k == model::TileKind::RecycleBin ||
+             k == model::TileKind::MediaPlayer || k == model::TileKind::Battery);
         if (supports_live_toggle) {
             menu_rows_.push_back(mk_row("toggle-tile-live", 0, L"动态内容", {}, false, menu_spec_.tile_live_content));
         }
@@ -1571,7 +1769,10 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
                 if (r.command_id == "sub:weather-city" || r.command_id == "pick-photo-folder" ||
                     r.command_id == "sub:photo-interval" || r.command_id == "photo-shuffle" ||
                     r.command_id == "edit-note" || r.command_id == "todo-add" ||
-                    r.command_id == "toggle-clock" || r.command_id == "change-tile-target") {
+                    r.command_id == "toggle-clock" || r.command_id == "change-tile-target" ||
+                    r.command_id == "pomo-toggle" || r.command_id == "pomo-25" || r.command_id == "pomo-45" ||
+                    r.command_id == "media-play" || r.command_id == "countdown-edit-title" ||
+                    r.command_id == "countdown-edit-date" || r.command_id == "open-power-settings") {
                     r.separator_after = false;
                     custom_menu.push_back(std::move(r));
                 }
@@ -1948,24 +2149,302 @@ bool DesktopOverlayController::OpenHealthDrawer(const RECT& work_area, const mod
     return true;
 }
 
+namespace {
+
+class BeautifyDropTarget final : public IDropTarget {
+public:
+    explicit BeautifyDropTarget(DesktopOverlayController* owner,
+                                std::function<bool()> can_accept_video,
+                                std::function<void(bool, const std::wstring&)> on_hover,
+                                std::function<void(const std::wstring&)> on_drop)
+        : owner_(owner),
+          can_accept_video_(std::move(can_accept_video)),
+          on_hover_(std::move(on_hover)),
+          on_drop_(std::move(on_drop)) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+            *ppv = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ref_.fetch_add(1, std::memory_order_relaxed) + 1; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG n = ref_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (n == 0) delete this;
+        return n;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data_obj, DWORD /*key_state*/, POINTL /*pt*/, DWORD* effect) override {
+        valid_video_path_.clear();
+        if (effect) *effect = DROPEFFECT_NONE;
+        if (!owner_ || (can_accept_video_ && !can_accept_video_())) return S_OK;
+        const auto paths = DesktopDropManager::ExtractHDropPaths(data_obj);
+        if (paths.size() == 1 && video::IsSupportedVideoWallpaperPath(paths[0])) {
+            valid_video_path_ = paths[0];
+            if (effect) *effect = DROPEFFECT_COPY;
+            if (on_hover_) on_hover_(true, video::VideoDisplayName(valid_video_path_));
+        }
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD /*key_state*/, POINTL /*pt*/, DWORD* effect) override {
+        if (effect) *effect = valid_video_path_.empty() ? DROPEFFECT_NONE : DROPEFFECT_COPY;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        valid_video_path_.clear();
+        if (on_hover_) on_hover_(false, {});
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data_obj, DWORD /*key_state*/, POINTL /*pt*/, DWORD* effect) override {
+        std::wstring dropped = valid_video_path_;
+        if (dropped.empty() && data_obj) {
+            const auto paths = DesktopDropManager::ExtractHDropPaths(data_obj);
+            if (paths.size() == 1 && video::IsSupportedVideoWallpaperPath(paths[0])) {
+                dropped = paths[0];
+            }
+        }
+        valid_video_path_.clear();
+        if (on_hover_) on_hover_(false, {});
+        if (!dropped.empty() && (!can_accept_video_ || can_accept_video_())) {
+            if (effect) *effect = DROPEFFECT_COPY;
+            if (on_drop_) on_drop_(dropped);
+        } else if (effect) {
+            *effect = DROPEFFECT_NONE;
+        }
+        return S_OK;
+    }
+
+private:
+    std::atomic<ULONG> ref_{1};
+    DesktopOverlayController* owner_ = nullptr;
+    std::function<bool()> can_accept_video_;
+    std::function<void(bool, const std::wstring&)> on_hover_;
+    std::function<void(const std::wstring&)> on_drop_;
+    std::wstring valid_video_path_;
+};
+
+} // namespace
+
+void DesktopOverlayController::AttachBeautifyDropTarget() noexcept {
+    if (!hwnd_ || !IsWindow(hwnd_) || beautify_drop_registered_) return;
+    if (!beautify_drop_target_) {
+        beautify_drop_target_.Attach(new BeautifyDropTarget(
+            this,
+            [this]() { return active_kind_ == OverlayKind::BeautifyDrawer && beautify_video_.icon_takeover_active; },
+            [this](bool hover, const std::wstring& name) { SetBeautifyDropHover(hover, name); },
+            [this](const std::wstring& path) {
+                if (callbacks_.on_set_video_wallpaper) callbacks_.on_set_video_wallpaper(path);
+            }));
+    }
+    if (SUCCEEDED(RegisterDragDrop(hwnd_, beautify_drop_target_.Get()))) {
+        beautify_drop_registered_ = true;
+    }
+}
+
+void DesktopOverlayController::DetachBeautifyDropTarget() noexcept {
+    if (beautify_drop_registered_ && hwnd_ && IsWindow(hwnd_)) {
+        RevokeDragDrop(hwnd_);
+    }
+    beautify_drop_registered_ = false;
+}
+
+void DesktopOverlayController::SetBeautifyVideoState(const video::VideoWallpaperUiState& state, bool rerender) {
+    beautify_video_ = state;
+    if (beautify_video_.active_source_path.empty()) {
+        beautify_live_bgra_.clear();
+        beautify_live_w_ = 0;
+        beautify_live_h_ = 0;
+        beautify_live_bmp_.Reset();
+    }
+    if (rerender && active_kind_ == OverlayKind::BeautifyDrawer) {
+        Render();
+    }
+}
+
+void DesktopOverlayController::OnLiveVideoFrameArrived(bool force) {
+    if (!IsOpen() || !d2d_dc_) return;
+    if (IsDraggingBeautifySlider() || beautify_drop_hover_) return;
+
+    const bool is_beautify = (active_kind_ == OverlayKind::BeautifyDrawer);
+    const bool is_glass_popup =
+        is_beautify ||
+        active_kind_ == OverlayKind::DockSystemPanel ||
+        active_kind_ == OverlayKind::DockVolumeOsd ||
+        active_kind_ == OverlayKind::WidgetDetail ||
+        active_kind_ == OverlayKind::WidgetGalleryDrawer ||
+        active_kind_ == OverlayKind::ContextMenu;
+    if (!is_glass_popup) return;
+
+    const uint64_t now = GetTickCount64();
+    // Smooth 20 fps on BeautifyDrawer Wall tab (live 16:9 preview + glass refraction) and
+    // 15 fps on other glass popups — zero CPU readback, zero extra VRAM!
+    const uint64_t min_interval_ms = (is_beautify && beautify_tab_ == BeautifyTab::Wall) ? 48ull : 64ull;
+    if (!force && last_live_overlay_render_ms_ != 0 && (now - last_live_overlay_render_ms_) < min_interval_ms) {
+        return;
+    }
+    last_live_overlay_render_ms_ = now;
+    Render();
+}
+
+void DesktopOverlayController::UpdateBeautifyVideoLiveFrame(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t stride) {
+    if (!bgra || w == 0 || h == 0) return;
+    const uint32_t row_bytes = w * 4u;
+    const uint32_t src_stride = stride ? stride : row_bytes;
+    beautify_live_bgra_.resize(static_cast<size_t>(row_bytes) * h);
+    for (uint32_t y = 0; y < h; ++y) {
+        std::memcpy(beautify_live_bgra_.data() + static_cast<size_t>(y) * row_bytes,
+                    bgra + static_cast<size_t>(y) * src_stride, row_bytes);
+    }
+    beautify_live_w_ = w;
+    beautify_live_h_ = h;
+    beautify_live_bmp_.Reset();
+    if (active_kind_ == OverlayKind::BeautifyDrawer && beautify_tab_ == BeautifyTab::Wall && !beautify_drop_hover_) {
+        Render();
+    }
+}
+
+void DesktopOverlayController::SetBeautifyTab(BeautifyTab tab, bool rerender) {
+    if (beautify_tab_ != tab) {
+        beautify_tab_ = tab;
+        beautify_scroll_y_ = 0.0f;
+    }
+    if (rerender && active_kind_ == OverlayKind::BeautifyDrawer) {
+        Render();
+    }
+}
+
+void DesktopOverlayController::SetBeautifyDropHover(bool hover, const std::wstring& filename) {
+    beautify_drop_hover_ = hover;
+    beautify_drop_filename_ = filename;
+    if (hover) {
+        beautify_tab_ = BeautifyTab::Wall;
+    }
+    if (active_kind_ == OverlayKind::BeautifyDrawer) {
+        Render();
+    }
+}
+
+ID2D1Bitmap* DesktopOverlayController::GetBeautifyCachedImage(ID2D1DeviceContext* dc, const std::wstring& path) noexcept {
+    if (!dc || path.empty()) return nullptr;
+    if (beautify_bmp_dc_ != dc) {
+        beautify_img_cache_.clear();
+        beautify_live_bmp_.Reset();
+        beautify_bmp_dc_ = dc;
+    }
+    auto it = beautify_img_cache_.find(path);
+    if (it != beautify_img_cache_.end()) {
+        return it->second.Get();
+    }
+    if (beautify_img_cache_.size() >= 12u) {
+        beautify_img_cache_.clear();
+    }
+    if (!beautify_wic_) {
+        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&beautify_wic_));
+    }
+    if (!beautify_wic_) return nullptr;
+
+    ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(beautify_wic_->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                        WICDecodeMetadataCacheOnLoad, &decoder)) || !decoder) {
+        beautify_img_cache_[path] = nullptr;
+        return nullptr;
+    }
+    ComPtr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, &frame)) || !frame) {
+        beautify_img_cache_[path] = nullptr;
+        return nullptr;
+    }
+    UINT fw = 0, fh = 0;
+    if (FAILED(frame->GetSize(&fw, &fh)) || fw == 0 || fh == 0) {
+        beautify_img_cache_[path] = nullptr;
+        return nullptr;
+    }
+
+    // Scale down to <= 672px wide (2x preview width) so drawer image cache stays tiny (< 2 MB total).
+    ComPtr<IWICBitmapSource> src = frame;
+    if (fw > 672u || fh > 384u) {
+        const double sc = std::min(672.0 / static_cast<double>(fw), 384.0 / static_cast<double>(fh));
+        const UINT sw = std::max(1u, static_cast<UINT>(std::lround(fw * sc)));
+        const UINT sh = std::max(1u, static_cast<UINT>(std::lround(fh * sc)));
+        ComPtr<IWICBitmapScaler> scaler;
+        if (SUCCEEDED(beautify_wic_->CreateBitmapScaler(&scaler)) && scaler &&
+            SUCCEEDED(scaler->Initialize(frame.Get(), sw, sh, WICBitmapInterpolationModeFant))) {
+            src = scaler;
+            fw = sw;
+            fh = sh;
+        }
+    }
+
+    ComPtr<IWICFormatConverter> conv;
+    if (FAILED(beautify_wic_->CreateFormatConverter(&conv)) || !conv ||
+        FAILED(conv->Initialize(src.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+        beautify_img_cache_[path] = nullptr;
+        return nullptr;
+    }
+
+    const uint32_t stride = fw * 4u;
+    std::vector<uint8_t> pixels(static_cast<size_t>(stride) * fh);
+    if (FAILED(conv->CopyPixels(nullptr, stride, static_cast<UINT>(pixels.size()), pixels.data()))) {
+        beautify_img_cache_[path] = nullptr;
+        return nullptr;
+    }
+
+    const D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96.0f, 96.0f);
+    ComPtr<ID2D1Bitmap> bmp;
+    if (FAILED(dc->CreateBitmap(D2D1::SizeU(fw, fh), pixels.data(), stride, bp, &bmp)) || !bmp) {
+        beautify_img_cache_[path] = nullptr;
+        return nullptr;
+    }
+    beautify_img_cache_[path] = bmp;
+    return bmp.Get();
+}
+
+ID2D1Bitmap* DesktopOverlayController::GetBeautifySystemWallpaper(ID2D1DeviceContext* dc) noexcept {
+    if (!dc) return nullptr;
+    if (backdrop_ && dc == backdrop_owner_dc_ &&
+        backdrop_->ActivePreset() == model::WallpaperPreset::System &&
+        backdrop_->QuarterWallpaperBitmap()) {
+        return backdrop_->QuarterWallpaperBitmap();
+    }
+    const std::wstring wp = render::WallpaperBackdrop::QueryCurrentWallpaperPath();
+    if (!wp.empty()) {
+        if (ID2D1Bitmap* bmp = GetBeautifyCachedImage(dc, wp)) return bmp;
+    }
+    return nullptr;
+}
+
 bool DesktopOverlayController::OpenBeautifyDrawer(const RECT& work_area,
                                                   const model::BeautifySettings& settings,
                                                   const std::unordered_set<uint8_t>& active_widget_kinds) {
-    Dismiss();
+    const bool already_open = (active_kind_ == OverlayKind::BeautifyDrawer);
+    if (!already_open) {
+        Dismiss();
+    }
     active_kind_ = OverlayKind::BeautifyDrawer;
     work_area_ = work_area;
     beautify_settings_ = settings;
     active_widget_kinds_ = active_widget_kinds;
-    beautify_scroll_y_ = 0.0f;
-    beautify_max_scroll_y_ = 0.0f;
+    if (!already_open) {
+        beautify_scroll_y_ = 0.0f;
+        beautify_max_scroll_y_ = 0.0f;
+    }
     beautify_sliders_.clear();
     dragging_beautify_slider_.clear();
 
     const int w = 372;
-    const int h = std::max<int>(648, (work_area.bottom - work_area.top) - 28);
+    const int avail_h = std::max<int>(520, (work_area.bottom - work_area.top) - 28);
+    const int h = std::min<int>(avail_h, 700);
     const int x = work_area.right - w - 16;
     const int y = work_area.top + 14;
-    RepositionAndShow(x, y, w, h, true);
+    RepositionAndShow(x, y, w, h, !already_open);
+    AttachBeautifyDropTarget();
     return true;
 }
 
@@ -2029,7 +2508,7 @@ bool DesktopOverlayController::OpenWidgetGalleryDrawer(const RECT& work_area,
 
     const int w = 392;
     const int avail_h = (work_area.bottom - work_area.top) - 28;
-    const int h = std::clamp<int>(avail_h, 580, 640);
+    const int h = std::clamp<int>(avail_h, 620, 676);
     const int x = (tile_board_screen_left > work_area.left + w + 40)
                       ? (tile_board_screen_left - w - 24)
                       : std::max<int>(work_area.left + 16, work_area.right - w - 16);
@@ -2280,6 +2759,90 @@ void DesktopOverlayController::DrawPopupCardBackground(ID2D1DeviceContext* dc, c
     const model::CardMaterial eff_mat = (beautify_settings_.default_material == model::CardMaterial::FollowHost)
                                             ? host_material_
                                             : beautify_settings_.default_material;
+    // The dock's panels and the widgets' own popups wear the same glass as the widgets.
+    const bool is_dock_popup = (active_kind_ == OverlayKind::DockSystemPanel ||
+                                active_kind_ == OverlayKind::DockVolumeOsd);
+    const bool is_widget_popup = (active_kind_ == OverlayKind::WidgetDetail ||
+                                  active_kind_ == OverlayKind::WidgetGalleryDrawer ||
+                                  active_kind_ == OverlayKind::BeautifyDrawer ||
+                                  active_kind_ == OverlayKind::ContextMenu);
+    if (is_dock_popup || is_widget_popup) {
+        const bool light_ink = is_dock_popup ? dock_panel_light_ink_ : dark_mode_;
+        bool drew_live_glass = false;
+        if (backdrop_ != nullptr && eff_mat != model::CardMaterial::Solid) {
+            const model::CardMaterial sample_mat =
+                (eff_mat == model::CardMaterial::Mica || eff_mat == model::CardMaterial::MicaAlt)
+                    ? eff_mat
+                    : model::CardMaterial::LiquidGlass;
+            float dpi_x = 96.0f, dpi_y = 96.0f;
+            dc->GetDpi(&dpi_x, &dpi_y);
+            const float eff_scale = (dpi_x > 1.0f) ? (dpi_x / 96.0f) : std::max(0.5f, scale_);
+            const D2D1_RECT_F card_px = D2D1::RectF(
+                s_rc.left * eff_scale, s_rc.top * eff_scale,
+                s_rc.right * eff_scale, s_rc.bottom * eff_scale);
+            const POINT popup_screen_px{
+                static_cast<LONG>(std::lround((static_cast<float>(card_screen_x_) - s_rc.left) * eff_scale)),
+                static_cast<LONG>(std::lround((static_cast<float>(card_screen_y_) - s_rc.top) * eff_scale)),
+            };
+            dc->SetDpi(96.0f, 96.0f);
+            const uint8_t disp_tier = model::MapGlassGainToLegacyTier(beautify_settings_.glass_dispersion);
+            render::WallpaperBackdrop::ExternalLiveGlassSource live_src{};
+            const render::WallpaperBackdrop::ExternalLiveGlassSource* live_ptr = nullptr;
+            if (live_wallpaper_ && live_wallpaper_->HasFrame() && live_wallpaper_->SharpBitmap() &&
+                live_wallpaper_owner_dev_) {
+                ComPtr<ID2D1Device> cur_dev;
+                dc->GetDevice(&cur_dev);
+                if (cur_dev && cur_dev.Get() == live_wallpaper_owner_dev_) {
+                    live_src.sharp_bmp = live_wallpaper_->SharpBitmap();
+                    live_src.sharp_w = live_wallpaper_->SharpWidth();
+                    live_src.sharp_h = live_wallpaper_->SharpHeight();
+                    live_src.frost_bmp = live_wallpaper_->FrostBitmap();
+                    live_src.frost_w = live_wallpaper_->FrostWidth();
+                    live_src.frost_h = live_wallpaper_->FrostHeight();
+                    live_src.logical_w = live_wallpaper_->LogicalScreenWidth();
+                    live_src.logical_h = live_wallpaper_->LogicalScreenHeight();
+                    live_ptr = &live_src;
+                }
+            }
+            drew_live_glass = backdrop_->DrawMenuMaterial(
+                dc, card_px, popup_screen_px, radius * eff_scale, sample_mat, light_ink,
+                beautify_settings_.card_opacity_percent, disp_tier, &beautify_settings_, live_ptr);
+            dc->SetDpi(dpi_x, dpi_y);
+        }
+
+        dock_panel_drew_live_glass_ = drew_live_glass;
+        if (drew_live_glass && is_widget_popup) {
+            // DrawMenuMaterial already applies the adaptive theme veil; add only a subtle lift.
+            dc->FillRoundedRectangle(rr, Brush(dc, light_ink ? 0x14101218u : 0x16FFFFFFu));
+        }
+        if (!drew_live_glass) {
+            const uint32_t glass_bg = light_ink ? 0xD2181C28u : 0xCCF2F6FCu;
+            dc->FillRoundedRectangle(rr, Brush(dc, glass_bg));
+            if (backdrop_ != nullptr) {
+                ID2D1BitmapBrush* nb = (dc == backdrop_owner_dc_ && backdrop_->NoiseBrush() != nullptr)
+                                           ? backdrop_->NoiseBrush()
+                                           : backdrop_->MenuNoiseBrush(dc);
+                if (nb != nullptr) dc->FillRoundedRectangle(rr, nb);
+            }
+            const D2D1_GRADIENT_STOP stops[3] = {
+                {0.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
+                {0.5f, D2D1::ColorF(1.0f, 1.0f, 1.0f, light_ink ? 0.34f : 0.56f)},
+                {1.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
+            };
+            ComPtr<ID2D1GradientStopCollection> sc;
+            ComPtr<ID2D1LinearGradientBrush> lg;
+            if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 3, &sc)) && sc &&
+                SUCCEEDED(dc->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(s_rc.left + radius, 0.0f),
+                                                        D2D1::Point2F(s_rc.right - radius, 0.0f)),
+                    sc.Get(), &lg)) && lg) {
+                dc->DrawLine(D2D1::Point2F(s_rc.left + radius * 0.85f, s_rc.top + 1.0f),
+                             D2D1::Point2F(s_rc.right - radius * 0.85f, s_rc.top + 1.0f), lg.Get(), 1.1f);
+            }
+        }
+        return;
+    }
+
     const bool use_grain = (eff_mat == model::CardMaterial::Acrylic ||
                             eff_mat == model::CardMaterial::FollowHost);
     if (backdrop_ != nullptr && dc == backdrop_owner_dc_ && backdrop_->AcrylicBrush() != nullptr) {
@@ -2306,6 +2869,20 @@ void DesktopOverlayController::DrawPopupCardBackground(ID2D1DeviceContext* dc, c
 
 void DesktopOverlayController::DrawPopupCardBorder(ID2D1DeviceContext* dc, const D2D1_RECT_F& card_rc,
                                                    float radius, bool sticky_tint) {
+    if (active_kind_ == OverlayKind::DockSystemPanel || active_kind_ == OverlayKind::DockVolumeOsd ||
+        active_kind_ == OverlayKind::WidgetDetail || active_kind_ == OverlayKind::WidgetGalleryDrawer ||
+        active_kind_ == OverlayKind::BeautifyDrawer || active_kind_ == OverlayKind::ContextMenu) {
+        // WacOS TileLiquidGlassRenderer already paints the exact circular SDF directional specular rim
+        // and concentric hairline inside DrawMenuMaterial; avoid double-bordering live glass corners.
+        if (dock_panel_drew_live_glass_) {
+            return;
+        }
+        const bool ink = (active_kind_ == OverlayKind::DockSystemPanel || active_kind_ == OverlayKind::DockVolumeOsd)
+                             ? dock_panel_light_ink_ : dark_mode_;
+        const uint32_t fallback_border = ink ? 0x38FFFFFFu : 0x24000000u;
+        StrokeCrispRoundedRect(dc, card_rc, radius, Brush(dc, fallback_border), 1.0f);
+        return;
+    }
     const uint32_t border_argb = sticky_tint
                                      ? (dark_mode_ ? 0x3AFFE58Fu : 0x348A6800u)
                                      : (dark_mode_ ? 0x2AFFFFFFu : 0x18000000u);
@@ -2378,13 +2955,16 @@ void DesktopOverlayController::CompositeOnto(ID2D1DeviceContext* dc, int origin_
 }
 
 void DesktopOverlayController::DrawMainContent(ID2D1DeviceContext* dc, float ox, float oy, bool with_shadow) {
-    float radius = 14.0f;
-    if (active_kind_ == OverlayKind::ContextMenu) radius = 10.0f;
-    else if (active_kind_ == OverlayKind::InlineRename) radius = 7.0f;
+    // macOS radii: panels and popovers 22 (the widgets' radius), menus 14, small fields 8.
+    float radius = 22.0f;
+    if (active_kind_ == OverlayKind::ContextMenu) radius = 14.0f;
+    else if (active_kind_ == OverlayKind::InlineRename) radius = 8.0f;
     else if (active_kind_ == OverlayKind::HealthDrawer ||
              active_kind_ == OverlayKind::BeautifyDrawer ||
              active_kind_ == OverlayKind::AiOrganizeDrawer ||
-             active_kind_ == OverlayKind::WidgetGalleryDrawer || active_kind_ == OverlayKind::WidgetDetail) radius = 16.0f;
+             active_kind_ == OverlayKind::WidgetGalleryDrawer || active_kind_ == OverlayKind::WidgetDetail) radius = 22.0f;
+    else if (active_kind_ == OverlayKind::DockSystemPanel) radius = 22.0f;
+    else if (active_kind_ == OverlayKind::DockVolumeOsd) radius = 20.0f;
     else if (active_kind_ == OverlayKind::ToastCapsule) radius = 21.0f;
     // An opaque window is clipped by DWM at its own 8 px corner with its own border: drawing a larger corner
     // and a second border inside it is what showed as a doubled corner.
@@ -2444,6 +3024,12 @@ void DesktopOverlayController::DrawMainContent(ID2D1DeviceContext* dc, float ox,
         break;
     case OverlayKind::WidgetDetail:
         DrawWidgetDetail(dc, ox, oy);
+        break;
+    case OverlayKind::DockSystemPanel:
+        DrawDockSystemPanel(dc, ox, oy);
+        break;
+    case OverlayKind::DockVolumeOsd:
+        DrawDockVolumeOsd(dc, ox, oy);
         break;
     case OverlayKind::GroupRulePopover:
         DrawRulePopover(dc, ox, oy);
@@ -3053,29 +3639,222 @@ bool DesktopOverlayController::ApplyBeautifySliderAtX(const std::string& id, int
 }
 
 void DesktopOverlayController::DrawBeautifyDrawer(ID2D1DeviceContext* dc, float ox, float oy) {
-    const uint32_t pri = dark_mode_ ? 0xF8FFFFFFu : 0xF8181E28u;
-    const uint32_t sec = dark_mode_ ? 0x92FFFFFFu : 0x92303846u;
+    // 1:1 visual implementation of docs/design/video_wallpaper_beautify.html (Light & Dark Liquid Glass).
+    const uint32_t pri = dark_mode_ ? 0xF8FFFFFFu : 0xFF181E28u;
+    const uint32_t sec = dark_mode_ ? 0x92FFFFFFu : 0x9E303846u;
+    const uint32_t ter = dark_mode_ ? 0x57FFFFFFu : 0x61303846u;
+    const uint32_t track_col = dark_mode_ ? 0x14FFFFFFu : 0x0E000000u;
+    const uint32_t card_col = dark_mode_ ? 0x0FFFFFFFu : 0x8CFFFFFFu;
+    const uint32_t line_col = dark_mode_ ? 0x1AFFFFFFu : 0x14000000u;
+    const uint32_t tile_edge = dark_mode_ ? 0x29FFFFFFu : 0x1F000000u;
+    // Ensure crisp text/pill contrast in Light mode when accent is a bright sky tint (e.g. #4CC2FF).
+    uint32_t accent_ink = accent_argb_;
+    if (!dark_mode_) {
+        const uint32_t ar = (accent_argb_ >> 16) & 0xFFu;
+        const uint32_t ag = (accent_argb_ >> 8) & 0xFFu;
+        const uint32_t ab = accent_argb_ & 0xFFu;
+        const float luma = (0.299f * ar + 0.587f * ag + 0.114f * ab) / 255.0f;
+        if (luma > 0.52f) {
+            const float f = 0.54f;
+            accent_ink = 0xFF000000u |
+                         (static_cast<uint32_t>(std::lround(ar * f)) << 16) |
+                         (static_cast<uint32_t>(std::lround(ag * f)) << 8) |
+                         static_cast<uint32_t>(std::lround(ab * f));
+        }
+    }
     const float w = static_cast<float>(card_w_);
     const float h = static_cast<float>(card_h_);
 
     ComPtr<ID2D1Factory> fac;
     dc->GetFactory(&fac);
 
-    // Fixed header (outside scroll clip so close button never collides with scrolled controls)
+    auto draw_bitmap_rounded = [&](ID2D1Bitmap* bmp, const D2D1_RECT_F& dst, float rad,
+                                   video::VideoFillMode fill_mode = video::VideoFillMode::Fill) {
+        if (!bmp) return;
+        const D2D1_SIZE_F bsz = bmp->GetSize();
+        if (bsz.width < 1.0f || bsz.height < 1.0f) return;
+        const float dw = dst.right - dst.left;
+        const float dh = dst.bottom - dst.top;
+        if (dw < 1.0f || dh < 1.0f) return;
+
+        if (fill_mode == video::VideoFillMode::Fit) {
+            dc->FillRoundedRectangle(D2D1::RoundedRect(dst, rad, rad), Brush(dc, 0xFF0B0D12u));
+        }
+
+        const float sx = dw / bsz.width;
+        const float sy = dh / bsz.height;
+        const float sc = (fill_mode == video::VideoFillMode::Fill) ? std::max(sx, sy) : std::min(sx, sy);
+        const float rw = bsz.width * sc;
+        const float rh = bsz.height * sc;
+        const float tx = dst.left + (dw - rw) * 0.5f;
+        const float ty = dst.top + (dh - rh) * 0.5f;
+
+        if (fill_mode == video::VideoFillMode::Fill) {
+            ComPtr<ID2D1BitmapBrush> br;
+            const D2D1_BITMAP_BRUSH_PROPERTIES bbp = D2D1::BitmapBrushProperties(
+                D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            const D2D1_BRUSH_PROPERTIES bp = D2D1::BrushProperties(
+                1.0f, D2D1::Matrix3x2F::Scale(sc, sc) * D2D1::Matrix3x2F::Translation(tx, ty));
+            if (SUCCEEDED(dc->CreateBitmapBrush(bmp, bbp, bp, &br)) && br) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(dst, rad, rad), br.Get());
+            }
+        } else {
+            ComPtr<ID2D1RoundedRectangleGeometry> geo;
+            if (fac && SUCCEEDED(fac->CreateRoundedRectangleGeometry(D2D1::RoundedRect(dst, rad, rad), &geo)) && geo) {
+                dc->PushLayer(D2D1::LayerParameters1(dst, geo.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), nullptr);
+                dc->DrawBitmap(bmp, D2D1::RectF(tx, ty, tx + rw, ty + rh), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                dc->PopLayer();
+            } else {
+                dc->DrawBitmap(bmp, D2D1::RectF(tx, ty, tx + rw, ty + rh), 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            }
+        }
+    };
+
+    auto draw_preset_rounded = [&](const D2D1_RECT_F& dst, float rad, model::WallpaperPreset preset) {
+        const float sw_w = std::max(8.0f, dst.right - dst.left);
+        const float sw_h = std::max(8.0f, dst.bottom - dst.top);
+        ComPtr<ID2D1BitmapRenderTarget> off_rt;
+        if (SUCCEEDED(dc->CreateCompatibleRenderTarget(D2D1::SizeF(sw_w, sw_h), &off_rt)) && off_rt) {
+            off_rt->BeginDraw();
+            if (preset == model::WallpaperPreset::System) {
+                // Stylized deep blue fallback when system wallpaper file isn't readable.
+                render::WallpaperBackdrop::DrawPresetScene(
+                    fac.Get(), off_rt.Get(), D2D1::RectF(0.0f, 0.0f, sw_w, sw_h), model::WallpaperPreset::Bloom, true);
+            } else {
+                render::WallpaperBackdrop::DrawPresetScene(
+                    fac.Get(), off_rt.Get(), D2D1::RectF(0.0f, 0.0f, sw_w, sw_h), preset, dark_mode_);
+            }
+            if (SUCCEEDED(off_rt->EndDraw())) {
+                ComPtr<ID2D1Bitmap> sw_bmp;
+                if (SUCCEEDED(off_rt->GetBitmap(&sw_bmp)) && sw_bmp) {
+                    ComPtr<ID2D1BitmapBrush> br;
+                    const D2D1_BITMAP_BRUSH_PROPERTIES bbp = D2D1::BitmapBrushProperties(
+                        D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    const D2D1_BRUSH_PROPERTIES bp = D2D1::BrushProperties(
+                        1.0f, D2D1::Matrix3x2F::Translation(dst.left, dst.top));
+                    if (SUCCEEDED(dc->CreateBitmapBrush(sw_bmp.Get(), bbp, bp, &br)) && br) {
+                        dc->FillRoundedRectangle(D2D1::RoundedRect(dst, rad, rad), br.Get());
+                    }
+                }
+            }
+        }
+    };
+
+    auto draw_wrapped_text = [&](const std::wstring& txt, float x, float top_y, float max_w,
+                                 float font_px, DWRITE_FONT_WEIGHT weight, uint32_t col, float line_h) -> float {
+        if (txt.empty() || !dwrite_) return 0.0f;
+        ComPtr<IDWriteTextFormat> fmt;
+        const wchar_t* fam = L"Segoe UI Variable Text";
+        if (FAILED(dwrite_->CreateTextFormat(fam, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+                                             DWRITE_FONT_STRETCH_NORMAL, font_px, L"zh-CN", &fmt))) {
+            if (FAILED(dwrite_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+                                                 DWRITE_FONT_STRETCH_NORMAL, font_px, L"zh-CN", &fmt))) {
+                return line_h;
+            }
+        }
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        fmt->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_h, line_h * 0.80f);
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwrite_->CreateTextLayout(txt.c_str(), static_cast<UINT32>(txt.size()), fmt.Get(),
+                                             max_w, 260.0f, &layout)) || !layout) {
+            return line_h;
+        }
+        DWRITE_TEXT_METRICS tm{};
+        layout->GetMetrics(&tm);
+        dc->DrawTextLayout(D2D1::Point2F(ox + x, oy + top_y), layout.Get(), Brush(dc, col));
+        return std::max(line_h, std::ceil(tm.height));
+    };
+
+    auto measure_wrapped_h = [&](const std::wstring& txt, float max_w, float font_px, float line_h) -> float {
+        if (txt.empty() || !dwrite_) return 0.0f;
+        ComPtr<IDWriteTextFormat> fmt;
+        if (FAILED(dwrite_->CreateTextFormat(L"Segoe UI Variable Text", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                             font_px, L"zh-CN", &fmt))) {
+            if (FAILED(dwrite_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                                 font_px, L"zh-CN", &fmt))) {
+                return line_h;
+            }
+        }
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        fmt->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, line_h, line_h * 0.80f);
+        ComPtr<IDWriteTextLayout> layout;
+        if (FAILED(dwrite_->CreateTextLayout(txt.c_str(), static_cast<UINT32>(txt.size()), fmt.Get(),
+                                             max_w, 260.0f, &layout)) || !layout) {
+            return line_h;
+        }
+        DWRITE_TEXT_METRICS tm{};
+        layout->GetMetrics(&tm);
+        return std::max(line_h, std::ceil(tm.height));
+    };
+
+    auto draw_centered_single_line = [&](const std::wstring& txt, const D2D1_RECT_F& rc,
+                                         float font_px, DWRITE_FONT_WEIGHT weight,
+                                         uint32_t color_argb, float alpha = 1.0f) {
+        if (txt.empty() || !dwrite_) return;
+        ComPtr<IDWriteTextFormat> fmt;
+        if (FAILED(dwrite_->CreateTextFormat(L"Segoe UI Variable Text", nullptr, weight,
+                                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                             font_px, L"zh-CN", &fmt))) {
+            if (FAILED(dwrite_->CreateTextFormat(L"Microsoft YaHei UI", nullptr, weight,
+                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                                 font_px, L"zh-CN", &fmt))) {
+                return;
+            }
+        }
+        fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        fmt->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        ComPtr<IDWriteInlineObject> ellipsis;
+        dwrite_->CreateEllipsisTrimmingSign(fmt.Get(), &ellipsis);
+        DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        fmt->SetTrimming(&trim, ellipsis.Get());
+        dc->DrawText(txt.c_str(), static_cast<UINT32>(txt.size()), fmt.Get(), rc,
+                     Brush(dc, color_argb, alpha), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    };
+
+    // ---- Fixed Header (height 52 DIP) ----
     const wchar_t pal_g[2] = {L'\xE790', 0};
     DrawGlyph(dc, pal_g, 1, fmt_fluent_15_.Get(),
-                 D2D1::RectF(ox + 16.0f, oy + 12.0f, ox + 38.0f, oy + 42.0f), Brush(dc, accent_argb_));
+              D2D1::RectF(ox + 16.0f, oy + 14.0f, ox + 38.0f, oy + 38.0f), Brush(dc, accent_argb_));
     dc->DrawText(L"美化桌面", 4, fmt_title_.Get(),
-                 D2D1::RectF(ox + 40.0f, oy + 12.0f, ox + w - 52.0f, oy + 42.0f), Brush(dc, pri));
+                 D2D1::RectF(ox + 42.0f, oy + 12.0f, ox + w - 52.0f, oy + 40.0f), Brush(dc, pri));
 
-    const D2D1_RECT_F cls_rc = D2D1::RectF(ox + w - 42.0f, oy + 13.0f, ox + w - 14.0f, oy + 41.0f);
-    click_regions_.push_back({"close-overlay", RECT{static_cast<LONG>(w - 42), 13, static_cast<LONG>(w - 14), 41}});
+    const D2D1_RECT_F cls_rc = D2D1::RectF(ox + w - 42.0f, oy + 12.0f, ox + w - 14.0f, oy + 40.0f);
+    click_regions_.push_back({"close-overlay", RECT{static_cast<LONG>(w - 42), 12, static_cast<LONG>(w - 14), 40}});
+    if (hovered_action_id_ == "close-overlay") {
+        dc->FillRoundedRectangle(D2D1::RoundedRect(cls_rc, 14.0f, 14.0f), Brush(dc, track_col));
+    }
     const wchar_t x_g[2] = {L'\xE711', 0};
     DrawGlyph(dc, x_g, 1, fmt_fluent_12_.Get(), cls_rc, Brush(dc, sec));
 
+    // ---- Fixed 4-Tab Capsule Segmented Bar (壁纸 · 效果 · 桌面 · 程序坞) ----
+    const D2D1_RECT_F tab_track = SnapRectF(D2D1::RectF(ox + 18.0f, oy + 52.0f, ox + w - 18.0f, oy + 84.0f));
+    dc->FillRoundedRectangle(D2D1::RoundedRect(tab_track, 16.0f, 16.0f), Brush(dc, track_col));
+    static constexpr const wchar_t* kTabLabels[4] = {L"壁纸", L"效果", L"桌面", L"程序坞"};
+    const float tab_inner_w = (w - 36.0f - 6.0f) / 4.0f;
+    for (int i = 0; i < 4; ++i) {
+        const float tx = 21.0f + tab_inner_w * static_cast<float>(i);
+        const D2D1_RECT_F trc = D2D1::RectF(ox + tx, oy + 55.0f, ox + tx + tab_inner_w, oy + 81.0f);
+        const std::string tid = "b-tab:" + std::to_string(i);
+        click_regions_.push_back({tid, RECT{static_cast<LONG>(tx), 52, static_cast<LONG>(tx + tab_inner_w), 84}});
+        const bool active = (static_cast<int>(beautify_tab_) == i);
+        if (active) {
+            dc->FillRoundedRectangle(D2D1::RoundedRect(trc, 13.0f, 13.0f),
+                                     Brush(dc, dark_mode_ ? 0x2EFFFFFFu : 0xFFFFFFFFu));
+            if (!dark_mode_) {
+                StrokeCrispRoundedRect(dc, trc, 13.0f, Brush(dc, 0x10000000u), 0.75f);
+            }
+        }
+        dc->DrawText(kTabLabels[i], static_cast<UINT32>(std::wcslen(kTabLabels[i])),
+                     fmt_small_center_.Get(), trc, Brush(dc, pri));
+    }
+
     beautify_sliders_.clear();
-    const float body_top = 48.0f;
-    const float body_bot = std::max(body_top + 40.0f, h - 8.0f);
+    const float body_top = 94.0f;
+    const float body_bot = std::max(body_top + 40.0f, h - 10.0f);
     const LONG clip_top = static_cast<LONG>(body_top);
     const LONG clip_bot = static_cast<LONG>(body_bot);
     auto push_region = [&](const std::string& id, RECT r) {
@@ -3085,121 +3864,49 @@ void DesktopOverlayController::DrawBeautifyDrawer(ID2D1DeviceContext* dc, float 
             click_regions_.push_back({id, r});
         }
     };
-    auto push_slider = [&](const std::string& id, RECT r) {
-        r.top = std::max(r.top, clip_top);
-        r.bottom = std::min(r.bottom, clip_bot);
-        if (r.bottom > r.top) {
-            beautify_sliders_.push_back({id, r});
-        }
-    };
 
     dc->PushAxisAlignedClip(D2D1::RectF(ox + 1.0f, oy + body_top, ox + w - 1.0f, oy + body_bot),
                             D2D1_ANTIALIAS_MODE_ALIASED);
 
-    float y = 52.0f - beautify_scroll_y_;
+    float y = body_top + 2.0f - beautify_scroll_y_;
+    const float content_w = w - 36.0f; // 336 DIP
 
-    // 1. 5 Mini Wallpaper Preset Cards (系统 / 蓝 / 暮色 / 森林 / 照片) rendered via offscreen bitmap brush
-    // so rounded corners have zero PushLayer edge notches.
-    dc->DrawText(L"壁纸", 2, fmt_small_.Get(),
-                 D2D1::RectF(ox + 18.0f, oy + y, ox + w - 18.0f, oy + y + 18.0f), Brush(dc, sec));
-    y += 22.0f;
-
-    struct WallOpt { model::WallpaperPreset preset; const char* id; const wchar_t* label; };
-    static constexpr WallOpt kWalls[5] = {
-        {model::WallpaperPreset::System, "b-wall:0", L"系统"},
-        {model::WallpaperPreset::Bloom,  "b-wall:1", L"蓝"},
-        {model::WallpaperPreset::Dusk,   "b-wall:2", L"暮色"},
-        {model::WallpaperPreset::Forest, "b-wall:3", L"森林"},
-        {model::WallpaperPreset::Photo,  "b-wall:4", L"照片"},
-    };
-    const float gap = 6.0f;
-    const float cw = std::floor((w - 36.0f - gap * 4.0f) / 5.0f);
-    const model::WallpaperPreset cur_wp = beautify_settings_.wallpaper_preset;
-
-    for (int i = 0; i < 5; ++i) {
-        const float wx = 18.0f + static_cast<float>(i) * (cw + gap);
-        const D2D1_RECT_F wrc = SnapRectF(D2D1::RectF(ox + wx, oy + y, ox + wx + cw, oy + y + 48.0f));
-        push_region(kWalls[i].id, RECT{static_cast<LONG>(wx), static_cast<LONG>(y),
-                                       static_cast<LONG>(wx + cw), static_cast<LONG>(y + 66.0f)});
-
-        const float sw_w = std::max(8.0f, wrc.right - wrc.left);
-        const float sw_h = std::max(8.0f, wrc.bottom - wrc.top);
-        ComPtr<ID2D1BitmapRenderTarget> off_rt;
-        if (SUCCEEDED(dc->CreateCompatibleRenderTarget(D2D1::SizeF(sw_w, sw_h), &off_rt)) && off_rt) {
-            off_rt->BeginDraw();
-            if (kWalls[i].preset == model::WallpaperPreset::System) {
-                off_rt->Clear(ArgbColor(dark_mode_ ? 0xFF283040u : 0xFFE3EAF4u));
-                ComPtr<ID2D1SolidColorBrush> ob;
-                off_rt->CreateSolidColorBrush(ArgbColor(dark_mode_ ? 0x36FFFFFFu : 0x240078D4u), &ob);
-                if (ob) {
-                    off_rt->FillRoundedRectangle(
-                        D2D1::RoundedRect(D2D1::RectF(sw_w * 0.22f, sw_h * 0.20f, sw_w * 0.78f, sw_h * 0.68f), 4.0f, 4.0f),
-                        ob.Get());
-                    off_rt->FillRectangle(D2D1::RectF(sw_w * 0.36f, sw_h * 0.74f, sw_w * 0.64f, sw_h * 0.80f), ob.Get());
-                }
-            } else {
-                render::WallpaperBackdrop::DrawPresetScene(
-                    fac.Get(), off_rt.Get(), D2D1::RectF(0.0f, 0.0f, sw_w, sw_h), kWalls[i].preset, dark_mode_);
-            }
-            if (SUCCEEDED(off_rt->EndDraw())) {
-                ComPtr<ID2D1Bitmap> sw_bmp;
-                if (SUCCEEDED(off_rt->GetBitmap(&sw_bmp)) && sw_bmp) {
-                    ComPtr<ID2D1BitmapBrush> bmp_br;
-                    const D2D1_BITMAP_BRUSH_PROPERTIES bbp = D2D1::BitmapBrushProperties(
-                        D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                    const D2D1_BRUSH_PROPERTIES bp = D2D1::BrushProperties(
-                        1.0f, D2D1::Matrix3x2F::Translation(wrc.left, wrc.top));
-                    if (SUCCEEDED(dc->CreateBitmapBrush(sw_bmp.Get(), bbp, bp, &bmp_br)) && bmp_br) {
-                        dc->FillRoundedRectangle(D2D1::RoundedRect(wrc, 8.0f, 8.0f), bmp_br.Get());
-                    }
-                }
-            }
-        }
-
-        const bool active = (cur_wp == kWalls[i].preset);
-        StrokeCrispRoundedRect(dc, wrc, 8.0f,
-                               Brush(dc, active ? accent_argb_ : (dark_mode_ ? 0x2AFFFFFFu : 0x20000000u)),
-                               active ? 2.0f : 1.0f);
-        dc->DrawText(kWalls[i].label, static_cast<UINT32>(std::wcslen(kWalls[i].label)),
-                     fmt_small_center_.Get(),
-                     D2D1::RectF(wrc.left - 2.0f, wrc.bottom + 3.0f, wrc.right + 2.0f, wrc.bottom + 21.0f),
-                     Brush(dc, active ? accent_argb_ : sec));
-    }
-    y += 74.0f;
-
-    // Helper for toggle switch row
-    auto draw_toggle_row = [&](const wchar_t* label, bool on, const char* act_id) {
+    // Shared capsule helpers matching HTML CSS (.cseg, .sw, .cbtn)
+    auto draw_toggle_row = [&](const wchar_t* label, bool on, const char* act_id, float top_pad = 0.0f) {
+        y += top_pad;
         dc->DrawText(label, static_cast<UINT32>(std::wcslen(label)), fmt_body_.Get(),
-                     D2D1::RectF(ox + 18.0f, oy + y, ox + w - 70.0f, oy + y + 28.0f), Brush(dc, pri));
-        const D2D1_RECT_F sw = D2D1::RectF(ox + w - 56.0f, oy + y + 4.0f, ox + w - 18.0f, oy + y + 24.0f);
-        push_region(act_id, RECT{18, static_cast<LONG>(y), static_cast<LONG>(w - 18), static_cast<LONG>(y + 28)});
-        dc->FillRoundedRectangle(D2D1::RoundedRect(sw, 10.0f, 10.0f),
-                                 Brush(dc, on ? accent_argb_ : (dark_mode_ ? 0x30FFFFFFu : 0x26000000u)));
-        const float kx = on ? (sw.right - 10.0f) : (sw.left + 10.0f);
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kx, (sw.top + sw.bottom) * 0.5f), 7.0f, 7.0f),
-                        Brush(dc, on ? (dark_mode_ ? 0xFF0A121Eu : 0xFFFFFFFFu) : 0xFFFFFFFFu));
-        y += 36.0f;
+                     D2D1::RectF(ox + 18.0f, oy + y, ox + w - 70.0f, oy + y + 34.0f), Brush(dc, pri));
+        const D2D1_RECT_F sw = D2D1::RectF(ox + w - 56.0f, oy + y + 6.0f, ox + w - 18.0f, oy + y + 28.0f);
+        push_region(act_id, RECT{18, static_cast<LONG>(y), static_cast<LONG>(w - 18), static_cast<LONG>(y + 34)});
+        dc->FillRoundedRectangle(D2D1::RoundedRect(sw, 11.0f, 11.0f),
+                                 Brush(dc, on ? accent_argb_ : track_col));
+        const float kx = on ? (sw.right - 11.0f) : (sw.left + 11.0f);
+        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kx, (sw.top + sw.bottom) * 0.5f), 8.0f, 8.0f),
+                        Brush(dc, 0xFFFFFFFFu));
+        y += 38.0f;
     };
 
-    draw_toggle_row(L"强调色跟随壁纸", beautify_settings_.auto_wallpaper_accent, "b-auto-acc");
-
-    if (!beautify_settings_.auto_wallpaper_accent) {
-        static constexpr uint32_t kSwatches[6] = {
-            0xFF4CC2FFu, 0xFFE68A6Eu, 0xFF5FD08Au, 0xFFA193FFu, 0xFFF5A524u, 0xFFE5484Du
-        };
-        for (int i = 0; i < 6; ++i) {
-            const float cx = 30.0f + static_cast<float>(i) * 38.0f;
-            const float cy = y + 12.0f;
-            push_region("b-acc:" + std::to_string(i),
-                        RECT{static_cast<LONG>(cx - 14), static_cast<LONG>(cy - 14),
-                             static_cast<LONG>(cx + 14), static_cast<LONG>(cy + 14)});
-            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox + cx, oy + cy), 10.5f, 10.5f), Brush(dc, kSwatches[i]));
-            if (beautify_settings_.accent_argb == kSwatches[i]) {
-                dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(ox + cx, oy + cy), 13.5f, 13.5f), Brush(dc, pri), 1.6f);
+    auto draw_capsule_seg_at = [&](float sx0, float sy0, float seg_total_w,
+                                   std::initializer_list<std::pair<const char*, const wchar_t*>> opts,
+                                   int active_idx) {
+        const D2D1_RECT_F tr = SnapRectF(D2D1::RectF(ox + sx0, oy + sy0, ox + sx0 + seg_total_w, oy + sy0 + 32.0f));
+        dc->FillRoundedRectangle(D2D1::RoundedRect(tr, 16.0f, 16.0f), Brush(dc, track_col));
+        const float inner_w = (seg_total_w - 6.0f) / static_cast<float>(opts.size());
+        int idx = 0;
+        for (const auto& [id, lbl] : opts) {
+            const float bx = sx0 + 3.0f + inner_w * static_cast<float>(idx);
+            const D2D1_RECT_F rc = D2D1::RectF(ox + bx, oy + sy0 + 3.0f, ox + bx + inner_w, oy + sy0 + 29.0f);
+            push_region(id, RECT{static_cast<LONG>(bx), static_cast<LONG>(sy0),
+                                 static_cast<LONG>(bx + inner_w), static_cast<LONG>(sy0 + 32.0f)});
+            if (idx == active_idx) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(rc, 13.0f, 13.0f), Brush(dc, accent_ink, dark_mode_ ? 0.22f : 0.14f));
+                StrokeCrispRoundedRect(dc, rc, 13.0f, Brush(dc, accent_ink, 0.55f), 1.0f);
             }
+            dc->DrawText(lbl, static_cast<UINT32>(std::wcslen(lbl)), fmt_small_center_.Get(),
+                         rc, Brush(dc, idx == active_idx ? accent_ink : pri));
+            ++idx;
         }
-        y += 32.0f;
-    }
+    };
 
     auto draw_seg = [&](const wchar_t* caption,
                         std::initializer_list<std::pair<const char*, const wchar_t*>> opts,
@@ -3207,160 +3914,566 @@ void DesktopOverlayController::DrawBeautifyDrawer(ID2D1DeviceContext* dc, float 
         dc->DrawText(caption, static_cast<UINT32>(std::wcslen(caption)), fmt_small_.Get(),
                      D2D1::RectF(ox + 18.0f, oy + y, ox + w - 18.0f, oy + y + 18.0f), Brush(dc, sec));
         y += 22.0f;
-        const D2D1_RECT_F track = D2D1::RectF(ox + 18.0f, oy + y, ox + w - 18.0f, oy + y + 32.0f);
-        dc->FillRoundedRectangle(D2D1::RoundedRect(track, 8.0f, 8.0f),
-                                 Brush(dc, dark_mode_ ? 0x16FFFFFFu : 0x0E000000u));
-        const float seg_w = (w - 36.0f) / static_cast<float>(opts.size());
-        int idx = 0;
-        for (const auto& [id, lbl] : opts) {
-            const float sx = 18.0f + seg_w * static_cast<float>(idx);
-            const D2D1_RECT_F rc = D2D1::RectF(ox + sx + 2.0f, oy + y + 2.0f,
-                                               ox + sx + seg_w - 2.0f, oy + y + 30.0f);
-            push_region(id, RECT{static_cast<LONG>(sx), static_cast<LONG>(y),
-                                 static_cast<LONG>(sx + seg_w), static_cast<LONG>(y + 32.0f)});
-            if (idx == active_idx) {
-                dc->FillRoundedRectangle(D2D1::RoundedRect(rc, 6.0f, 6.0f), Brush(dc, accent_argb_, 0.28f));
-                dc->DrawRoundedRectangle(D2D1::RoundedRect(rc, 6.0f, 6.0f), Brush(dc, accent_argb_, 0.65f), 1.0f);
-            }
-            dc->DrawText(lbl, static_cast<UINT32>(std::wcslen(lbl)), fmt_small_center_.Get(),
-                         rc, Brush(dc, idx == active_idx ? accent_argb_ : pri));
-            ++idx;
-        }
+        draw_capsule_seg_at(18.0f, y, content_w, opts, active_idx);
         y += 42.0f;
     };
 
-    const int mat_idx = (beautify_settings_.default_material == model::CardMaterial::Mica) ? 1
-                      : (beautify_settings_.default_material == model::CardMaterial::MicaAlt) ? 2
-                      : (beautify_settings_.default_material == model::CardMaterial::Solid) ? 3
-                      : (beautify_settings_.default_material == model::CardMaterial::LiquidGlass) ? 4 : 0;
-    draw_seg(L"窗口效果",
-             {{"b-mat:1", L"亚克力"}, {"b-mat:2", L"Mica"}, {"b-mat:3", L"Mica Alt"},
-              {"b-mat:4", L"纯色"}, {"b-mat:5", L"液态玻璃"}},
-             mat_idx);
-
-    if (beautify_settings_.default_material == model::CardMaterial::LiquidGlass) {
-        const auto& reset_label=l10n::Get(l10n::StringId::DesktopGlassReset);
-        const auto reset_rect=D2D1::RectF(ox+18,oy+y,ox+w-18,oy+y+32);
-        dc->FillRoundedRectangle(D2D1::RoundedRect(reset_rect,8,8),Brush(dc,dark_mode_?0x16FFFFFFu:0x0E000000u));
-        dc->DrawText(reset_label.c_str(),static_cast<UINT32>(reset_label.size()),fmt_small_center_.Get(),reset_rect,Brush(dc,pri));
-        push_region("b-gp:5",RECT{18,static_cast<LONG>(y),static_cast<LONG>(w-18),static_cast<LONG>(y+32)});
-        y+=42;
-
-        // Same continuous optical values and units as the host settings page.
-        const float tr_left = 18.0f;
-        const float tr_right = w - 18.0f;
-        const float tr_span = std::max(1.0f, tr_right - tr_left);
-        for (size_t i=0;i<kGlassOpticalFields.size();++i) {
-            const auto& field=kGlassOpticalFields[i];
-            const auto& label=l10n::Get(kGlassControlLabels[i]);
-            const auto id=kGlassControlIds[i];
-            const double cur_v = beautify_settings_.glass_options.*(field.member);
-            wchar_t val_buf[24]{};
-            std::swprintf(val_buf, ARRAYSIZE(val_buf), L"%.2f %ls",cur_v,kGlassControlUnits[i]);
-            dc->DrawText(label.c_str(), static_cast<UINT32>(label.size()), fmt_small_.Get(),
-                         D2D1::RectF(ox + tr_left, oy + y, ox + w - 76.0f, oy + y + 16.0f), Brush(dc, pri));
-            dc->DrawText(val_buf, static_cast<UINT32>(std::wcslen(val_buf)), fmt_small_right_.Get(),
-                         D2D1::RectF(ox + w - 82.0f, oy + y, ox + tr_right, oy + y + 16.0f),
-                         Brush(dc, sec));
-
-            const float t = std::clamp(
-                static_cast<float>((cur_v-field.min)/(field.max-field.min)),
-                0.0f, 1.0f);
-            const float ky = y + 25.0f;
-            const float kx = tr_left + t * tr_span;
-            const bool active_sl = (dragging_beautify_slider_ == id) || (hovered_action_id_ == id);
-
-            const D2D1_RECT_F tr_rc = D2D1::RectF(ox + tr_left, oy + ky - 3.0f, ox + tr_right, oy + ky + 3.0f);
-            dc->FillRoundedRectangle(D2D1::RoundedRect(tr_rc, 3.0f, 3.0f),
-                                     Brush(dc, dark_mode_ ? 0x26FFFFFFu : 0x1A000000u));
-            if (kx > tr_left + 1.0f) {
-                const D2D1_RECT_F fill_rc = D2D1::RectF(ox + tr_left, oy + ky - 3.0f, ox + kx, oy + ky + 3.0f);
-                dc->FillRoundedRectangle(D2D1::RoundedRect(fill_rc, 3.0f, 3.0f), Brush(dc, accent_argb_));
-            }
-            const float kr = active_sl ? 8.0f : 7.0f;
-            const D2D1_ELLIPSE knob = D2D1::Ellipse(D2D1::Point2F(ox + kx, oy + ky), kr, kr);
-            dc->FillEllipse(knob, Brush(dc, dark_mode_ ? 0xFFF4F8FFu : 0xFFFFFFFFu));
-            dc->DrawEllipse(knob, Brush(dc, accent_argb_, active_sl ? 1.0f : 0.85f), active_sl ? 2.0f : 1.5f);
-
-            push_slider(id, RECT{static_cast<LONG>(tr_left - 6.0f), static_cast<LONG>(y + 12.0f),
-                                      static_cast<LONG>(tr_right + 6.0f), static_cast<LONG>(y + 38.0f)});
-            y += 38.0f;
+    auto draw_capsule_btn = [&](float bx, float by, const wchar_t* label, const char* act_id, bool primary) -> float {
+        const float tw = MeasureTextW(label, fmt_small_.Get(), 240.0f);
+        const float bw = std::max(60.0f, std::ceil(tw) + 28.0f);
+        const D2D1_RECT_F rc = SnapRectF(D2D1::RectF(ox + bx, oy + by, ox + bx + bw, oy + by + 28.0f));
+        push_region(act_id, RECT{static_cast<LONG>(bx), static_cast<LONG>(by),
+                                 static_cast<LONG>(bx + bw), static_cast<LONG>(by + 28.0f)});
+        const bool hot = (hovered_action_id_ == act_id);
+        if (primary) {
+            dc->FillRoundedRectangle(D2D1::RoundedRect(rc, 14.0f, 14.0f),
+                                     Brush(dc, accent_argb_, hot ? 0.90f : 1.0f));
+        } else {
+            dc->FillRoundedRectangle(D2D1::RoundedRect(rc, 14.0f, 14.0f),
+                                     Brush(dc, hot ? (dark_mode_ ? 0x26FFFFFFu : 0x1A000000u) : track_col));
         }
-        y += 2.0f;
-        draw_toggle_row(l10n::Get(l10n::StringId::DesktopGlassBlurEdge).c_str(),beautify_settings_.glass_options.blur_edge,"b-blur-edge");
-        draw_seg(L"动态折射",
-                 {{"b-rate:0", L"静态"}, {"b-rate:1", L"30Hz"}, {"b-rate:2", L"60Hz"}},
-                 std::clamp<int>(beautify_settings_.glass_live_rate, 0, 2));
-    }
-
-    draw_seg(L"图标文字",
-             {{"b-lbl:0", L"阴影"}, {"b-lbl:1", L"底板"}, {"b-lbl:2", L"隐藏"},
-              {"b-lbl:3", l10n::Get(l10n::StringId::DesktopIconLabelNormal).c_str()}},
-             static_cast<int>(beautify_settings_.label_style));
-
-    draw_seg(L"图标大小",
-             {{"b-sz:0", L"小"}, {"b-sz:1", L"中"}, {"b-sz:2", L"大"}},
-             static_cast<int>(beautify_settings_.icon_size));
-
-    draw_toggle_row(L"双击空白处隐藏图标", beautify_settings_.double_click_hide_icons, "b-dbl-hide");
-
-    // Quick-add desktop widgets (desktop_pack_mockup.html:2097-2099)
-    dc->DrawText(L"小组件", 3, fmt_small_.Get(),
-                 D2D1::RectF(ox + 18.0f, oy + y, ox + 120.0f, oy + y + 18.0f), Brush(dc, sec));
-    dc->DrawText(L"放进磁贴区的空位", 8, fmt_small_right_.Get(),
-                 D2D1::RectF(ox + 120.0f, oy + y, ox + w - 18.0f, oy + y + 18.0f), Brush(dc, sec));
-    y += 22.0f;
-
-    struct WidgetOpt { model::TileKind kind; wchar_t glyph; const wchar_t* name; const char* id; };
-    static constexpr WidgetOpt kWidgets[3] = {
-        {model::TileKind::Weather,  L'\xE706', L"天气", "wg-open:12"},
-        {model::TileKind::Calendar, L'\xE787', L"日历", "wg-open:13"},
-        {model::TileKind::Todo,     L'\xE73A', L"待办", "wg-open:14"},
+        dc->DrawText(label, static_cast<UINT32>(std::wcslen(label)), fmt_small_center_.Get(),
+                     rc, Brush(dc, primary ? 0xFFFFFFFFu : pri));
+        return bw;
     };
-    const float ww = (w - 36.0f - 16.0f) / 3.0f;
-    for (int i = 0; i < 3; ++i) {
-        const float wx = 18.0f + static_cast<float>(i) * (ww + 8.0f);
-        const D2D1_RECT_F wrc = D2D1::RectF(ox + wx, oy + y, ox + wx + ww, oy + y + 54.0f);
-        push_region(kWidgets[i].id, RECT{static_cast<LONG>(wx), static_cast<LONG>(y),
-                                         static_cast<LONG>(wx + ww), static_cast<LONG>(y + 54.0f)});
-        const bool added = active_widget_kinds_.contains(static_cast<uint8_t>(kWidgets[i].kind));
-        const bool whot = (hovered_action_id_ == kWidgets[i].id);
-        dc->FillRoundedRectangle(D2D1::RoundedRect(wrc, 10.0f, 10.0f),
-                                 Brush(dc, whot ? (dark_mode_ ? 0x22FFFFFFu : 0x12000000u)
-                                                : (dark_mode_ ? 0x16FFFFFFu : 0x0C000000u)));
-        dc->DrawRoundedRectangle(D2D1::RoundedRect(wrc, 10.0f, 10.0f),
-                                 Brush(dc, added ? accent_argb_ : (dark_mode_ ? 0x22FFFFFFu : 0x16000000u),
-                                       added ? 0.55f : 1.0f), 1.0f);
-        const wchar_t wg[2] = {kWidgets[i].glyph, 0};
-        DrawGlyph(dc, wg, 1, fmt_fluent_15_.Get(),
-                     D2D1::RectF(wrc.left, wrc.top + 6.0f, wrc.right, wrc.top + 28.0f),
-                     Brush(dc, added ? accent_argb_ : pri));
-        const std::wstring wlbl = std::wstring(kWidgets[i].name) + (added ? L" · 已添加" : L"");
-        dc->DrawText(wlbl.c_str(), static_cast<UINT32>(wlbl.size()), fmt_small_center_.Get(),
-                     D2D1::RectF(wrc.left + 2.0f, wrc.top + 28.0f, wrc.right - 2.0f, wrc.bottom - 4.0f),
-                     Brush(dc, added ? accent_argb_ : sec));
+
+    if (beautify_tab_ == BeautifyTab::Wall) {
+        const auto& vs = beautify_video_;
+        const bool vid_active = !vs.active_source_path.empty() &&
+                                vs.phase != video::VideoWallpaperPhase::Inactive &&
+                                vs.phase != video::VideoWallpaperPhase::RequiresIconTakeover &&
+                                vs.icon_takeover_active;
+        const bool is_optimizing = vid_active && (vs.phase == video::VideoWallpaperPhase::Optimizing);
+        const bool is_poster_only = is_optimizing && !vs.playing_original_while_transcoding;
+        const bool is_auto_paused = vid_active && (vs.phase == video::VideoWallpaperPhase::PausedAuto);
+        const bool is_missing = vid_active && (vs.phase == video::VideoWallpaperPhase::FileMissing);
+        const bool show_pause_btn = vid_active && !beautify_drop_hover_ && !is_poster_only &&
+                                    !is_auto_paused && !is_missing &&
+                                    vs.phase != video::VideoWallpaperPhase::ConfirmHeavyTranscode;
+
+        // 1. 16:9 Live/Poster Preview (336 x 189, radius 14)
+        const float pv_h = 189.0f;
+        const D2D1_RECT_F pv_rc = SnapRectF(D2D1::RectF(ox + 18.0f, oy + y, ox + 18.0f + content_w, oy + y + pv_h));
+        if (vid_active && !is_missing) {
+            ID2D1Bitmap* pv_bmp = nullptr;
+            if (!is_poster_only && vs.phase != video::VideoWallpaperPhase::ConfirmHeavyTranscode) {
+                // Zero-copy live GPU video preview straight from LiveWallpaperSource (shared ID2D1Device).
+                if (live_wallpaper_ && live_wallpaper_->IsInternalVideoMode() &&
+                    live_wallpaper_->HasFrame() && live_wallpaper_->SharpBitmap() && live_wallpaper_owner_dev_) {
+                    ComPtr<ID2D1Device> cur_dev;
+                    dc->GetDevice(&cur_dev);
+                    if (cur_dev && cur_dev.Get() == live_wallpaper_owner_dev_) {
+                        pv_bmp = live_wallpaper_->SharpBitmap();
+                    }
+                }
+                if (!pv_bmp && !beautify_live_bgra_.empty() && beautify_live_w_ > 0 && beautify_live_h_ > 0) {
+                    if (beautify_bmp_dc_ != dc) {
+                        beautify_img_cache_.clear();
+                        beautify_live_bmp_.Reset();
+                        beautify_bmp_dc_ = dc;
+                    }
+                    if (!beautify_live_bmp_) {
+                        const D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+                            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), 96.0f, 96.0f);
+                        dc->CreateBitmap(D2D1::SizeU(beautify_live_w_, beautify_live_h_),
+                                         beautify_live_bgra_.data(), beautify_live_w_ * 4u, bp, &beautify_live_bmp_);
+                    }
+                    pv_bmp = beautify_live_bmp_.Get();
+                }
+            }
+            if (!pv_bmp && !vs.active_poster_path.empty()) {
+                pv_bmp = GetBeautifyCachedImage(dc, vs.active_poster_path);
+            }
+            if (pv_bmp) {
+                draw_bitmap_rounded(pv_bmp, pv_rc, 14.0f, vs.fill_mode);
+            } else {
+                draw_preset_rounded(pv_rc, 14.0f, model::WallpaperPreset::Dusk);
+            }
+        } else if (beautify_settings_.wallpaper_preset == model::WallpaperPreset::System) {
+            if (ID2D1Bitmap* sys_bmp = GetBeautifySystemWallpaper(dc)) {
+                draw_bitmap_rounded(sys_bmp, pv_rc, 14.0f, video::VideoFillMode::Fill);
+            } else {
+                draw_preset_rounded(pv_rc, 14.0f, model::WallpaperPreset::System);
+            }
+        } else {
+            draw_preset_rounded(pv_rc, 14.0f, beautify_settings_.wallpaper_preset);
+        }
+
+        // User-paused subtle veil / auto-paused / missing veil
+        if (vid_active && !beautify_drop_hover_) {
+            if (vs.user_paused && show_pause_btn) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(pv_rc, 14.0f, 14.0f), Brush(dc, 0x2E000000u));
+            } else if (is_auto_paused) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(pv_rc, 14.0f, 14.0f), Brush(dc, 0x52000000u));
+                const wchar_t pg[2] = {L'\xE769', 0};
+                DrawGlyph(dc, pg, 1, fmt_fluent_20_.Get(),
+                          D2D1::RectF(pv_rc.left, pv_rc.top + 66.0f, pv_rc.right, pv_rc.top + 96.0f), Brush(dc, 0xFFFFFFFFu));
+                dc->DrawText(L"已暂停", 3, fmt_small_center_.Get(),
+                             D2D1::RectF(pv_rc.left, pv_rc.top + 98.0f, pv_rc.right, pv_rc.top + 118.0f), Brush(dc, 0xFFFFFFFFu));
+            } else if (is_missing) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(pv_rc, 14.0f, 14.0f), Brush(dc, 0x70000000u));
+                dc->DrawText(L"找不到视频", 5, fmt_small_center_.Get(), pv_rc, Brush(dc, 0xFFFFFFFFu));
+            }
+
+            // Top-left chip ("视频" / "第一帧")
+            const wchar_t* chip_txt = (is_poster_only || vs.phase == video::VideoWallpaperPhase::ConfirmHeavyTranscode) ? L"第一帧" : L"视频";
+            const float chip_w = (chip_txt[0] == L'第') ? 62.0f : 50.0f;
+            const D2D1_RECT_F chip_rc = D2D1::RectF(pv_rc.left + 8.0f, pv_rc.top + 8.0f,
+                                                    pv_rc.left + 8.0f + chip_w, pv_rc.top + 30.0f);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(chip_rc, 11.0f, 11.0f), Brush(dc, 0x8C000000u));
+            const wchar_t play_g[2] = {L'\xE768', 0};
+            DrawGlyph(dc, play_g, 1, fmt_fluent_12_.Get(),
+                      D2D1::RectF(chip_rc.left + 4.0f, chip_rc.top, chip_rc.left + 20.0f, chip_rc.bottom),
+                      Brush(dc, 0xFFFFFFFFu));
+            dc->DrawText(chip_txt, static_cast<UINT32>(std::wcslen(chip_txt)), fmt_small_.Get(),
+                         D2D1::RectF(chip_rc.left + 21.0f, chip_rc.top, chip_rc.right - 4.0f, chip_rc.bottom),
+                         Brush(dc, 0xFFFFFFFFu));
+
+            // Bottom-right pause/play button
+            if (show_pause_btn) {
+                const float pb_w = 64.0f;
+                const D2D1_RECT_F pb_rc = D2D1::RectF(pv_rc.right - 8.0f - pb_w, pv_rc.bottom - 36.0f,
+                                                      pv_rc.right - 8.0f, pv_rc.bottom - 8.0f);
+                push_region("b-vid-pause", RECT{
+                    static_cast<LONG>(18.0f + content_w - 8.0f - pb_w), static_cast<LONG>(y + pv_h - 36.0f),
+                    static_cast<LONG>(18.0f + content_w - 8.0f), static_cast<LONG>(y + pv_h - 8.0f)});
+                const bool p_hot = (hovered_action_id_ == "b-vid-pause");
+                dc->FillRoundedRectangle(D2D1::RoundedRect(pb_rc, 14.0f, 14.0f),
+                                         Brush(dc, p_hot ? 0xA8000000u : 0x80000000u));
+                const wchar_t pg[2] = {vs.user_paused ? L'\xE768' : L'\xE769', 0};
+                DrawGlyph(dc, pg, 1, fmt_fluent_12_.Get(),
+                          D2D1::RectF(pb_rc.left + 6.0f, pb_rc.top, pb_rc.left + 22.0f, pb_rc.bottom),
+                          Brush(dc, 0xFFFFFFFFu));
+                const wchar_t* plbl = vs.user_paused ? L"播放" : L"暂停";
+                dc->DrawText(plbl, 2, fmt_small_.Get(),
+                             D2D1::RectF(pb_rc.left + 24.0f, pb_rc.top, pb_rc.right - 6.0f, pb_rc.bottom),
+                             Brush(dc, 0xFFFFFFFFu));
+            }
+
+            // Progress bar inside preview during optimizing
+            if (is_optimizing) {
+                const float pct = std::clamp(vs.optimize_progress, 0.02f, 1.0f);
+                const D2D1_RECT_F ptrk = D2D1::RectF(pv_rc.left + 12.0f, pv_rc.bottom - 16.0f,
+                                                     pv_rc.right - 12.0f, pv_rc.bottom - 12.0f);
+                dc->FillRoundedRectangle(D2D1::RoundedRect(ptrk, 2.0f, 2.0f), Brush(dc, 0x59FFFFFFu));
+                const D2D1_RECT_F pfill = D2D1::RectF(ptrk.left, ptrk.top,
+                                                      ptrk.left + (ptrk.right - ptrk.left) * pct, ptrk.bottom);
+                dc->FillRoundedRectangle(D2D1::RoundedRect(pfill, 2.0f, 2.0f), Brush(dc, 0xFFFFFFFFu));
+            }
+        }
+
+        // Drag-over dashed drop zone overlay ("松开即设为壁纸")
+        if (beautify_drop_hover_) {
+            dc->FillRoundedRectangle(D2D1::RoundedRect(pv_rc, 14.0f, 14.0f),
+                                     Brush(dc, dark_mode_ ? 0xD420222Au : 0xDEFAF9F7u));
+            dc->FillRoundedRectangle(D2D1::RoundedRect(pv_rc, 14.0f, 14.0f), Brush(dc, accent_argb_, 0.12f));
+            ComPtr<ID2D1StrokeStyle> dash_st;
+            if (fac) {
+                const D2D1_STROKE_STYLE_PROPERTIES dp = D2D1::StrokeStyleProperties(
+                    D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                    D2D1_LINE_JOIN_ROUND, 4.0f, D2D1_DASH_STYLE_DASH, 0.0f);
+                fac->CreateStrokeStyle(dp, nullptr, 0, &dash_st);
+            }
+            const D2D1_RECT_F dr = D2D1::RectF(pv_rc.left + 1.0f, pv_rc.top + 1.0f, pv_rc.right - 1.0f, pv_rc.bottom - 1.0f);
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(dr, 13.0f, 13.0f), Brush(dc, accent_argb_), 2.0f, dash_st.Get());
+            const wchar_t film_g[2] = {L'\xE714', 0};
+            DrawGlyph(dc, film_g, 1, fmt_fluent_20_.Get(),
+                      D2D1::RectF(pv_rc.left, pv_rc.top + 52.0f, pv_rc.right, pv_rc.top + 84.0f), Brush(dc, accent_ink));
+            draw_centered_single_line(L"松开即设为壁纸",
+                                      D2D1::RectF(pv_rc.left + 16.0f, pv_rc.top + 88.0f, pv_rc.right - 16.0f, pv_rc.top + 110.0f),
+                                      13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, pri, 1.0f);
+            if (!beautify_drop_filename_.empty()) {
+                draw_centered_single_line(beautify_drop_filename_,
+                                          D2D1::RectF(pv_rc.left + 16.0f, pv_rc.top + 112.0f, pv_rc.right - 16.0f, pv_rc.top + 132.0f),
+                                          11.5f, DWRITE_FONT_WEIGHT_NORMAL, sec, 1.0f);
+            }
+        } else {
+            StrokeCrispRoundedRect(dc, pv_rc, 14.0f, Brush(dc, tile_edge), 1.0f);
+        }
+        y += pv_h + 12.0f;
+
+        // 2. 图片 Row (5 tiles: 系统 / 蓝 / 暮色 / 森林 / 照片, 62x40 radius 9)
+        dc->DrawText(L"图片", 2, fmt_small_.Get(),
+                     D2D1::RectF(ox + 18.0f, oy + y, ox + w - 18.0f, oy + y + 16.0f), Brush(dc, sec));
+        y += 22.0f;
+
+        struct WallOpt { model::WallpaperPreset preset; const char* id; const wchar_t* label; };
+        static constexpr WallOpt kWalls[5] = {
+            {model::WallpaperPreset::System, "b-wall:0", L"系统"},
+            {model::WallpaperPreset::Bloom,  "b-wall:1", L"蓝"},
+            {model::WallpaperPreset::Dusk,   "b-wall:2", L"暮色"},
+            {model::WallpaperPreset::Forest, "b-wall:3", L"森林"},
+            {model::WallpaperPreset::Photo,  "b-wall:4", L"照片"},
+        };
+        const float th_w = 62.0f;
+        const float th_h = 40.0f;
+        const float th_gap = (content_w - th_w * 5.0f) / 4.0f;
+        for (int i = 0; i < 5; ++i) {
+            const float wx = 18.0f + static_cast<float>(i) * (th_w + th_gap);
+            const D2D1_RECT_F wrc = SnapRectF(D2D1::RectF(ox + wx, oy + y, ox + wx + th_w, oy + y + th_h));
+            push_region(kWalls[i].id, RECT{static_cast<LONG>(wx), static_cast<LONG>(y),
+                                           static_cast<LONG>(wx + th_w), static_cast<LONG>(y + th_h + 20.0f)});
+            if (kWalls[i].preset == model::WallpaperPreset::System) {
+                if (ID2D1Bitmap* sys_bmp = GetBeautifySystemWallpaper(dc)) {
+                    draw_bitmap_rounded(sys_bmp, wrc, 9.0f, video::VideoFillMode::Fill);
+                } else {
+                    draw_preset_rounded(wrc, 9.0f, model::WallpaperPreset::System);
+                }
+            } else {
+                draw_preset_rounded(wrc, 9.0f, kWalls[i].preset);
+            }
+            const bool active = !vid_active && (beautify_settings_.wallpaper_preset == kWalls[i].preset);
+            StrokeCrispRoundedRect(dc, wrc, 9.0f,
+                                   Brush(dc, active ? accent_ink : tile_edge),
+                                   active ? 2.0f : 1.0f);
+            dc->DrawText(kWalls[i].label, static_cast<UINT32>(std::wcslen(kWalls[i].label)),
+                         fmt_small_center_.Get(),
+                         D2D1::RectF(wrc.left - 2.0f, wrc.bottom + 4.0f, wrc.right + 2.0f, wrc.bottom + 20.0f),
+                         Brush(dc, active ? accent_ink : sec));
+        }
+        y += th_h + 28.0f;
+
+        // 3. 视频 Row (4-column grid: up to 3 recent poster thumbnails + "+ 选择视频…", 78x44 radius 9)
+        dc->DrawText(L"视频", 2, fmt_small_.Get(),
+                     D2D1::RectF(ox + 18.0f, oy + y, ox + 120.0f, oy + y + 16.0f), Brush(dc, sec));
+        if (!vs.recent.empty()) {
+            dc->DrawText(L"最近用过", 4, fmt_small_right_.Get(),
+                         D2D1::RectF(ox + 120.0f, oy + y, ox + w - 18.0f, oy + y + 16.0f), Brush(dc, sec));
+        }
+        y += 22.0f;
+
+        const float vid_alpha = vs.icon_takeover_active ? 1.0f : 0.40f;
+        const size_t show_recent = std::min<size_t>(vs.recent.size(), 3u);
+        const std::wstring active_norm = video::NormalizePathForCompare(vs.active_source_path);
+        const std::wstring tried_norm = video::NormalizePathForCompare(vs.tried_source_path);
+        const float v_gap = 8.0f;
+        const float v_w = (content_w - v_gap * 3.0f) / 4.0f; // 78 DIP (4-col 16:9 tiles)
+        const float v_h = 44.0f;
+
+        for (size_t i = 0; i < show_recent; ++i) {
+            const auto& r = vs.recent[i];
+            const float vx = 18.0f + static_cast<float>(i) * (v_w + v_gap);
+            const D2D1_RECT_F vrc = SnapRectF(D2D1::RectF(ox + vx, oy + y, ox + vx + v_w, oy + y + v_h));
+            const std::string rid = "b-vid-recent:" + std::to_string(i);
+            if (vs.icon_takeover_active) {
+                push_region(rid, RECT{static_cast<LONG>(vx), static_cast<LONG>(y),
+                                      static_cast<LONG>(vx + v_w), static_cast<LONG>(y + v_h + 20.0f)});
+            }
+
+            if (ID2D1Bitmap* pb = GetBeautifyCachedImage(dc, r.poster_path)) {
+                draw_bitmap_rounded(pb, vrc, 9.0f, video::VideoFillMode::Fill);
+            } else {
+                draw_preset_rounded(vrc, 9.0f, model::WallpaperPreset::Dusk);
+            }
+            if (vid_alpha < 0.99f) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(vrc, 9.0f, 9.0f),
+                                         Brush(dc, dark_mode_ ? 0x80181A20u : 0x80FFFFFFu));
+            }
+
+            // Duration badge (bottom-right)
+            const std::wstring dur = video::FormatDurationMmSs(r.duration_ms);
+            if (!dur.empty()) {
+                const D2D1_RECT_F drc = D2D1::RectF(vrc.right - 31.0f, vrc.bottom - 15.0f, vrc.right - 3.0f, vrc.bottom - 3.0f);
+                dc->FillRoundedRectangle(D2D1::RoundedRect(drc, 4.0f, 4.0f), Brush(dc, 0x8C000000u, vid_alpha));
+                dc->DrawText(dur.c_str(), static_cast<UINT32>(dur.size()), fmt_small_center_.Get(),
+                             D2D1::RectF(drc.left - 2.0f, drc.top - 1.0f, drc.right + 2.0f, drc.bottom + 1.0f),
+                             Brush(dc, 0xFFFFFFFFu, vid_alpha));
+            }
+
+            const std::wstring rnorm = video::NormalizePathForCompare(r.path);
+            const bool is_cur = vid_active && !active_norm.empty() && rnorm == active_norm;
+            const bool is_warn = !tried_norm.empty() && rnorm == tried_norm;
+            if (is_warn) {
+                const D2D1_POINT_2F wc{vrc.right - 10.0f, vrc.top + 10.0f};
+                dc->FillEllipse(D2D1::Ellipse(wc, 7.0f, 7.0f), Brush(dc, 0xFFFFB020u, vid_alpha));
+                dc->DrawText(L"!", 1, fmt_small_center_.Get(),
+                             D2D1::RectF(wc.x - 7.0f, wc.y - 7.0f, wc.x + 7.0f, wc.y + 7.0f),
+                             Brush(dc, 0xFF000000u, vid_alpha));
+            }
+
+            StrokeCrispRoundedRect(dc, vrc, 9.0f,
+                                   Brush(dc, is_cur ? accent_ink : tile_edge, vid_alpha),
+                                   is_cur ? 2.0f : 1.0f);
+            const std::wstring stem = video::VideoStemName(r.path);
+            draw_centered_single_line(stem,
+                                      D2D1::RectF(vrc.left, vrc.bottom + 4.0f, vrc.right, vrc.bottom + 20.0f),
+                                      10.8f, is_cur ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+                                      is_cur ? accent_ink : sec, vid_alpha);
+        }
+
+        // "+" Add Video Tile ("选择视频…")
+        {
+            const float ax = 18.0f + static_cast<float>(show_recent) * (v_w + v_gap);
+            const D2D1_RECT_F arc = SnapRectF(D2D1::RectF(ox + ax, oy + y, ox + ax + v_w, oy + y + v_h));
+            if (vs.icon_takeover_active) {
+                push_region("b-vid-pick", RECT{static_cast<LONG>(ax), static_cast<LONG>(y),
+                                               static_cast<LONG>(ax + v_w), static_cast<LONG>(y + v_h + 20.0f)});
+            }
+            if (hovered_action_id_ == "b-vid-pick" && vs.icon_takeover_active) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(arc, 9.0f, 9.0f), Brush(dc, track_col));
+            }
+            ComPtr<ID2D1StrokeStyle> dash_st;
+            if (fac) {
+                const D2D1_STROKE_STYLE_PROPERTIES dp = D2D1::StrokeStyleProperties(
+                    D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                    D2D1_LINE_JOIN_ROUND, 4.0f, D2D1_DASH_STYLE_DASH, 0.0f);
+                fac->CreateStrokeStyle(dp, nullptr, 0, &dash_st);
+            }
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(arc, 9.0f, 9.0f),
+                                     Brush(dc, tile_edge, vid_alpha), 1.4f, dash_st.Get());
+            const wchar_t plus_g[2] = {L'\xE710', 0};
+            DrawGlyph(dc, plus_g, 1, fmt_fluent_15_.Get(), arc, Brush(dc, sec, vid_alpha));
+            draw_centered_single_line(L"选择视频…",
+                                      D2D1::RectF(arc.left, arc.bottom + 4.0f, arc.right, arc.bottom + 20.0f),
+                                      10.8f, DWRITE_FONT_WEIGHT_NORMAL, sec, vid_alpha);
+        }
+        y += v_h + 28.0f;
+
+        // 4. Status / Info Card (.info) or First-Time Hint
+        const bool has_tried_error = !vs.tried_display_name.empty() &&
+            (vs.phase == video::VideoWallpaperPhase::MissingCodecHevc ||
+             vs.phase == video::VideoWallpaperPhase::MissingCodecAv1 ||
+             vs.phase == video::VideoWallpaperPhase::UnsupportedCodec ||
+             vs.phase == video::VideoWallpaperPhase::TooLargeToTranscode ||
+             vs.phase == video::VideoWallpaperPhase::UnsupportedHdr ||
+             vs.phase == video::VideoWallpaperPhase::Error);
+        const bool show_info_card = !vs.icon_takeover_active || vid_active || has_tried_error ||
+                                    vs.phase == video::VideoWallpaperPhase::ConfirmHeavyTranscode;
+
+        if (show_info_card) {
+            float card_inner_h = 20.0f;
+            std::wstring title_name;
+            std::wstring title_dur;
+            uint32_t dot_col = 0xFF34C759u;
+            std::wstring st_line;
+            std::wstring sub_line;
+            bool show_fill_row = false;
+            std::vector<std::tuple<std::wstring, std::string, bool>> actions;
+
+            if (!vs.icon_takeover_active) {
+                dot_col = 0xFFFFB020u;
+                st_line = L"视频壁纸需要由桌面整理显示图标";
+                sub_line = L"现在桌面图标由 Windows 显示，视频会盖住它们。";
+                actions.push_back({L"开启", "b-vid-takeover", true});
+            } else if (has_tried_error) {
+                title_name = vs.tried_display_name;
+                title_dur = vs.tried_duration_ms > 0 ? video::FormatDurationMmSs(vs.tried_duration_ms) : L"";
+                dot_col = 0xFFFF3B30u;
+                st_line = vs.status_text;
+                sub_line = vs.sub_text;
+                if (!vs.store_uri.empty()) {
+                    actions.push_back({L"去 Microsoft Store", "b-vid-store", true});
+                }
+            } else if (vs.phase == video::VideoWallpaperPhase::ConfirmHeavyTranscode) {
+                title_name = !vs.tried_display_name.empty() ? vs.tried_display_name : vs.active_display_name;
+                const uint32_t dm = vs.tried_duration_ms > 0 ? vs.tried_duration_ms : vs.duration_ms;
+                title_dur = dm > 0 ? video::FormatDurationMmSs(dm) : L"";
+                dot_col = 0xFFFFB020u;
+                st_line = vs.status_text;
+                sub_line = vs.sub_text;
+                actions.push_back({L"开始优化", "b-vid-confirm-heavy", true});
+                actions.push_back({L"取消", "b-vid-cancel", false});
+            } else {
+                title_name = vs.active_display_name;
+                title_dur = vs.duration_ms > 0 ? video::FormatDurationMmSs(vs.duration_ms) : L"";
+                st_line = vs.status_text;
+                sub_line = vs.sub_text;
+                if (vs.phase == video::VideoWallpaperPhase::Optimizing) {
+                    dot_col = accent_argb_;
+                    actions.push_back({L"取消", "b-vid-cancel", false});
+                } else if (vs.phase == video::VideoWallpaperPhase::PausedAuto ||
+                           vs.phase == video::VideoWallpaperPhase::PausedManual) {
+                    dot_col = 0xFFFFB020u;
+                } else if (vs.phase == video::VideoWallpaperPhase::FileMissing ||
+                           vs.phase == video::VideoWallpaperPhase::Error) {
+                    dot_col = 0xFFFF3B30u;
+                    if (vs.phase == video::VideoWallpaperPhase::FileMissing) {
+                        actions.push_back({L"重新选择…", "b-vid-pick", true});
+                    }
+                } else {
+                    dot_col = 0xFF34C759u;
+                }
+                show_fill_row = (vs.phase != video::VideoWallpaperPhase::FileMissing &&
+                                 vs.phase != video::VideoWallpaperPhase::Error);
+            }
+
+            const float inner_w = content_w - 24.0f;
+            if (!title_name.empty()) card_inner_h += 22.0f;
+            const float st_h = st_line.empty() ? 0.0f : measure_wrapped_h(st_line, inner_w - 14.0f, 11.5f, 17.0f);
+            if (st_h > 0.0f) card_inner_h += st_h + (title_name.empty() ? 0.0f : 4.0f);
+            const float sub_h = sub_line.empty() ? 0.0f : measure_wrapped_h(sub_line, inner_w, 11.0f, 16.0f);
+            if (sub_h > 0.0f) card_inner_h += sub_h + 4.0f;
+            if (!actions.empty()) card_inner_h += 36.0f;
+            if (show_fill_row) card_inner_h += 42.0f;
+
+            const D2D1_RECT_F card_rc = SnapRectF(D2D1::RectF(ox + 18.0f, oy + y, ox + 18.0f + content_w, oy + y + card_inner_h));
+            dc->FillRoundedRectangle(D2D1::RoundedRect(card_rc, 12.0f, 12.0f), Brush(dc, card_col));
+            StrokeCrispRoundedRect(dc, card_rc, 12.0f, Brush(dc, line_col), 1.0f);
+
+            float cy = y + 10.0f;
+            if (!title_name.empty()) {
+                dc->DrawText(title_name.c_str(), static_cast<UINT32>(title_name.size()), fmt_body_semi_.Get(),
+                             D2D1::RectF(ox + 30.0f, oy + cy, ox + w - 74.0f, oy + cy + 18.0f), Brush(dc, pri));
+                if (!title_dur.empty()) {
+                    dc->DrawText(title_dur.c_str(), static_cast<UINT32>(title_dur.size()), fmt_small_right_.Get(),
+                                 D2D1::RectF(ox + w - 74.0f, oy + cy, ox + w - 30.0f, oy + cy + 18.0f), Brush(dc, sec));
+                }
+                cy += 22.0f;
+            }
+            if (!st_line.empty()) {
+                if (!title_name.empty()) cy += 2.0f;
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox + 33.5f, oy + cy + 8.0f), 3.5f, 3.5f), Brush(dc, dot_col));
+                const float used = draw_wrapped_text(st_line, 43.0f, cy, inner_w - 14.0f, 11.5f,
+                                                     DWRITE_FONT_WEIGHT_NORMAL, sec, 17.0f);
+                cy += used;
+            }
+            if (!sub_line.empty()) {
+                cy += 4.0f;
+                const float used = draw_wrapped_text(sub_line, 30.0f, cy, inner_w, 11.0f,
+                                                     DWRITE_FONT_WEIGHT_NORMAL, ter, 16.0f);
+                cy += used;
+            }
+            if (!actions.empty()) {
+                cy += 8.0f;
+                float bx = 30.0f;
+                for (const auto& [lbl, act_id, is_pri] : actions) {
+                    const float bw = draw_capsule_btn(bx, cy, lbl.c_str(), act_id.c_str(), is_pri);
+                    bx += bw + 8.0f;
+                }
+                cy += 28.0f;
+            }
+            if (show_fill_row) {
+                cy += 10.0f;
+                dc->DrawText(L"填充方式", 4, fmt_body_.Get(),
+                             D2D1::RectF(ox + 30.0f, oy + cy, ox + 170.0f, oy + cy + 32.0f), Brush(dc, pri));
+                draw_capsule_seg_at(w - 30.0f - 150.0f, cy, 150.0f,
+                                    {{"b-vfill:0", L"铺满"}, {"b-vfill:1", L"适应"}},
+                                    vs.fill_mode == video::VideoFillMode::Fit ? 1 : 0);
+            }
+            y += card_inner_h + 10.0f;
+        } else if (!vid_active && vs.recent.empty()) {
+            const std::wstring hint = L"选一个视频当壁纸：MP4、MOV、MKV 都可以，也可以把视频文件拖到上面的预览里。比屏幕大的视频会先在后台优化，不占用这么多内存。";
+            const float used = draw_wrapped_text(hint, 18.0f, y, content_w, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, ter, 17.0f);
+            y += used + 10.0f;
+        }
+
+        // 5. 强调色跟随壁纸 + 6 swatches
+        draw_toggle_row(L"强调色跟随壁纸", beautify_settings_.auto_wallpaper_accent, "b-auto-acc", 2.0f);
+        if (!beautify_settings_.auto_wallpaper_accent) {
+            static constexpr uint32_t kSwatches[6] = {
+                0xFF4CC2FFu, 0xFFE68A6Eu, 0xFF5FD08Au, 0xFFA193FFu, 0xFFF5A524u, 0xFFE5484Du
+            };
+            for (int i = 0; i < 6; ++i) {
+                const float cx = 30.0f + static_cast<float>(i) * 34.0f;
+                const float cy = y + 12.0f;
+                push_region("b-acc:" + std::to_string(i),
+                            RECT{static_cast<LONG>(cx - 14), static_cast<LONG>(cy - 14),
+                                 static_cast<LONG>(cx + 14), static_cast<LONG>(cy + 14)});
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(ox + cx, oy + cy), 10.5f, 10.5f), Brush(dc, kSwatches[i]));
+                if (beautify_settings_.accent_argb == kSwatches[i]) {
+                    dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(ox + cx, oy + cy), 13.5f, 13.5f), Brush(dc, kSwatches[i]), 1.8f);
+                }
+            }
+            y += 30.0f;
+        }
+    } else if (beautify_tab_ == BeautifyTab::Fx) {
+        y += 6.0f;
+        const int mat_idx = (beautify_settings_.default_material == model::CardMaterial::Mica) ? 1
+                          : (beautify_settings_.default_material == model::CardMaterial::MicaAlt) ? 2
+                          : (beautify_settings_.default_material == model::CardMaterial::Solid) ? 3
+                          : (beautify_settings_.default_material == model::CardMaterial::LiquidGlass) ? 4 : 0;
+        draw_seg(L"窗口效果",
+                 {{"b-mat:1", L"亚克力"}, {"b-mat:2", L"Mica"}, {"b-mat:3", L"Mica Alt"},
+                  {"b-mat:4", L"纯色"}, {"b-mat:5", L"液态玻璃"}},
+                 mat_idx);
+
+        if (beautify_settings_.default_material == model::CardMaterial::LiquidGlass) {
+            draw_seg(L"液态玻璃风格",
+                     {{"b-gp:5", L"清透"}, {"b-gp:1", L"标准"}, {"b-gp:3", L"柔雾"}, {"b-gp:2", L"棱镜"}},
+                     static_cast<int>(model::GlassPresetToModeIndex(beautify_settings_.glass_preset)));
+            draw_seg(L"动态折射",
+                     {{"b-rate:0", L"静态"}, {"b-rate:1", L"30Hz"}, {"b-rate:2", L"60Hz"}},
+                     std::clamp<int>(beautify_settings_.glass_live_rate, 0, 2));
+            const float used = draw_wrapped_text(
+                L"视频壁纸或动态壁纸下，玻璃按这个频率刷新折射；静态最省电。",
+                18.0f, y, content_w, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, ter, 17.0f);
+            y += used + 8.0f;
+        }
+    } else if (beautify_tab_ == BeautifyTab::Desk) {
+        y += 6.0f;
+        draw_seg(L"图标文字",
+                 {{"b-lbl:0", L"阴影"}, {"b-lbl:1", L"底板"}, {"b-lbl:2", L"隐藏"},
+                  {"b-lbl:3", l10n::Get(l10n::StringId::DesktopIconLabelNormal).c_str()}},
+                 static_cast<int>(beautify_settings_.label_style));
+
+        draw_seg(L"图标大小",
+                 {{"b-sz:0", L"小"}, {"b-sz:1", L"中"}, {"b-sz:2", L"大"}},
+                 static_cast<int>(beautify_settings_.icon_size));
+
+        draw_toggle_row(L"双击空白处隐藏图标", beautify_settings_.double_click_hide_icons, "b-dbl-hide", 4.0f);
+
+        y += 6.0f;
+        dc->DrawText(L"小组件", 3, fmt_small_.Get(),
+                     D2D1::RectF(ox + 18.0f, oy + y, ox + 120.0f, oy + y + 18.0f), Brush(dc, sec));
+        dc->DrawText(L"放进磁贴区的空位", 8, fmt_small_right_.Get(),
+                     D2D1::RectF(ox + 120.0f, oy + y, ox + w - 18.0f, oy + y + 18.0f), Brush(dc, sec));
+        y += 24.0f;
+
+        struct WidgetOpt { model::TileKind kind; const wchar_t* name; const char* id; };
+        static constexpr WidgetOpt kWidgets[3] = {
+            {model::TileKind::Weather,  L"天气", "wg-open:12"},
+            {model::TileKind::Calendar, L"日历", "wg-open:13"},
+            {model::TileKind::Todo,     L"待办", "wg-open:14"},
+        };
+        const float ww = (content_w - 12.0f) / 3.0f;
+        for (int i = 0; i < 3; ++i) {
+            const float wx = 18.0f + static_cast<float>(i) * (ww + 6.0f);
+            const D2D1_RECT_F wrc = SnapRectF(D2D1::RectF(ox + wx, oy + y, ox + wx + ww, oy + y + 58.0f));
+            push_region(kWidgets[i].id, RECT{static_cast<LONG>(wx), static_cast<LONG>(y),
+                                             static_cast<LONG>(wx + ww), static_cast<LONG>(y + 58.0f)});
+            const bool added = active_widget_kinds_.contains(static_cast<uint8_t>(kWidgets[i].kind));
+            const bool whot = (hovered_action_id_ == kWidgets[i].id);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(wrc, 12.0f, 12.0f),
+                                     Brush(dc, whot ? (dark_mode_ ? 0x1EFFFFFFu : 0xB8FFFFFFu) : card_col));
+            StrokeCrispRoundedRect(dc, wrc, 12.0f,
+                                   Brush(dc, added ? accent_argb_ : line_col),
+                                   added ? 1.5f : 1.0f);
+            dc->DrawText(kWidgets[i].name, static_cast<UINT32>(std::wcslen(kWidgets[i].name)),
+                         fmt_small_center_.Get(),
+                         D2D1::RectF(wrc.left, wrc.top + 10.0f, wrc.right, wrc.top + 30.0f),
+                         Brush(dc, added ? accent_argb_ : pri));
+            const wchar_t* sub_lbl = added ? L"已添加" : L"添加";
+            dc->DrawText(sub_lbl, static_cast<UINT32>(std::wcslen(sub_lbl)),
+                         fmt_small_center_.Get(),
+                         D2D1::RectF(wrc.left, wrc.top + 31.0f, wrc.right, wrc.bottom - 8.0f),
+                         Brush(dc, sec));
+        }
+        y += 68.0f;
+
+        push_region("b-more-widgets", RECT{18, static_cast<LONG>(y), 140, static_cast<LONG>(y + 24.0f)});
+        dc->DrawText(L"全部小组件…", 6, fmt_small_.Get(),
+                     D2D1::RectF(ox + 18.0f, oy + y, ox + 140.0f, oy + y + 22.0f),
+                     Brush(dc, accent_argb_));
+        y += 28.0f;
+    } else { // BeautifyTab::Dock
+        y += 4.0f;
+        draw_toggle_row(L"显示液态玻璃程序坞", beautify_settings_.dock_enabled, "b-dock-en");
+        if (beautify_settings_.dock_enabled) {
+            draw_seg(L"程序坞位置",
+                     {{"b-dpos:0", L"底部"}, {"b-dpos:1", L"左侧"}, {"b-dpos:2", L"右侧"}},
+                     std::clamp<int>(beautify_settings_.dock_position, 0, 2));
+            draw_seg(L"程序坞收回",
+                     {{"b-dhide:0", L"常驻"}, {"b-dhide:1", L"智能隐藏"}, {"b-dhide:2", L"自动隐藏"}},
+                     std::clamp<int>(beautify_settings_.dock_hide_mode, 0, 2));
+            draw_seg(L"窗口收回效果",
+                     {{"b-dmin:1", L"神奇"}, {"b-dmin:2", L"缩放"}, {"b-dmin:0", L"关闭"}},
+                     beautify_settings_.dock_minimize_effect == 1 ? 0 : (beautify_settings_.dock_minimize_effect == 2 ? 1 : 2));
+            draw_toggle_row(L"系统状态与托盘区", beautify_settings_.dock_system_area, "b-dsys", 4.0f);
+        }
     }
-    y += 62.0f;
 
-    const D2D1_RECT_F more_rc = SnapRectF(D2D1::RectF(ox + 18.0f, oy + y, ox + 134.0f, oy + y + 30.0f));
-    push_region("b-more-widgets",
-                RECT{18, static_cast<LONG>(y), 134, static_cast<LONG>(y + 30.0f)});
-    const bool more_hot = (hovered_action_id_ == "b-more-widgets");
-    dc->FillRoundedRectangle(D2D1::RoundedRect(more_rc, 7.0f, 7.0f),
-                             Brush(dc, more_hot ? (dark_mode_ ? 0x24FFFFFFu : 0x14000000u)
-                                                : (dark_mode_ ? 0x16FFFFFFu : 0x0C000000u)));
-    StrokeCrispRoundedRect(dc, more_rc, 7.0f,
-                           Brush(dc, dark_mode_ ? 0x24FFFFFFu : 0x18000000u), 1.0f);
-    const wchar_t plus_g[2] = {L'\xE710', 0};
-    DrawGlyph(dc, plus_g, 1, fmt_fluent_12_.Get(),
-              D2D1::RectF(more_rc.left + 8.0f, more_rc.top, more_rc.left + 24.0f, more_rc.bottom),
-              Brush(dc, pri));
-    dc->DrawText(L"全部小组件…", 6, fmt_small_.Get(),
-                 D2D1::RectF(more_rc.left + 26.0f, more_rc.top, more_rc.right - 8.0f, more_rc.bottom),
-                 Brush(dc, pri));
-
-    const float content_end = (y + 38.0f) + beautify_scroll_y_;
-    beautify_max_scroll_y_ = std::max(0.0f, content_end + 8.0f - h);
+    const float content_end = y + 14.0f + beautify_scroll_y_;
+    beautify_max_scroll_y_ = std::max(0.0f, content_end - body_bot);
     beautify_scroll_y_ = std::clamp(beautify_scroll_y_, 0.0f, beautify_max_scroll_y_);
     dc->PopAxisAlignedClip();
 
@@ -3422,15 +4535,15 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
         DrawGlyph(dc, x_g, 1, fmt_fluent_12_.Get(), cls_rc, Brush(dc, sec));
     }
 
-    // 2. 4x3 colorful squircle widget grid (.gal-grid)
+    // 2. 4x4 colorful squircle widget grid (.gal-grid)
     const float grid_x = 16.0f;
-    const float grid_y = 53.0f;
+    const float grid_y = 51.0f;
     const float col_gap = 6.0f;
-    const float row_gap = 5.0f;
+    const float row_gap = 4.0f;
     const float cell_w = (w - 32.0f - col_gap * 3.0f) / 4.0f;
-    const float cell_h = 65.0f;
+    const float cell_h = 56.0f;
 
-    for (size_t i = 0; i < 12; ++i) {
+    for (size_t i = 0; i < std::size(kGalleryWidgets); ++i) {
         const auto& wd = kGalleryWidgets[i];
         const int c = static_cast<int>(i % 4);
         const int r = static_cast<int>(i / 4);
@@ -3453,14 +4566,14 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
                                      Brush(dc, dark_mode_ ? 0x16FFFFFFu : 0x0E000000u));
         }
 
-        // 34x34 drawn widget icon: a small scene on a lit squircle (widget_icons.cpp).
-        const float bx = (crc.left + crc.right) * 0.5f - 17.0f;
-        const float by = crc.top + 7.0f;
-        const D2D1_RECT_F brc = D2D1::RectF(bx, by, bx + 34.0f, by + 34.0f);
-        DrawWidgetIcon(dc, wd.kind, brc, 9.0f, fmt_small_center_.Get());
+        // 32x32 drawn widget icon: a small scene on a lit squircle (widget_icons.cpp).
+        const float bx = (crc.left + crc.right) * 0.5f - 16.0f;
+        const float by = crc.top + 4.0f;
+        const D2D1_RECT_F brc = D2D1::RectF(bx, by, bx + 32.0f, by + 32.0f);
+        DrawWidgetIcon(dc, wd.kind, brc, 8.5f, fmt_small_center_.Get());
 
         dc->DrawText(wd.name, static_cast<UINT32>(std::wcslen(wd.name)), fmt_small_center_.Get(),
-                     D2D1::RectF(crc.left + 2.0f, crc.top + 43.0f, crc.right - 2.0f, crc.bottom - 2.0f),
+                     D2D1::RectF(crc.left + 2.0f, crc.top + 37.0f, crc.right - 2.0f, crc.bottom - 1.0f),
                      Brush(dc, pri));
 
         const bool placed = !gallery_tiles_.empty()
@@ -3473,7 +4586,7 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
     }
 
     // Divider (.dp-sep)
-    const float sep_y = grid_y + cell_h * 3.0f + row_gap * 2.0f + 7.0f;
+    const float sep_y = grid_y + cell_h * 4.0f + row_gap * 3.0f + 6.0f;
     dc->FillRectangle(D2D1::RectF(ox + 16.0f, oy + sep_y, ox + w - 16.0f, oy + sep_y + 1.0f),
                       Brush(dc, dark_mode_ ? 0x16FFFFFFu : 0x10000000u));
 
@@ -3512,11 +4625,45 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
                          D2D1::Matrix3x2F::Translation(tx, ty) * saved_tf);
 
         const D2D1_RECT_F tr = D2D1::RectF(0.0f, 0.0f, tw, th);
+        const float card_r = std::min({22.0f, tw * 0.5f, th * 0.5f});
         const D2D1_ROUNDED_RECT trr = D2D1::RoundedRect(tr, 16.0f, 16.0f);
         dc->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(1.0f, 4.0f, tw + 1.0f, th + 6.0f), 16.0f, 16.0f),
+            D2D1::RoundedRect(D2D1::RectF(1.0f, 4.0f, tw + 1.0f, th + 6.0f), card_r, card_r),
             Brush(dc, 0x42000000u));
 
+        // The widget as the desktop draws it (same faces, material and data); the sketch below is only the
+        // fallback when no renderer is attached.
+        bool drew_real = false;
+        if (callbacks_.on_render_widget_preview) {
+            const uint64_t key = (static_cast<uint64_t>(gallery_selected_kind_) << 32) |
+                                 (static_cast<uint64_t>(sz.cols) << 16) | (static_cast<uint64_t>(sz.rows) << 8) |
+                                 (dark_mode_ ? 1u : 0u);
+            const uint64_t now_ms = GetTickCount64();
+            if (key != gallery_preview_key_ || now_ms - gallery_preview_ms_ >= 1000) {
+                gallery_preview_px_.clear();
+                gallery_preview_w_ = gallery_preview_h_ = 0;
+                if (!callbacks_.on_render_widget_preview(gallery_selected_kind_, sz, gallery_preview_px_,
+                                                         gallery_preview_w_, gallery_preview_h_))
+                    gallery_preview_px_.clear();
+                gallery_preview_key_ = key;
+                gallery_preview_ms_ = now_ms;
+            }
+            if (!gallery_preview_px_.empty() && gallery_preview_w_ && gallery_preview_h_) {
+                ComPtr<ID2D1Bitmap> bmp;
+                const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                ComPtr<ID2D1RoundedRectangleGeometry> clip;
+                if (SUCCEEDED(dc->CreateBitmap(D2D1::SizeU(gallery_preview_w_, gallery_preview_h_), gallery_preview_px_.data(),
+                                               gallery_preview_w_ * 4u, props, &bmp)) &&
+                    SUCCEEDED(fac->CreateRoundedRectangleGeometry(D2D1::RoundedRect(tr, card_r, card_r), &clip))) {
+                    dc->PushLayer(D2D1::LayerParameters1(tr, clip.Get(), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), nullptr);
+                    dc->DrawBitmap(bmp.Get(), tr, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    dc->PopLayer();
+                    drew_real = true;
+                }
+            }
+        }
+        if (!drew_real) {
         const bool is_photo = (gallery_selected_kind_ == model::TileKind::Photos);
         const bool is_note = (gallery_selected_kind_ == model::TileKind::StickyNote);
         if (is_photo) {
@@ -3845,32 +4992,39 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
         }
 
         case model::TileKind::Apps: {
-            if (sz.cols == 1) {
-                const wchar_t ag[2] = {L'\xE71D', 0};
-                DrawGlyph(dc, ag, 1, fmt_fluent_20_.Get(), D2D1::RectF(24.0f, 18.0f, 76.0f, 58.0f), Brush(dc, hue));
-                dc->DrawText(L"应用", 2, fmt_small_center_.Get(), D2D1::RectF(8.0f, 68.0f, 92.0f, 90.0f), Brush(dc, pri));
-            } else {
-                draw_band_hdr(L"应用", L"10 个快捷方式");
-                const int acols = sz.cols >= 4 ? 5 : 2;
-                const int arows = sz.rows >= 4 ? 4 : 2;
-                static constexpr uint32_t kAppCols[10] = {
-                    0xFF2DC100u, 0xFF12B7F5u, 0xFF3296FAu, 0xFFD83B01u, 0xFF1476FFu,
-                    0xFFE60026u, 0xFF0078D4u, 0xFF06A7FFu, 0xFF282828u, 0xFF1B2838u
-                };
-                static constexpr const wchar_t* kAppNames[10] = {
-                    L"微信", L"QQ", L"钉钉", L"WPS", L"会议", L"云音乐", L"Edge", L"网盘", L"剪映", L"Steam"
-                };
-                const float cell_aw = (tw - 24.0f) / static_cast<float>(acols);
-                for (int ar = 0; ar < arows; ++ar) {
-                    for (int ac = 0; ac < acols; ++ac) {
-                        const int idx = (ar * acols + ac) % 10;
-                        const float ax = 12.0f + static_cast<float>(ac) * cell_aw + (cell_aw - 36.0f) * 0.5f;
-                        const float ay = 48.0f + static_cast<float>(ar) * 76.0f;
-                        dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(ax, ay, ax + 36.0f, ay + 36.0f), 9.0f, 9.0f),
-                                                 Brush(dc, kAppCols[idx]));
-                        dc->DrawText(kAppNames[idx], static_cast<UINT32>(std::wcslen(kAppNames[idx])), fmt_small_center_.Get(),
-                                     D2D1::RectF(ax - 14.0f, ay + 40.0f, ax + 50.0f, ay + 58.0f), Brush(dc, pri));
-                    }
+            // Render authentic bottom-center macOS 26 Tahoe Liquid Glass Dock preview
+            const float ph = std::min(th - 16.0f, 66.0f);
+            const float py = (th - ph) * 0.5f + 4.0f;
+            const float pw = std::max(84.0f, tw - 16.0f);
+            const float px = (tw - pw) * 0.5f;
+            const float pr = std::min(ph * 0.31f, 20.0f);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(px, py, px + pw, py + ph), pr, pr),
+                                     Brush(dc, dark_mode_ ? 0x26FFFFFFu : 0x42FFFFFFu));
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(px + 0.5f, py + 0.5f, px + pw - 0.5f, py + ph - 0.5f), pr, pr),
+                                     Brush(dc, dark_mode_ ? 0x42FFFFFFu : 0x62FFFFFFu), 1.0f);
+            const float base = std::clamp(ph - 22.0f, 28.0f, 40.0f);
+            const float cy = py + ph - 12.0f - base * 0.5f;
+            const int count = (pw >= 280.0f) ? 6 : 3;
+            const float step = (pw - 24.0f) / static_cast<float>(count);
+            for (int i = 0; i < count; ++i) {
+                const float cx = px + 12.0f + (static_cast<float>(i) + 0.5f) * step;
+                const float sc = (i == count / 2) ? 1.24f : 1.0f;
+                const float s = base * sc;
+                const float lift = (sc - 1.0f) * base * 0.25f;
+                const D2D1_RECT_F ir = D2D1::RectF(cx - s * 0.5f, cy - s * 0.5f - lift, cx + s * 0.5f, cy + s * 0.5f - lift);
+                if (i == count - 1) render::DrawDockWidgetsVectorIcon(dc, ir);
+                else if (i == count - 2 && count >= 4) render::DrawDockSettingsVectorIcon(dc, ir);
+                else if (i == 1) render::DrawDockTerminalVectorIcon(dc, ir);
+                else if (i == 2 && count >= 4) render::DrawDockCalculatorVectorIcon(dc, ir);
+                else {
+                    static constexpr uint32_t kC[3] = {0xFF2F8FE8u, 0xFF34C759u, 0xFFFF9500u};
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(ir, s * 0.23f, s * 0.23f), Brush(dc, kC[i % 3]));
+                }
+                if (i == count / 2) {
+                    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, py + ph - 5.0f), 4.5f, 3.0f), Brush(dc, 0x736BD1FFu));
+                    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, py + ph - 5.0f), 2.0f, 2.0f), Brush(dc, 0xF5FFFFFFu));
+                } else if (i == 0) {
+                    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, py + ph - 5.0f), 1.9f, 1.9f), Brush(dc, pri, 0.85f));
                 }
             }
             break;
@@ -3970,6 +5124,187 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
             break;
         }
 
+        case model::TileKind::Pomodoro: {
+            const uint32_t pc = 0xFFFF5A52u;
+            if (sz.cols == 1) {
+                draw_ring(50.0f, 38.0f, 22.0f, 0.72f, pc);
+                dc->DrawText(L"18:24", 5, fmt_small_center_.Get(), D2D1::RectF(24.0f, 28.0f, 76.0f, 48.0f), Brush(dc, pri));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(14.0f, 72.0f, 86.0f, 91.0f), 9.0f, 9.0f), Brush(dc, pc, 0.88f));
+                dc->DrawText(L"专注", 2, fmt_small_center_.Get(), D2D1::RectF(14.0f, 72.0f, 86.0f, 91.0f), Brush(dc, 0xFFFFFFFFu));
+            } else if (sz.rows == 1) {
+                draw_ring(36.0f, th * 0.5f, 20.0f, 0.72f, pc);
+                dc->DrawText(L"72%", 3, fmt_small_center_.Get(), D2D1::RectF(14.0f, th * 0.5f - 9.0f, 58.0f, th * 0.5f + 9.0f), Brush(dc, pri));
+                dc->DrawText(L"18:24", 5, fmt_body_semi_.Get(), D2D1::RectF(66.0f, th * 0.5f - 20.0f, 146.0f, th * 0.5f), Brush(dc, pri));
+                dc->DrawText(L"专注中 · 今日 3 个", 10, fmt_small_.Get(), D2D1::RectF(66.0f, th * 0.5f + 1.0f, 162.0f, th * 0.5f + 19.0f), Brush(dc, sec));
+                const float bx = tw - 28.0f, by = th * 0.5f;
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bx, by), 14.0f, 14.0f), Brush(dc, pc));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx - 4.0f, by - 4.5f, bx - 1.2f, by + 4.5f), 1.0f, 1.0f), Brush(dc, 0xFFFFFFFFu));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bx + 1.2f, by - 4.5f, bx + 4.0f, by + 4.5f), 1.0f, 1.0f), Brush(dc, 0xFFFFFFFFu));
+            } else if (sz.cols == 2) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(12.0f, 11.0f, 86.0f, 30.0f), 9.0f, 9.0f), Brush(dc, pc, 0.22f));
+                dc->DrawText(L"番茄专注", 4, fmt_small_center_.Get(), D2D1::RectF(12.0f, 11.0f, 86.0f, 30.0f), Brush(dc, pc));
+                dc->DrawText(L"今日 3 个", 6, fmt_small_right_.Get(), D2D1::RectF(96.0f, 12.0f, tw - 12.0f, 29.0f), Brush(dc, sec));
+                draw_ring(tw * 0.5f, 98.0f, 44.0f, 0.72f, pc);
+                dc->DrawText(L"18:24", 5, fmt_gallery_big_.Get(), D2D1::RectF(tw * 0.5f - 54.0f, 70.0f, tw * 0.5f + 54.0f, 112.0f), Brush(dc, pri));
+                dc->DrawText(L"专注中", 3, fmt_small_center_.Get(), D2D1::RectF(tw * 0.5f - 40.0f, 108.0f, tw * 0.5f + 40.0f, 126.0f), Brush(dc, sec));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(14.0f, th - 36.0f, tw - 72.0f, th - 12.0f), 12.0f, 12.0f), Brush(dc, pc));
+                dc->DrawText(L"暂停专注", 4, fmt_small_center_.Get(), D2D1::RectF(14.0f, th - 36.0f, tw - 72.0f, th - 12.0f), Brush(dc, 0xFFFFFFFFu));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(tw - 64.0f, th - 36.0f, tw - 14.0f, th - 12.0f), 12.0f, 12.0f), Brush(dc, dark_mode_ ? 0x22FFFFFFu : 0x12000000u));
+                dc->DrawText(L"重置", 2, fmt_small_center_.Get(), D2D1::RectF(tw - 64.0f, th - 36.0f, tw - 14.0f, th - 12.0f), Brush(dc, pri));
+            } else {
+                draw_ring(98.0f, th * 0.5f, 54.0f, 0.72f, pc);
+                dc->DrawText(L"18:24", 5, fmt_gallery_big_.Get(), D2D1::RectF(42.0f, th * 0.5f - 28.0f, 154.0f, th * 0.5f + 14.0f), Brush(dc, pri));
+                dc->DrawText(L"专注中", 3, fmt_small_center_.Get(), D2D1::RectF(56.0f, th * 0.5f + 12.0f, 140.0f, th * 0.5f + 30.0f), Brush(dc, sec));
+                const float rx0 = 198.0f;
+                dc->DrawText(L"番茄专注 · 今日已完成 3 个", 14, fmt_body_semi_.Get(), D2D1::RectF(rx0, 22.0f, tw - 14.0f, 44.0f), Brush(dc, pri));
+                const wchar_t* chips[3] = {L"25 分钟", L"45 分钟", L"5 分休"};
+                const float cw = (tw - 14.0f - rx0 - 12.0f) / 3.0f;
+                for (int ci = 0; ci < 3; ++ci) {
+                    const D2D1_RECT_F cr = D2D1::RectF(rx0 + ci * (cw + 6.0f), 78.0f, rx0 + ci * (cw + 6.0f) + cw, 106.0f);
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(cr, 9.0f, 9.0f), Brush(dc, ci == 0 ? pc : (dark_mode_ ? 0x1EFFFFFFu : 0x10000000u), ci == 0 ? 0.24f : 1.0f));
+                    dc->DrawText(chips[ci], static_cast<UINT32>(std::wcslen(chips[ci])), fmt_small_center_.Get(), cr, Brush(dc, ci == 0 ? pc : pri));
+                }
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rx0, th - 42.0f, tw - 88.0f, th - 14.0f), 13.0f, 13.0f), Brush(dc, pc));
+                dc->DrawText(L"暂停专注", 4, fmt_small_center_.Get(), D2D1::RectF(rx0, th - 42.0f, tw - 88.0f, th - 14.0f), Brush(dc, 0xFFFFFFFFu));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(tw - 80.0f, th - 42.0f, tw - 14.0f, th - 14.0f), 13.0f, 13.0f), Brush(dc, dark_mode_ ? 0x20FFFFFFu : 0x10000000u));
+                dc->DrawText(L"重置", 2, fmt_small_center_.Get(), D2D1::RectF(tw - 80.0f, th - 42.0f, tw - 14.0f, th - 14.0f), Brush(dc, pri));
+            }
+            break;
+        }
+
+        case model::TileKind::MediaPlayer: {
+            const uint32_t mc = 0xFFFF4D8Du;
+            auto draw_vinyl = [&](float x, float y, float s) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + s, y + s), s * 0.2f, s * 0.2f), Brush(dc, 0xFF1F1830u));
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + s * 0.5f, y + s * 0.5f), s * 0.36f, s * 0.36f), Brush(dc, 0xFF100E18u));
+                dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(x + s * 0.5f, y + s * 0.5f), s * 0.28f, s * 0.28f), Brush(dc, 0x30FFFFFFu), 1.0f);
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + s * 0.5f, y + s * 0.5f), s * 0.14f, s * 0.14f), Brush(dc, mc));
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + s * 0.5f, y + s * 0.5f), s * 0.04f, s * 0.04f), Brush(dc, 0xFFFFFFFFu));
+            };
+            auto draw_ctrl_cluster = [&](float bcx, float by, float pr, float spread) {
+                const float sr = pr * 0.78f;
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bcx - spread, by), sr, sr), Brush(dc, dark_mode_ ? 0x1EFFFFFFu : 0x12000000u));
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bcx + spread, by), sr, sr), Brush(dc, dark_mode_ ? 0x1EFFFFFFu : 0x12000000u));
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(bcx, by), pr, pr), Brush(dc, mc));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bcx - 4.0f, by - 5.0f, bcx - 1.2f, by + 5.0f), 1.0f, 1.0f), Brush(dc, 0xFFFFFFFFu));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(bcx + 1.2f, by - 5.0f, bcx + 4.0f, by + 5.0f), 1.0f, 1.0f), Brush(dc, 0xFFFFFFFFu));
+                const wchar_t prev_g[2] = {L'\xE892', 0}, next_g[2] = {L'\xE893', 0};
+                DrawGlyph(dc, prev_g, 1, fmt_fluent_12_.Get(), D2D1::RectF(bcx - spread - sr, by - sr, bcx - spread + sr, by + sr), Brush(dc, pri));
+                DrawGlyph(dc, next_g, 1, fmt_fluent_12_.Get(), D2D1::RectF(bcx + spread - sr, by - sr, bcx + spread + sr, by + sr), Brush(dc, pri));
+            };
+            if (sz.rows == 1) {
+                const float art = sz.cols >= 4 ? 62.0f : 52.0f;
+                draw_vinyl(12.0f, (th - art) * 0.5f, art);
+                dc->DrawText(L"夜曲 · Nocturne", 13, fmt_body_semi_.Get(), D2D1::RectF(art + 22.0f, 16.0f, tw - (sz.cols >= 4 ? 130.0f : 12.0f), 36.0f), Brush(dc, pri));
+                dc->DrawText(L"周杰伦 · 十一月的萧邦", 11, fmt_small_.Get(), D2D1::RectF(art + 22.0f, 36.0f, tw - (sz.cols >= 4 ? 130.0f : 12.0f), 54.0f), Brush(dc, sec));
+                const float bcx = sz.cols >= 4 ? (tw - 68.0f) : ((art + 22.0f + tw - 10.0f) * 0.5f);
+                const float by = sz.cols >= 4 ? th * 0.5f : th - 20.0f;
+                draw_ctrl_cluster(bcx, by, sz.cols >= 4 ? 16.0f : 13.0f, sz.cols >= 4 ? 36.0f : 32.0f);
+            } else if (sz.cols == 2) {
+                draw_vinyl(14.0f, 14.0f, 70.0f);
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(94.0f, 18.0f, tw - 14.0f, 38.0f), 9.0f, 9.0f), Brush(dc, mc, 0.22f));
+                dc->DrawText(L"正在播放", 4, fmt_small_center_.Get(), D2D1::RectF(94.0f, 18.0f, tw - 14.0f, 38.0f), Brush(dc, mc));
+                dc->DrawText(L"夜曲 · Nocturne", 13, fmt_body_semi_.Get(), D2D1::RectF(14.0f, 98.0f, tw - 14.0f, 120.0f), Brush(dc, pri));
+                dc->DrawText(L"周杰伦 · 网易云音乐", 10, fmt_small_.Get(), D2D1::RectF(14.0f, 120.0f, tw - 14.0f, 138.0f), Brush(dc, sec));
+                draw_ctrl_cluster(tw * 0.5f, th - 28.0f, 17.0f, 44.0f);
+            } else {
+                draw_vinyl(18.0f, 26.0f, 152.0f);
+                const float rx = 188.0f;
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(rx, 24.0f, rx + 82.0f, 44.0f), 10.0f, 10.0f), Brush(dc, mc, 0.22f));
+                dc->DrawText(L"正在播放", 4, fmt_small_center_.Get(), D2D1::RectF(rx, 24.0f, rx + 82.0f, 44.0f), Brush(dc, mc));
+                dc->DrawText(L"夜曲 · Nocturne", 13, fmt_title_.Get(), D2D1::RectF(rx, 56.0f, tw - 16.0f, 82.0f), Brush(dc, pri));
+                dc->DrawText(L"周杰伦 · 十一月的萧邦", 11, fmt_body_.Get(), D2D1::RectF(rx, 84.0f, tw - 16.0f, 106.0f), Brush(dc, sec));
+                draw_ctrl_cluster((rx + tw - 16.0f) * 0.5f, th - 36.0f, 19.0f, 52.0f);
+            }
+            break;
+        }
+
+        case model::TileKind::Countdown: {
+            const uint32_t cc = 0xFF6B7BFFu;
+            if (sz.cols == 1) {
+                dc->DrawText(L"2027 元旦", 7, fmt_small_center_.Get(), D2D1::RectF(6.0f, 10.0f, 94.0f, 26.0f), Brush(dc, cc));
+                dc->DrawText(L"36", 2, fmt_gallery_big_.Get(), D2D1::RectF(6.0f, 24.0f, 94.0f, 68.0f), Brush(dc, pri));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(14.0f, 72.0f, 86.0f, 90.0f), 9.0f, 9.0f), Brush(dc, cc, 0.22f));
+                dc->DrawText(L"还有 36 天", 7, fmt_small_center_.Get(), D2D1::RectF(14.0f, 72.0f, 86.0f, 90.0f), Brush(dc, pri));
+            } else if (sz.rows == 1) {
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(12.0f, 16.0f, 74.0f, th - 16.0f), 12.0f, 12.0f), Brush(dc, cc, 0.22f));
+                dc->DrawText(L"36天", 3, fmt_body_semi_.Get(), D2D1::RectF(12.0f, 26.0f, 74.0f, th - 26.0f), Brush(dc, cc));
+                dc->DrawText(L"2027 元旦", 7, fmt_body_semi_.Get(), D2D1::RectF(84.0f, 20.0f, tw - 12.0f, 40.0f), Brush(dc, pri));
+                dc->DrawText(L"2027-01-01 · 今年 90%", 18, fmt_small_.Get(), D2D1::RectF(84.0f, 42.0f, tw - 12.0f, 60.0f), Brush(dc, sec));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(84.0f, 68.0f, tw - 16.0f, 74.0f), 3.0f, 3.0f), Brush(dc, dark_mode_ ? 0x1EFFFFFFu : 0x14000000u));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(84.0f, 68.0f, 84.0f + (tw - 100.0f) * 0.90f, 74.0f), 3.0f, 3.0f), Brush(dc, cc));
+            } else if (sz.cols == 2) {
+                dc->DrawText(L"2027 元旦", 7, fmt_body_semi_.Get(), D2D1::RectF(14.0f, 12.0f, 120.0f, 30.0f), Brush(dc, cc));
+                dc->DrawText(L"2027-01-01", 10, fmt_small_right_.Get(), D2D1::RectF(108.0f, 13.0f, tw - 14.0f, 29.0f), Brush(dc, sec));
+                dc->DrawText(L"36 天", 4, fmt_gallery_big_.Get(), D2D1::RectF(14.0f, 44.0f, tw - 14.0f, 102.0f), Brush(dc, pri));
+                dc->DrawText(L"今日 62%  ·  今年 90%", 15, fmt_small_.Get(), D2D1::RectF(14.0f, th - 48.0f, tw - 14.0f, th - 30.0f), Brush(dc, sec));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(14.0f, th - 22.0f, tw - 14.0f, th - 15.0f), 3.5f, 3.5f), Brush(dc, dark_mode_ ? 0x1EFFFFFFu : 0x14000000u));
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(14.0f, th - 22.0f, 14.0f + (tw - 28.0f) * 0.90f, th - 15.0f), 3.5f, 3.5f), Brush(dc, cc));
+            } else {
+                dc->DrawText(L"2027 元旦", 7, fmt_body_semi_.Get(), D2D1::RectF(16.0f, 16.0f, 180.0f, 36.0f), Brush(dc, cc));
+                dc->DrawText(L"36", 2, fmt_gallery_big_.Get(), D2D1::RectF(16.0f, 52.0f, 160.0f, 114.0f), Brush(dc, pri));
+                dc->DrawText(L"还有 36 天 · 2027-01-01", 19, fmt_small_.Get(), D2D1::RectF(16.0f, 128.0f, 184.0f, 148.0f), Brush(dc, sec));
+                struct TBar { const wchar_t* lbl; float pct; uint32_t col; const wchar_t* val; };
+                static constexpr TBar kT[4] = {
+                    {L"今日", 0.62f, 0xFF33B8FFu, L"62%"}, {L"本周", 0.43f, 0xFF38DB70u, L"43%"},
+                    {L"本月", 0.84f, 0xFFFFA629u, L"84%"}, {L"今年", 0.90f, 0xFF9F7BFFu, L"90%"},
+                };
+                for (int bi = 0; bi < 4; ++bi) {
+                    const float by = 34.0f + bi * 40.0f;
+                    dc->DrawText(kT[bi].lbl, 2, fmt_small_.Get(), D2D1::RectF(204.0f, by, 238.0f, by + 20.0f), Brush(dc, sec));
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(242.0f, by + 7.0f, tw - 54.0f, by + 13.0f), 3.0f, 3.0f), Brush(dc, dark_mode_ ? 0x1EFFFFFFu : 0x14000000u));
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(242.0f, by + 7.0f, 242.0f + (tw - 296.0f) * kT[bi].pct, by + 13.0f), 3.0f, 3.0f), Brush(dc, kT[bi].col));
+                    dc->DrawText(kT[bi].val, 3, fmt_small_right_.Get(), D2D1::RectF(tw - 50.0f, by, tw - 14.0f, by + 20.0f), Brush(dc, pri));
+                }
+            }
+            break;
+        }
+
+        case model::TileKind::Battery: {
+            const uint32_t bc = 0xFF30D158u;
+            if (sz.cols == 1) {
+                draw_ring(50.0f, 38.0f, 22.0f, 0.86f, bc);
+                dc->DrawText(L"86%", 3, fmt_small_center_.Get(), D2D1::RectF(26.0f, 28.0f, 74.0f, 48.0f), Brush(dc, pri));
+                dc->DrawText(L"充电中", 3, fmt_small_center_.Get(), D2D1::RectF(4.0f, 70.0f, 96.0f, 90.0f), Brush(dc, bc));
+            } else if (sz.rows == 1) {
+                draw_ring(36.0f, th * 0.5f, 20.0f, 0.86f, bc);
+                dc->DrawText(L"86%", 3, fmt_small_center_.Get(), D2D1::RectF(14.0f, th * 0.5f - 9.0f, 58.0f, th * 0.5f + 9.0f), Brush(dc, pri));
+                dc->DrawText(L"本机电源 · 充电中", 9, fmt_body_semi_.Get(), D2D1::RectF(66.0f, th * 0.5f - 20.0f, tw - 12.0f, th * 0.5f), Brush(dc, pri));
+                dc->DrawText(L"平衡模式 · 已运行 4h 22m", 14, fmt_small_.Get(), D2D1::RectF(66.0f, th * 0.5f + 1.0f, tw - 12.0f, th * 0.5f + 19.0f), Brush(dc, sec));
+            } else if (sz.cols == 2) {
+                struct Dev { const wchar_t* n; float r; uint32_t c; const wchar_t* p; };
+                static constexpr Dev kD[4] = {
+                    {L"本机", 0.86f, 0xFF30D158u, L"86"}, {L"耳机", 0.72f, 0xFF33B8FFu, L"72"},
+                    {L"鼠标", 0.54f, 0xFFFFA629u, L"54"}, {L"键盘", 0.91f, 0xFF30D158u, L"91"},
+                };
+                for (int di = 0; di < 4; ++di) {
+                    const float cx = (di % 2 == 0) ? 56.0f : (tw - 56.0f);
+                    const float cy = (di / 2 == 0) ? 54.0f : (th - 58.0f);
+                    draw_ring(cx, cy, 24.0f, kD[di].r, kD[di].c);
+                    dc->DrawText(kD[di].p, 2, fmt_small_center_.Get(), D2D1::RectF(cx - 20.0f, cy - 9.0f, cx + 20.0f, cy + 9.0f), Brush(dc, pri));
+                    dc->DrawText(kD[di].n, 2, fmt_small_center_.Get(), D2D1::RectF(cx - 34.0f, cy + 28.0f, cx + 34.0f, cy + 44.0f), Brush(dc, sec));
+                }
+            } else {
+                draw_ring(88.0f, th * 0.5f - 10.0f, 38.0f, 0.86f, bc);
+                dc->DrawText(L"86%", 3, fmt_body_semi_.Get(), D2D1::RectF(48.0f, th * 0.5f - 22.0f, 128.0f, th * 0.5f + 2.0f), Brush(dc, pri));
+                dc->DrawText(L"本机 · 平衡模式", 8, fmt_small_center_.Get(), D2D1::RectF(16.0f, th - 48.0f, 160.0f, th - 26.0f), Brush(dc, sec));
+                struct Row { const wchar_t* n; float r; uint32_t c; const wchar_t* p; };
+                static constexpr Row kR[3] = {
+                    {L"AirPods Pro", 0.72f, 0xFF33B8FFu, L"72%"},
+                    {L"MX Master",   0.54f, 0xFFFFA629u, L"54%"},
+                    {L"机械键盘",     0.91f, 0xFF30D158u, L"91%"},
+                };
+                for (int ri = 0; ri < 3; ++ri) {
+                    const float ry = 42.0f + ri * 46.0f;
+                    dc->DrawText(kR[ri].n, static_cast<UINT32>(std::wcslen(kR[ri].n)), fmt_small_.Get(), D2D1::RectF(192.0f, ry, 280.0f, ry + 18.0f), Brush(dc, pri));
+                    dc->DrawText(kR[ri].p, 3, fmt_small_right_.Get(), D2D1::RectF(tw - 52.0f, ry, tw - 16.0f, ry + 18.0f), Brush(dc, sec));
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(192.0f, ry + 22.0f, tw - 16.0f, ry + 28.0f), 3.0f, 3.0f), Brush(dc, dark_mode_ ? 0x1EFFFFFFu : 0x14000000u));
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(192.0f, ry + 22.0f, 192.0f + (tw - 208.0f) * kR[ri].r, ry + 28.0f), 3.0f, 3.0f), Brush(dc, kR[ri].c));
+                }
+            }
+            break;
+        }
+
         case model::TileKind::DiskRing:
         default: {
             draw_ring(50.0f, 38.0f, 22.0f, 0.82f, hue);
@@ -3980,6 +5315,7 @@ void DesktopOverlayController::DrawWidgetGalleryDrawer(ID2D1DeviceContext* dc, f
         }
 
         StrokeCrispRoundedRect(dc, tr, 16.0f, Brush(dc, dark_mode_ ? 0x2AFFFFFFu : 0x1A000000u), 1.0f);
+        }  // !drew_real
         dc->SetTransform(saved_tf);
     }
     dc->PopAxisAlignedClip();
@@ -4910,6 +6246,11 @@ void DesktopOverlayController::HandleMouseMove(int card_x, int card_y) {
         return;
     }
 
+    if (active_kind_ == OverlayKind::DockSystemPanel && dock_vol_dragging_) {
+        ApplyDockVolumeTrackAtX(card_x, true);
+        return;
+    }
+
     if (active_kind_ == OverlayKind::BeautifyDrawer && !dragging_beautify_slider_.empty()) {
         if (ApplyBeautifySliderAtX(dragging_beautify_slider_, card_x)) {
             NotifyBeautifyChanged(true);
@@ -4918,7 +6259,8 @@ void DesktopOverlayController::HandleMouseMove(int card_x, int card_y) {
         return;
     }
 
-    if (active_kind_ == OverlayKind::AiOrganizeDrawer || active_kind_ == OverlayKind::BeautifyDrawer) {
+    if (active_kind_ == OverlayKind::AiOrganizeDrawer || active_kind_ == OverlayKind::BeautifyDrawer ||
+        active_kind_ == OverlayKind::DockSystemPanel) {
         std::string hit_act;
         if (active_kind_ == OverlayKind::BeautifyDrawer) {
             for (const auto& sl : beautify_sliders_) {
@@ -5042,6 +6384,15 @@ void DesktopOverlayController::HandleLeftClick(int card_x, int card_y) {
         }
     }
 
+    if (active_kind_ == OverlayKind::DockSystemPanel &&
+        dock_panel_kind_ == DockPanelKind::Volume &&
+        PtInRectXY(dock_vol_track_, card_x, card_y)) {
+        dock_vol_dragging_ = true;
+        if (hwnd_) SetCapture(hwnd_);
+        ApplyDockVolumeTrackAtX(card_x, true);
+        return;
+    }
+
     if (active_kind_ == OverlayKind::BeautifyDrawer) {
         for (const auto& sl : beautify_sliders_) {
             if (PtInRectXY(sl.bounds, card_x, card_y)) {
@@ -5058,6 +6409,8 @@ void DesktopOverlayController::HandleLeftClick(int card_x, int card_y) {
     for (const auto& reg : click_regions_) {
         if (!PtInRectXY(reg.bounds, card_x, card_y)) continue;
         const std::string act = reg.action_id;
+
+        if (HandleDockPanelAction(act)) return;
 
         if (act == "focus-popup-edit") {
             if (popup_edit_hwnd_ && IsWindow(popup_edit_hwnd_)) {
@@ -5303,16 +6656,70 @@ void DesktopOverlayController::HandleLeftClick(int card_x, int card_y) {
             return;
         }
         if (HandleWidgetDetailAction(act)) return;
+        if (act.starts_with("b-tab:")) {
+            const int idx = std::clamp(std::stoi(act.substr(6)), 0, 3);
+            SetBeautifyTab(static_cast<BeautifyTab>(idx), true);
+            return;
+        }
+        if (act == "b-vid-pause") {
+            if (callbacks_.on_toggle_video_pause) callbacks_.on_toggle_video_pause();
+            return;
+        }
+        if (act == "b-vid-pick") {
+            if (callbacks_.on_pick_video_wallpaper) callbacks_.on_pick_video_wallpaper();
+            return;
+        }
+        if (act.starts_with("b-vid-recent:")) {
+            const size_t idx = static_cast<size_t>(std::max(0, std::stoi(act.substr(13))));
+            if (idx < beautify_video_.recent.size() && callbacks_.on_set_video_wallpaper) {
+                callbacks_.on_set_video_wallpaper(beautify_video_.recent[idx].path);
+            }
+            return;
+        }
+        if (act.starts_with("b-vfill:")) {
+            const auto fm = (std::stoi(act.substr(8)) == 1) ? video::VideoFillMode::Fit : video::VideoFillMode::Fill;
+            beautify_video_.fill_mode = fm;
+            if (callbacks_.on_set_video_fill_mode) callbacks_.on_set_video_fill_mode(fm);
+            Render();
+            return;
+        }
+        if (act == "b-vid-cancel") {
+            if (callbacks_.on_cancel_video_optimize) callbacks_.on_cancel_video_optimize();
+            return;
+        }
+        if (act == "b-vid-confirm-heavy") {
+            if (callbacks_.on_confirm_heavy_video_optimize) callbacks_.on_confirm_heavy_video_optimize();
+            return;
+        }
+        if (act == "b-vid-store") {
+            if (!beautify_video_.store_uri.empty() && callbacks_.on_open_codec_store) {
+                callbacks_.on_open_codec_store(beautify_video_.store_uri);
+            }
+            return;
+        }
+        if (act == "b-vid-takeover") {
+            if (callbacks_.on_enable_icon_takeover) callbacks_.on_enable_icon_takeover();
+            return;
+        }
         if (act.starts_with("b-wall:")) {
             const auto chosen = static_cast<model::WallpaperPreset>(std::stoi(act.substr(7)));
+            const bool was_video = !beautify_video_.active_source_path.empty() &&
+                                   beautify_video_.phase != video::VideoWallpaperPhase::Inactive;
             beautify_settings_.wallpaper_preset =
-                (chosen != model::WallpaperPreset::System && beautify_settings_.wallpaper_preset == chosen)
+                (!was_video && chosen != model::WallpaperPreset::System && beautify_settings_.wallpaper_preset == chosen)
                     ? model::WallpaperPreset::System
                     : chosen;
+            beautify_video_.active_source_path.clear();
+            beautify_video_.tried_display_name.clear();
+            beautify_video_.tried_source_path.clear();
+            beautify_video_.phase = video::VideoWallpaperPhase::Inactive;
             if (beautify_settings_.auto_wallpaper_accent) {
                 beautify_settings_.accent_argb =
                     render::WallpaperBackdrop::PresetAccentArgb(beautify_settings_.wallpaper_preset, dark_mode_);
                 accent_argb_ = beautify_settings_.accent_argb;
+            }
+            if (was_video && callbacks_.on_set_video_wallpaper) {
+                callbacks_.on_set_video_wallpaper(L""); // empty path = switch back to picture wallpaper
             }
             NotifyBeautifyChanged(false);
             Render();
@@ -5436,6 +6843,36 @@ void DesktopOverlayController::HandleLeftClick(int card_x, int card_y) {
         }
         if (act.starts_with("b-sz:")) {
             beautify_settings_.icon_size = static_cast<model::DesktopIconSize>(std::stoi(act.substr(5)));
+            NotifyBeautifyChanged(false);
+            Render();
+            return;
+        }
+        if (act == "b-dock-en") {
+            beautify_settings_.dock_enabled = !beautify_settings_.dock_enabled;
+            NotifyBeautifyChanged(false);
+            Render();
+            return;
+        }
+        if (act.starts_with("b-dpos:")) {
+            beautify_settings_.dock_position = static_cast<uint8_t>(std::clamp(std::stoi(act.substr(7)), 0, 2));
+            NotifyBeautifyChanged(false);
+            Render();
+            return;
+        }
+        if (act.starts_with("b-dhide:")) {
+            beautify_settings_.dock_hide_mode = static_cast<uint8_t>(std::clamp(std::stoi(act.substr(8)), 0, 2));
+            NotifyBeautifyChanged(false);
+            Render();
+            return;
+        }
+        if (act.starts_with("b-dmin:")) {
+            beautify_settings_.dock_minimize_effect = static_cast<uint8_t>(std::clamp(std::stoi(act.substr(7)), 0, 2));
+            NotifyBeautifyChanged(false);
+            Render();
+            return;
+        }
+        if (act == "b-dsys") {
+            beautify_settings_.dock_system_area = !beautify_settings_.dock_system_area;
             NotifyBeautifyChanged(false);
             Render();
             return;
@@ -5729,6 +7166,9 @@ LRESULT DesktopOverlayController::HandleWndProc(UINT msg, WPARAM wparam, LPARAM 
         }
         break;
     case WM_NCHITTEST: {
+        if (active_kind_ == OverlayKind::DockVolumeOsd) {
+            return HTTRANSPARENT;
+        }
         if (using_dcomp_ && hwnd_) {
             POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
             ScreenToClient(hwnd_, &pt);
@@ -5756,6 +7196,15 @@ LRESULT DesktopOverlayController::HandleWndProc(UINT msg, WPARAM wparam, LPARAM 
         HandleLeftClick(ToDip(GET_X_LPARAM(lparam)) - pad, ToDip(GET_Y_LPARAM(lparam)) - pad);
         return 0;
     case WM_LBUTTONUP:
+        if (dock_vol_dragging_) {
+            dock_vol_dragging_ = false;
+            if (hwnd_ && GetCapture() == hwnd_) ReleaseCapture();
+            if (callbacks_.on_dock_volume_changed) {
+                callbacks_.on_dock_volume_changed(dock_panel_snap_.volume_pct, false);
+            }
+            Render();
+            return 0;
+        }
         if (!dragging_beautify_slider_.empty()) {
             dragging_beautify_slider_.clear();
             if (hwnd_ && GetCapture() == hwnd_) ReleaseCapture();
@@ -5764,6 +7213,13 @@ LRESULT DesktopOverlayController::HandleWndProc(UINT msg, WPARAM wparam, LPARAM 
         }
         return 0;
     case WM_CAPTURECHANGED:
+        if (dock_vol_dragging_ && reinterpret_cast<HWND>(lparam) != hwnd_) {
+            dock_vol_dragging_ = false;
+            if (callbacks_.on_dock_volume_changed) {
+                callbacks_.on_dock_volume_changed(dock_panel_snap_.volume_pct, false);
+            }
+            Render();
+        }
         if (!dragging_beautify_slider_.empty() && reinterpret_cast<HWND>(lparam) != hwnd_) {
             dragging_beautify_slider_.clear();
             NotifyBeautifyChanged(false);
@@ -5771,6 +7227,20 @@ LRESULT DesktopOverlayController::HandleWndProc(UINT msg, WPARAM wparam, LPARAM 
         }
         return 0;
     case WM_MOUSEWHEEL:
+        if (active_kind_ == OverlayKind::DockSystemPanel && dock_panel_kind_ == DockPanelKind::Clock) {
+            dock_panel_month_offset_ += GET_WHEEL_DELTA_WPARAM(wparam) < 0 ? 1 : -1;
+            Render();
+            return 0;
+        }
+        if (active_kind_ == OverlayKind::DockSystemPanel && dock_panel_kind_ == DockPanelKind::Volume) {
+            const int step = (GET_WHEEL_DELTA_WPARAM(wparam) > 0) ? 2 : -2;
+            const int next = std::clamp(dock_panel_snap_.volume_pct + step, 0, 100);
+            dock_panel_snap_.volume_pct = next;
+            dock_panel_snap_.muted = (next == 0);
+            if (callbacks_.on_dock_volume_changed) callbacks_.on_dock_volume_changed(next, false);
+            Render();
+            return 0;
+        }
         if (active_kind_ == OverlayKind::WidgetDetail && detail_.kind == model::TileKind::Calendar) {
             // The wheel turns months, as a swipe does on a phone's calendar.
             detail_month_offset_ += GET_WHEEL_DELTA_WPARAM(wparam) < 0 ? 1 : -1;
@@ -5835,10 +7305,12 @@ LRESULT DesktopOverlayController::HandleWndProc(UINT msg, WPARAM wparam, LPARAM 
         return 0;
     case WM_ACTIVATE:
         if (!shared_menu_tracking_ && !popup_edit_ignore_killfocus_ &&
+            !beautify_suppress_deactivate_ && !beautify_drop_hover_ &&
             LOWORD(wparam) == WA_INACTIVE &&
             reinterpret_cast<HWND>(lparam) != sub_hwnd_ &&
             (popup_edit_hwnd_ == nullptr || reinterpret_cast<HWND>(lparam) != popup_edit_hwnd_) &&
             active_kind_ != OverlayKind::ToastCapsule &&
+            active_kind_ != OverlayKind::DockVolumeOsd &&
             active_kind_ != OverlayKind::None) {
             if (active_kind_ == OverlayKind::InlineRename) {
                 CancelInlineRename(true);
@@ -5858,7 +7330,7 @@ LRESULT DesktopOverlayController::HandleWndProc(UINT msg, WPARAM wparam, LPARAM 
         }
         return 0;
     case WM_TIMER:
-        if (wparam == kToastTimerId) {
+        if (wparam == kToastTimerId || (wparam == 8804 && active_kind_ == OverlayKind::DockVolumeOsd)) {
             Dismiss();
             return 0;
         }

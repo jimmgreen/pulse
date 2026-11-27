@@ -1,8 +1,10 @@
 // live_wallpaper_detector.cpp - Win32 candidate enumeration & out-of-context WinEvent hook.
 #include "host/live_wallpaper_watcher.h"
 
+#include <cwchar>
 #include <dwmapi.h>
 #include <mutex>
+#include <unordered_set>
 #include <vector>
 
 namespace pulse::desktop::host {
@@ -13,11 +15,37 @@ uintptr_t ToId(HWND hwnd) noexcept {
 }
 
 bool IsWindowCloaked(HWND hwnd) noexcept {
-    BOOL cloaked = FALSE;
+    DWORD cloaked = 0;
     if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked)))) {
         return false;
     }
-    return cloaked != FALSE;
+    return cloaked != 0;
+}
+
+bool IsDesktopClassName(const wchar_t* cls) noexcept {
+    return cls && (wcscmp(cls, L"Progman") == 0 || wcscmp(cls, L"WorkerW") == 0);
+}
+
+bool IsShellChromeClassName(const wchar_t* cls) noexcept {
+    return cls && (wcscmp(cls, L"Shell_TrayWnd") == 0 || wcscmp(cls, L"Shell_SecondaryTrayWnd") == 0);
+}
+
+bool IsOverlayPassthroughWindow(HWND hwnd) noexcept {
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    return ((ex & WS_EX_TRANSPARENT) != 0) ||
+           (((ex & WS_EX_LAYERED) != 0) && ((ex & WS_EX_NOACTIVATE) != 0));
+}
+
+bool IsEligibleDesktopHost(HWND hwnd, int64_t min_area) noexcept {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    // WGC CreateForWindow only succeeds on top-level windows (never WS_CHILD).
+    if (GetAncestor(hwnd, GA_ROOT) != hwnd) return false;
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd) || IsWindowCloaked(hwnd)) return false;
+    RECT rc{};
+    if (!GetWindowRect(hwnd, &rc)) return false;
+    const int64_t w = static_cast<int64_t>(rc.right) - static_cast<int64_t>(rc.left);
+    const int64_t h = static_cast<int64_t>(rc.bottom) - static_cast<int64_t>(rc.top);
+    return w > 0 && h > 0 && (w * h) >= min_area;
 }
 
 LiveWallpaperCandidate BuildCandidate(HWND hwnd, uintptr_t desktop_ancestor, bool below_icons) noexcept {
@@ -47,14 +75,34 @@ LiveWallpaperCandidate BuildCandidate(HWND hwnd, uintptr_t desktop_ancestor, boo
 
 struct EnumDescendantCtx {
     uintptr_t ancestor_id = 0;
+    bool below_icons = false;
     std::vector<LiveWallpaperCandidate>* out = nullptr;
+    std::unordered_set<uintptr_t>* seen = nullptr;
 };
 
 BOOL CALLBACK EnumChildProc(HWND child, LPARAM lparam) noexcept {
     auto* ctx = reinterpret_cast<EnumDescendantCtx*>(lparam);
-    if (!ctx || !ctx->out) return FALSE;
-    if (ctx->out->size() >= 128) return FALSE;
-    ctx->out->push_back(BuildCandidate(child, ctx->ancestor_id, false));
+    if (!ctx || !ctx->out || !ctx->seen) return FALSE;
+    if (ctx->out->size() >= 192) return FALSE;
+    const uintptr_t id = ToId(child);
+    if (!ctx->seen->insert(id).second) return TRUE;
+    ctx->out->push_back(BuildCandidate(child, ctx->ancestor_id, ctx->below_icons));
+    return TRUE;
+}
+
+struct EnumWorkerWsCtx {
+    HWND defview_parent = nullptr;
+    std::vector<HWND>* workerws = nullptr;
+};
+
+BOOL CALLBACK EnumAllWorkerWsProc(HWND top, LPARAM lparam) noexcept {
+    auto* ctx = reinterpret_cast<EnumWorkerWsCtx*>(lparam);
+    if (!ctx || !ctx->workerws) return FALSE;
+    if (top == ctx->defview_parent) return TRUE;
+    wchar_t cls[64]{};
+    if (GetClassNameW(top, cls, ARRAYSIZE(cls)) > 0 && wcscmp(cls, L"WorkerW") == 0) {
+        ctx->workerws->push_back(top);
+    }
     return TRUE;
 }
 
@@ -66,7 +114,9 @@ std::vector<LiveWallpaperWatcher*> g_active_watchers;
 LiveWallpaperDecision ProbeLiveWallpaperFromSystem(
     const mount::DesktopHierarchyInfo& hierarchy,
     int32_t primary_work_w,
-    int32_t primary_work_h) noexcept {
+    int32_t primary_work_h,
+    HWND self_surface_hwnd,
+    bool allow_desktop_host_capture) noexcept {
     LiveWallpaperHierarchy h{};
     h.mode = static_cast<uint8_t>(hierarchy.mode);
     h.progman = ToId(hierarchy.progman);
@@ -79,30 +129,102 @@ LiveWallpaperDecision ProbeLiveWallpaperFromSystem(
     h.primary_work_h = primary_work_h > 0 ? primary_work_h : std::max(1, GetSystemMetrics(SM_CYSCREEN));
 
     std::vector<LiveWallpaperCandidate> candidates;
-    candidates.reserve(32);
+    candidates.reserve(64);
+    std::unordered_set<uintptr_t> seen;
+    seen.reserve(96);
 
     if (hierarchy.workerw_wallpaper && IsWindow(hierarchy.workerw_wallpaper)) {
-        EnumDescendantCtx ctx{ToId(hierarchy.workerw_wallpaper), &candidates};
+        EnumDescendantCtx ctx{ToId(hierarchy.workerw_wallpaper), false, &candidates, &seen};
         EnumChildWindows(hierarchy.workerw_wallpaper, &EnumChildProc, reinterpret_cast<LPARAM>(&ctx));
     }
     if (hierarchy.progman && IsWindow(hierarchy.progman) &&
         hierarchy.progman != hierarchy.workerw_wallpaper) {
-        EnumDescendantCtx ctx{ToId(hierarchy.progman), &candidates};
+        EnumDescendantCtx ctx{ToId(hierarchy.progman), false, &candidates, &seen};
         EnumChildWindows(hierarchy.progman, &EnumChildProc, reinterpret_cast<LPARAM>(&ctx));
     }
 
-    // Also inspect top-level windows Z-ordered beneath Explorer's desktop icon host
-    // (covers engines that position a borderless top-level window behind SHELLDLL_DefView's parent).
-    const HWND icon_host = hierarchy.defview_parent ? hierarchy.defview_parent : hierarchy.progman;
-    if (icon_host && IsWindow(icon_host)) {
-        size_t scanned = 0;
-        for (HWND w = GetWindow(icon_host, GW_HWNDNEXT); w && scanned < 48; w = GetWindow(w, GW_HWNDNEXT), ++scanned) {
-            if (w == hierarchy.progman || w == hierarchy.workerw_wallpaper) continue;
-            candidates.push_back(BuildCandidate(w, 0, true));
-        }
+    // Scan ALL other top-level WorkerW windows too: multi-WorkerW engines (Wallpaper Engine, Lively,
+    // 元气壁纸, 飞火, etc.) frequently parent their video renderer inside a sibling WorkerW.
+    std::vector<HWND> extra_workerws;
+    {
+        EnumWorkerWsCtx wctx{hierarchy.defview_parent, &extra_workerws};
+        EnumWindows(&EnumAllWorkerWsProc, reinterpret_cast<LPARAM>(&wctx));
+    }
+    for (HWND ww : extra_workerws) {
+        if (!ww || ww == hierarchy.workerw_wallpaper || ww == hierarchy.progman || !IsWindow(ww)) continue;
+        EnumDescendantCtx ctx{0, true, &candidates, &seen};
+        EnumChildWindows(ww, &EnumChildProc, reinterpret_cast<LPARAM>(&ctx));
     }
 
-    return EvaluateLiveWallpaper(h, candidates);
+    // Inspect top-level windows Z-ordered strictly beneath our desktop surface and beneath Explorer's
+    // desktop icon host (covers engines and video windows positioned behind SHELLDLL_DefView's parent).
+    auto scan_below = [&](HWND start_hwnd) {
+        if (!start_hwnd || !IsWindow(start_hwnd)) return;
+        size_t scanned = 0;
+        for (HWND w = GetWindow(start_hwnd, GW_HWNDNEXT); w && scanned < 64; w = GetWindow(w, GW_HWNDNEXT), ++scanned) {
+            if (w == self_surface_hwnd || w == hierarchy.progman || w == hierarchy.workerw_wallpaper ||
+                w == hierarchy.defview_parent) {
+                continue;
+            }
+            wchar_t cls[64]{};
+            if (GetClassNameW(w, cls, ARRAYSIZE(cls)) > 0 &&
+                (IsDesktopClassName(cls) || IsShellChromeClassName(cls))) {
+                continue;
+            }
+            if (IsOverlayPassthroughWindow(w)) continue;
+            const uintptr_t id = ToId(w);
+            if (!seen.insert(id).second) continue;
+            candidates.push_back(BuildCandidate(w, 0, true));
+        }
+    };
+    const HWND icon_host = hierarchy.defview_parent ? hierarchy.defview_parent : hierarchy.progman;
+    if (self_surface_hwnd && self_surface_hwnd != icon_host) {
+        scan_below(self_surface_hwnd);
+    }
+    scan_below(icon_host);
+
+    LiveWallpaperDecision decision = EvaluateLiveWallpaper(h, candidates);
+    if (decision.active || !allow_desktop_host_capture) {
+        return decision;
+    }
+
+    // Reference-aligned live desktop capture: when no separate third-party video child was matched,
+    // capture Explorer's top-level desktop host (WorkerW / Progman) directly via borderless WGC so
+    // live wallpaper transitions, Slideshow, Spotlight, and DirectComposition wallpapers update in real time.
+    const int64_t min_area =
+        (static_cast<int64_t>(h.primary_work_w) * static_cast<int64_t>(h.primary_work_h) * 40) / 100;
+    HWND desk = nullptr;
+    if (IsEligibleDesktopHost(hierarchy.workerw_wallpaper, min_area)) {
+        desk = hierarchy.workerw_wallpaper;
+    }
+    if (!desk && icon_host && IsWindow(icon_host)) {
+        for (HWND w = GetWindow(icon_host, GW_HWNDNEXT); w; w = GetWindow(w, GW_HWNDNEXT)) {
+            if (w == hierarchy.defview_parent) continue;
+            wchar_t cls[64]{};
+            if (GetClassNameW(w, cls, ARRAYSIZE(cls)) > 0 && wcscmp(cls, L"WorkerW") == 0 &&
+                IsEligibleDesktopHost(w, min_area)) {
+                desk = w;
+                break;
+            }
+        }
+    }
+    if (!desk && IsEligibleDesktopHost(hierarchy.progman, min_area)) {
+        desk = hierarchy.progman;
+    }
+    if (!desk && IsEligibleDesktopHost(hierarchy.defview_parent, min_area)) {
+        desk = hierarchy.defview_parent;
+    }
+
+    if (desk) {
+        DWORD desk_pid = h.explorer_pid;
+        if (desk_pid == 0) GetWindowThreadProcessId(desk, &desk_pid);
+        decision.active = true;
+        decision.wallpaper_hwnd = ToId(desk);
+        decision.capture_target_hwnd = ToId(desk);
+        decision.wallpaper_pid = static_cast<uint32_t>(desk_pid);
+        decision.is_desktop_host = true;
+    }
+    return decision;
 }
 
 bool LiveWallpaperWatcher::Start(HWND notify_hwnd, UINT notify_msg) noexcept {
@@ -148,9 +270,12 @@ void LiveWallpaperWatcher::Stop() noexcept {
 
 bool LiveWallpaperWatcher::Refresh(const mount::DesktopHierarchyInfo& hierarchy,
                                    int32_t primary_work_w,
-                                   int32_t primary_work_h) noexcept {
+                                   int32_t primary_work_h,
+                                   HWND self_surface_hwnd,
+                                   bool allow_desktop_host_capture) noexcept {
     notify_pending_.store(false, std::memory_order_release);
-    const LiveWallpaperDecision next = ProbeLiveWallpaperFromSystem(hierarchy, primary_work_w, primary_work_h);
+    const LiveWallpaperDecision next = ProbeLiveWallpaperFromSystem(
+        hierarchy, primary_work_w, primary_work_h, self_surface_hwnd, allow_desktop_host_capture);
     if (next == decision_) return false;
     decision_ = next;
     return true;

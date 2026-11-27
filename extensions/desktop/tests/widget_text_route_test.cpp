@@ -36,6 +36,7 @@ struct DesktopWidgetTextTestPeer {
     static bool Prepare(DesktopOverlayController& o,model::TileKind kind,const render::LiveTileRuntimeData& live,bool dark){
         o.active_kind_=OverlayKind::WidgetDetail;o.card_w_=368;o.card_h_=540;o.dark_mode_=dark;
         o.detail_={};o.detail_.kind=kind;o.detail_.weather=live.weather;o.detail_.system=live.system;o.detail_.drives=live.drives;
+        o.detail_.battery=live.battery;o.detail_.countdown_title=L"2027 元旦";o.detail_.countdown_date=L"2027-01-01";
         return o.EnsureRenderDevices();
     }
     static bool OwnTarget(DesktopOverlayController& o){
@@ -66,6 +67,7 @@ int wmain(int argc,wchar_t** argv){
         live.recycle_bin={12,23456789};live.weather.valid=true;live.weather.city=L"上海";live.weather.temp_c=23;live.weather.hi_c=26;live.weather.lo_c=18;
         live.weather.humidity_pct=65;live.weather.wind_kmh=12;live.weather.updated=L"12:34";live.weather.hours={{L"13:00",1,23},{L"14:00",2,24}};
         live.system.valid=true;live.system.cpu_pct=37;live.system.mem_used=8ull<<30;live.system.mem_total=16ull<<30;live.system.disk_used_pct=75;live.system.net_down_bps=987654;
+        live.battery.valid=true;live.battery.has_battery=true;live.battery.battery_pct=84;live.battery.charging=true;live.battery.ac_online=true;live.battery.power_plan=L"平衡";live.battery.uptime_sec=7200;
         for(int kind=0;kind<=static_cast<int>(model::kLastTileKind);++kind){
             model::DesktopModelState state;state.settings.default_material=model::CardMaterial::Solid;state.todos={{L"核对中文事项 123",false}};
             model::DesktopItem item;item.name=L"应用 123.lnk";item.path=L"C:\\fixture\\app.lnk";item.in_apps_tile=true;state.items.push_back(item);
@@ -92,7 +94,7 @@ int wmain(int argc,wchar_t** argv){
         check(renderer.WidgetTextCacheStats().fallback_draws==0,"widget/text matrix has no uncounted or permanent D2D fallback");
         render::DesktopRendererTestAccess::Bound(renderer);
         check(render::DesktopRendererTestAccess::Size(renderer)<=render::DesktopTextRenderer::kMaxLayouts&&renderer.WidgetTextCacheStats().evictions>0,"dynamic clock/layout cache is bounded and evicts old entries");
-        for(auto kind:{model::TileKind::Weather,model::TileKind::Calendar,model::TileKind::System,model::TileKind::Clock,model::TileKind::DiskRing})for(bool dark:{false,true}){
+        for(auto kind:{model::TileKind::Weather,model::TileKind::Calendar,model::TileKind::System,model::TileKind::Clock,model::TileKind::DiskRing,model::TileKind::Countdown,model::TileKind::Battery})for(bool dark:{false,true}){
             overlays::DesktopOverlayController overlay;
             check(overlays::DesktopWidgetTextTestPeer::Prepare(overlay,kind,live,dark),"actual widget detail owns initialized render devices");
             check(overlays::DesktopWidgetTextTestPeer::OwnTarget(overlay),"widget detail actual own D2D context invokes LumaText without fallback");

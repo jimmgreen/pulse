@@ -41,8 +41,69 @@ inline float LinearChannel(float encoded) noexcept {
 inline float RelativeLuminance(Srgb color) noexcept {
     return 0.2126f * LinearChannel(color.r) + 0.7152f * LinearChannel(color.g) + 0.0722f * LinearChannel(color.b);
 }
+// Rec.709 perceptual sRGB luma matching macOS 26 Tahoe / WacOS glassLumaHysteresisRange (0.40 / 0.60).
+inline float PerceivedLuma(Srgb color) noexcept {
+    return 0.2126f * Unit(color.r) + 0.7152f * Unit(color.g) + 0.0722f * Unit(color.b);
+}
+inline float MeanPerceivedLuma(const Samples& samples) noexcept {
+    const size_t count = std::min(samples.count, kMaxSamples);
+    if (!count) return -1.0f;
+    double sum = 0.0;
+    for (size_t i = 0; i < count; ++i) sum += PerceivedLuma(samples.colors[i]);
+    return static_cast<float>(sum / static_cast<double>(count));
+}
+// Hysteresis band [dark_threshold, light_threshold] keeps translucent glass ink stable across
+// medium-brightness and dynamic video wallpapers instead of jittering per card or per frame.
+inline bool ResolveHysteresisLightInk(float perceived_luma, bool has_previous, bool previous_light_ink,
+                                      bool theme_dark, float dark_threshold = 0.40f,
+                                      float light_threshold = 0.60f) noexcept {
+    if (!std::isfinite(perceived_luma) || perceived_luma < 0.0f) {
+        return has_previous ? previous_light_ink : theme_dark;
+    }
+    if (perceived_luma > light_threshold) return false;
+    if (perceived_luma < dark_threshold) return true;
+    return has_previous ? previous_light_ink : theme_dark;
+}
 inline float ContrastRatio(float a, float b) noexcept {
     return (std::max(a, b) + 0.05f) / (std::min(a, b) + 0.05f);
+}
+// Clear menu glass: the smallest theme veil (alpha over the vibrancy-boosted backdrop) that
+// keeps the menu's theme-locked ink at `target` contrast for the poorest 10th percentile of
+// the samples. A backdrop that already suits the ink keeps the light `floor_alpha`, so the
+// glass stays clear; only a backdrop that fights the ink is veiled more, up to `max_alpha`.
+// No samples: `fallback_alpha`. The ink is opposite the veil, so contrast rises with alpha.
+inline float SolveGlassVeilAlpha(const Samples& samples, Srgb veil, uint32_t ink_argb, float vibrancy,
+                                 float floor_alpha, float max_alpha, float fallback_alpha,
+                                 float target = 4.5f) noexcept {
+    floor_alpha = Unit(floor_alpha);
+    max_alpha = std::max(floor_alpha, Unit(max_alpha));
+    const size_t count = std::min(samples.count, kMaxSamples);
+    if (!count) return std::clamp(fallback_alpha, floor_alpha, max_alpha);
+    const float vib = std::isfinite(vibrancy) ? std::clamp(vibrancy, 0.0f, 3.0f) : 1.0f;
+    std::array<Srgb, kMaxSamples> base{};
+    for (size_t i = 0; i < count; ++i) {
+        const Srgb c{Unit(samples.colors[i].r), Unit(samples.colors[i].g), Unit(samples.colors[i].b)};
+        const float l = PerceivedLuma(c);
+        base[i] = {Unit(l + (c.r - l) * vib), Unit(l + (c.g - l) * vib), Unit(l + (c.b - l) * vib)};
+    }
+    const size_t rank = (count + 9) / 10 - 1;
+    const auto passes = [&](float alpha) {
+        std::array<float, kMaxSamples> score{};
+        for (size_t i = 0; i < count; ++i) {
+            const Srgb bg = SourceOver(base[i], veil, alpha);
+            score[i] = ContrastRatio(RelativeLuminance(bg), RelativeLuminance(SourceOver(bg, ink_argb)));
+        }
+        std::nth_element(score.begin(), score.begin() + rank, score.begin() + count);
+        return score[rank] >= target;
+    };
+    if (passes(floor_alpha)) return floor_alpha;
+    if (!passes(max_alpha)) return max_alpha;
+    float lo = floor_alpha, hi = max_alpha;
+    for (int i = 0; i < 12; ++i) {
+        const float mid = 0.5f * (lo + hi);
+        (passes(mid) ? hi : lo) = mid;
+    }
+    return hi;
 }
 inline Samples Fill(Srgb color) noexcept {
     Samples s;

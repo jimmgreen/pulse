@@ -371,6 +371,29 @@ private:
                 registered_commands_.push_back({cid, kSpecs[i].id});
             }
         }
+
+        // Single-file video context menu entry: right-click a supported video in Pulse -> "设为桌面壁纸"
+        static const PulseStringView kVideoExts[] = {
+            Sv(".mp4"), Sv(".mov"), Sv(".mkv"), Sv(".m4v"), Sv(".webm"), Sv(".wmv"),
+        };
+        PulseCommandDescriptor vd{};
+        vd.size = sizeof(vd);
+        vd.id = Sv("desktop-set-video-wallpaper");
+        vd.title = Sv("设为桌面壁纸");
+        vd.icon = PULSE_ICON_PC;
+        vd.kinds = PULSE_COMMAND_FILES;
+        vd.min_selection = 1;
+        vd.max_selection = 1;
+        vd.extensions = kVideoExts;
+        vd.extension_count = static_cast<uint32_t>(std::size(kVideoExts));
+        vd.invoke = &OnCommandInvoked;
+        vd.user = this;
+        vd.group = Sv("桌面整理");
+        vd.icon_name = Sv("pc");
+        PulseCommandId vcid = 0;
+        if (commands_.register_command(commands_.context, &vd, &vcid) == PULSE_OK && vcid != 0) {
+            registered_commands_.push_back({vcid, "desktop-set-video-wallpaper"});
+        }
     }
 
     void UnregisterStaticCommands() noexcept {
@@ -382,13 +405,21 @@ private:
     }
 
     static void PULSE_CALL OnCommandInvoked(void* user, PulseCommandId id,
-                                            const PulseContextSelectionSnapshot* /*sel*/) noexcept {
+                                            const PulseContextSelectionSnapshot* sel) noexcept {
         if (!user) return;
         auto* self = static_cast<DesktopPluginInstance*>(user);
         try {
             for (const auto& [cid, name] : self->registered_commands_) {
                 if (cid == id) {
-                    self->DispatchHostAction(name);
+                    if (name == "desktop-set-video-wallpaper") {
+                        if (sel && sel->entry_count >= 1 && sel->entries && sel->entries[0].path.data &&
+                            sel->entries[0].path.length > 0) {
+                            const std::string path_utf8 = CopySv(sel->entries[0].path);
+                            self->DispatchHostActionWithPath("set-video-wallpaper", path_utf8);
+                        }
+                    } else {
+                        self->DispatchHostAction(name);
+                    }
                     break;
                 }
             }
@@ -402,6 +433,16 @@ private:
             EnsureHostProcessRunning();
         }
         const std::string json = "{\"action\":" + ipc::JsonQuote(action) + "}";
+        pipe_.Send(ipc::MessageType::CommandActionMsg, ++next_req_id_, json);
+    }
+
+    void DispatchHostActionWithPath(std::string_view action, std::string_view path_utf8) {
+        if (!active_) Activate();
+        if (!pipe_.IsRunning() && settings_page_.Prefs().enabled) {
+            EnsureHostProcessRunning();
+        }
+        const std::string json = "{\"action\":" + ipc::JsonQuote(action) +
+                                 ",\"path\":" + ipc::JsonQuote(path_utf8) + "}";
         pipe_.Send(ipc::MessageType::CommandActionMsg, ++next_req_id_, json);
     }
 
@@ -477,6 +518,13 @@ private:
                 RecoverOrphanedTakeoverDynamic(false);
             }
             settings_page_.SetStatusText("已触发原生桌面图标位置恢复");
+        } else if (cmd == "pick-photo-folder") {
+            DispatchHostAction("pick-photo-folder");
+            settings_page_.SetStatusText("已打开照片小组件文件夹选择");
+        } else if (cmd == "pick-video-wallpaper") {
+            DispatchHostAction("pick-video-wallpaper");
+        } else if (cmd == "cancel-video-optimize") {
+            DispatchHostAction("cancel-video-optimize");
         }
     }
 
@@ -724,6 +772,12 @@ private:
             updated.ApplyJson(json);
             updated.enabled = settings_page_.Prefs().enabled;
             settings_page_.UpdateFromHostProcess(updated);
+            std::string vname, vstatus;
+            const bool has_vname = ipc::JsonFindString(json, "video_name", vname);
+            const bool has_vstatus = ipc::JsonFindString(json, "video_status", vstatus);
+            if (has_vname || has_vstatus) {
+                settings_page_.SetVideoWallpaperStatus(vname, vstatus);
+            }
             break;
         }
 

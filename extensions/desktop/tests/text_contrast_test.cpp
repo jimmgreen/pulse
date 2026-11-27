@@ -56,6 +56,34 @@ int main() {
     check(alpha.colors.count==256&&near(alpha.alpha[0],128.0f/255)&&near(alpha.colors.colors[0].r,1),"photo samples preserve alpha and unpremultiply color");
     check(!SamplePhotoGrid({}, {0,0,100,100},{0,0,10,10}).colors.count,"missing photo grid returns empty fallback");
     check(!SamplePhotoGrid(grid,{0,0,100,100},{110,0,120,10}).colors.count,"photo text outside tile returns empty fallback");
+    check(near(PerceivedLuma({1,1,1}),1)&&near(PerceivedLuma({0,0,0}),0),"perceived luma endpoints");
+    check(near(MeanPerceivedLuma(Fill(0xFF808080)),128.0f/255.0f)&&MeanPerceivedLuma({})<0,"mean perceived luma");
+    check(!ResolveHysteresisLightInk(0.75f,false,false,true),"bright background > 0.60 selects dark ink regardless of theme");
+    check(ResolveHysteresisLightInk(0.25f,false,false,false),"dark background < 0.40 selects light ink regardless of theme");
+    check(!ResolveHysteresisLightInk(0.50f,false,true,false)&&ResolveHysteresisLightInk(0.50f,false,false,true),
+          "initial deadband [0.40,0.60] follows system theme");
+    check(ResolveHysteresisLightInk(0.55f,true,true,false)&&!ResolveHysteresisLightInk(0.45f,true,false,true),
+          "subsequent deadband [0.40,0.60] retains previous ink without flicker");
+    {
+        // Clear menu glass veil: light over a backdrop that suits the ink, denser where it fights it.
+        const Srgb dark_veil{0.11f,0.115f,0.135f}, light_veil{0.975f,0.98f,0.99f};
+        const float on_night=SolveGlassVeilAlpha(Fill(0xFF101820),dark_veil,0xF0FFFFFFu,1.8f,0.30f,0.82f,0.6f,4.6f);
+        const float on_snow=SolveGlassVeilAlpha(Fill(0xFFF4F6F8),dark_veil,0xF0FFFFFFu,1.8f,0.30f,0.82f,0.6f,4.6f);
+        check(near(on_night,0.30f),"dark menu over a dark backdrop keeps the clear floor veil");
+        check(on_snow>0.55f&&on_snow<=0.82f,"dark menu over a bright backdrop veils just enough");
+        const auto after=[&](Srgb bg,Srgb veil,float a,uint32_t ink){const Srgb t=SourceOver(bg,veil,a);
+            return ContrastRatio(RelativeLuminance(t),RelativeLuminance(SourceOver(t,ink)));};
+        check(after({0.957f,0.965f,0.973f},dark_veil,on_snow,0xF0FFFFFFu)>=4.5f,"solved dark veil reaches WCAG AA");
+        const float light_on_snow=SolveGlassVeilAlpha(Fill(0xFFF4F6F8),light_veil,0xEB0F1217u,1.8f,0.32f,0.82f,0.6f,4.6f);
+        const float light_on_night=SolveGlassVeilAlpha(Fill(0xFF101820),light_veil,0xEB0F1217u,1.8f,0.32f,0.82f,0.6f,4.6f);
+        check(near(light_on_snow,0.32f)&&light_on_night>0.4f,"light menu veils only over dark backdrops");
+        check(after({0.063f,0.094f,0.125f},light_veil,light_on_night,0xEB0F1217u)>=4.5f,"solved light veil reaches WCAG AA");
+        Samples mostly_dark;mostly_dark.count=100;
+        for(size_t i=0;i<100;++i)mostly_dark.colors[i]=i<5?Srgb{1,1,1}:Srgb{0.06f,0.08f,0.1f};
+        check(near(SolveGlassVeilAlpha(mostly_dark,dark_veil,0xF0FFFFFFu,1.8f,0.30f,0.82f,0.6f),0.30f),
+              "a few bright specks under ten percent do not fog the whole menu");
+        check(near(SolveGlassVeilAlpha({},dark_veil,0xF0FFFFFFu,1.8f,0.30f,0.82f,0.6f),0.6f),"missing samples use the fallback veil");
+    }
     std::printf("Text contrast: %d cases, %d failures\n",cases,failed);return failed?1:0;
 }
 

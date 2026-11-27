@@ -19,38 +19,43 @@ struct CardMaterialProfile {
     float luminosity_opacity;
 };
 
-// Thin desktop surfaces control color and luminosity independently, rather
-// than covering the live backdrop with a high-alpha ordinary solid fill.
+// Desktop flyout / menu Acrylic profile (Windows.UI.Composition HostBackdropBrush graph).
+// Note: in HostBackdropLayer's WinUI-aligned WUC BlendEffect graph, `luminosity_opacity` drives
+// D2D1_BLEND_MODE_COLOR (Win2D/WUC Luminosity — clamps backdrop brightness into the theme's
+// readable band) while `tint_opacity` drives D2D1_BLEND_MODE_LUMINOSITY (Win2D/WUC Color — chroma tinting).
+// Keeping `luminosity_opacity` in Win11's readability range guarantees WCAG AA/AAA contrast for
+// theme text over pitch-black or pure-white behind-window content while preserving live blur.
 inline CardMaterialProfile CardAcrylicProfile(bool dark, uint8_t opacity_percent) noexcept {
     const float surface = std::clamp(static_cast<float>(opacity_percent) / 100.0f, 0.30f, 1.0f);
-    const float strength = 0.08f + 0.92f * surface;
-    constexpr float intensity = 0.65f;
-    return dark ? CardMaterialProfile{(0.04f + 0.38f * intensity) * strength,
-                                      (0.16f + 0.40f * intensity) * strength}
-                : CardMaterialProfile{(0.02f + 0.32f * intensity) * strength,
-                                      (0.22f + 0.42f * intensity) * strength};
+    return dark ? CardMaterialProfile{0.22f + 0.24f * surface,
+                                      0.72f + 0.18f * surface}
+                : CardMaterialProfile{0.16f + 0.24f * surface,
+                                      0.68f + 0.20f * surface};
 }
 
-// Desktop cards and tiles sit on the wallpaper all day and are much larger than a flyout, so they keep
-// more of the wallpaper than CardAcrylicProfile (the flyout recipe): a light luminosity layer and almost
-// no tint. The same 界面透明度 setting still scales them.
+// Desktop Acrylic cards sit on the wallpaper all day and remain visibly translucent, while
+// locking enough luminosity (Win11 WUC Luminosity Blend) that theme text stays readable across
+// black/white wallpapers without per-card black/white ink flipping.
 inline CardMaterialProfile CardSurfaceProfile(bool dark, uint8_t opacity_percent) noexcept {
     const float surface = std::clamp(static_cast<float>(opacity_percent) / 100.0f, 0.30f, 1.0f);
-    const float strength = 0.10f + 0.90f * surface;
-    return dark ? CardMaterialProfile{0.10f * strength, 0.34f * strength}
-                : CardMaterialProfile{0.02f * strength, 0.26f * strength};
+    const float op_norm = (surface - 0.30f) / 0.70f;
+    return dark ? CardMaterialProfile{0.16f + 0.22f * op_norm,
+                                      0.70f + 0.18f * op_norm}
+                : CardMaterialProfile{0.12f + 0.22f * op_norm,
+                                      0.66f + 0.20f * op_norm};
 }
 
 inline D2D1_COLOR_F CardMaterialTint(bool dark) noexcept {
     return ui::HexColor(dark ? 0x202226u : 0xFFFFFFu);
 }
 
+// Desktop Mica / MicaAlt keep wallpaper hue and spatial variation visible while clamping
+// luminance into the active theme's readable band (matching Win11 Fluent 2 theme ink).
 inline CardMaterialProfile CardMicaProfile(bool alternate, bool dark) noexcept {
-    constexpr float intensity = 0.65f;
-    if (alternate) return {0.28f + 0.54f * intensity,
-                           dark ? 0.34f + 0.38f * intensity : 0.42f + 0.34f * intensity};
-    return {0.04f + 0.42f * intensity,
-            dark ? 0.78f + 0.16f * intensity : 0.82f + 0.14f * intensity};
+    if (alternate) return {dark ? 0.86f : 0.84f,
+                           dark ? 0.34f : 0.44f};
+    return {dark ? 0.78f : 0.72f,
+            dark ? 0.58f : 0.52f};
 }
 
 struct SystemAppearance {

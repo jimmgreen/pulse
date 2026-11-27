@@ -1,4 +1,5 @@
 #include "host/live/widget_data.h"
+#include "host/render/widget_painters.h"
 
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
@@ -7,21 +8,56 @@
 #include <ws2ipdef.h>
 #include <windows.h>
 #include <winhttp.h>
+#include <dxgi1_4.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
 #include <pdh.h>
+#include <pdhmsg.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
+#include <cwctype>
 #include <memory>
 #include <string_view>
 #include <utility>
 
 namespace pulse::desktop::live {
 namespace {
+
+constexpr size_t kMaxHistorySamples = 48;
+
+void PushHistory(std::deque<float>& q, float v) {
+    q.push_back(v);
+    while (q.size() > kMaxHistorySamples) q.pop_front();
+}
+
+std::wstring ShortenGpuName(const wchar_t* desc) {
+    if (!desc || !desc[0]) return L"GPU";
+    std::wstring s(desc);
+    for (const wchar_t* prefix : { L"NVIDIA GeForce ", L"NVIDIA ", L"AMD Radeon(TM) ", L"AMD Radeon ", L"Intel(R) ", L"Microsoft " }) {
+        const size_t len = std::wcslen(prefix);
+        if (s.compare(0, len, prefix) == 0) {
+            s.erase(0, len);
+            break;
+        }
+    }
+    if (s.size() > 18) s.resize(18);
+    return s;
+}
+
+bool ParseIsoMinuteOfDay(const std::string& iso, int& out_min) noexcept {
+    // Expects "YYYY-MM-DDTHH:MM"
+    const size_t t_pos = iso.find('T');
+    if (t_pos == std::string::npos || t_pos + 5 >= iso.size()) return false;
+    const int hh = std::atoi(iso.c_str() + t_pos + 1);
+    const int mm = std::atoi(iso.c_str() + t_pos + 4);
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return false;
+    out_min = hh * 60 + mm;
+    return true;
+}
 
 // ---------------------------------------------------------------- HTTP (WinHTTP, HTTPS GET)
 struct Handle {
@@ -191,9 +227,13 @@ WeatherResult FetchWeather(const std::wstring& city) {
     if (!lat || !lon) { r.error = L"找不到「" + city + L"」"; return r; }
     if (const Json* nm = place.Get("name")) r.city = Wide(nm->str);
     wchar_t q[512]{};
-    std::swprintf(q, 512, L"/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m"
-                          L"&hourly=temperature_2m,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min"
-                          L"&timezone=auto&forecast_days=7", lat->num, lon->num);
+    std::swprintf(q, 512,
+                  L"/v1/forecast?latitude=%.4f&longitude=%.4f"
+                  L"&current=temperature_2m,weather_code,apparent_temperature,relative_humidity_2m,wind_speed_10m,is_day"
+                  L"&hourly=temperature_2m,weather_code,is_day"
+                  L"&daily=weather_code,temperature_2m_max,temperature_2m_min,sunrise,sunset"
+                  L"&timezone=auto&forecast_days=7",
+                  lat->num, lon->num);
     if (!HttpsGet(L"api.open-meteo.com", q, body)) { r.error = L"连不上天气服务"; return r; }
     Json fc;
     if (!Reader(body).Parse(fc)) { r.error = L"天气服务返回了无法识别的数据"; return r; }
@@ -207,15 +247,34 @@ WeatherResult FetchWeather(const std::wstring& city) {
     r.humidity_pct = Round(cur->Get("relative_humidity_2m"));
     r.wind_kmh = Round(cur->Get("wind_speed_10m"));
     r.code = Round(cur->Get("weather_code"));
+    if (const Json* day_v = cur->Get("is_day"); day_v && day_v->kind == Json::Kind::Number) {
+        r.is_day = (day_v->num > 0.5);
+    }
+
     const Json* dmax = daily->Get("temperature_2m_max");
     const Json* dmin = daily->Get("temperature_2m_min");
     const Json* dcode = daily->Get("weather_code");
     const Json* dtime = daily->Get("time");
+    const Json* dsunrise = daily->Get("sunrise");
+    const Json* dsunset = daily->Get("sunset");
     if (dmax && dmin && !dmax->arr.empty() && !dmin->arr.empty()) { r.hi_c = Round(&dmax->arr[0]); r.lo_c = Round(&dmin->arr[0]); }
-    // The next five hours after the current one (local time strings "2026-11-14T15:00").
+    int sr_min = 0, ss_min = 0;
+    if (dsunrise && dsunset && !dsunrise->arr.empty() && !dsunset->arr.empty() &&
+        ParseIsoMinuteOfDay(dsunrise->arr[0].str, sr_min) &&
+        ParseIsoMinuteOfDay(dsunset->arr[0].str, ss_min)) {
+        r.sunrise_min = sr_min;
+        r.sunset_min = ss_min;
+        r.has_sun = true;
+    } else {
+        render::ComputeAstronomicalSunMinutes(lat->num, lon->num, r.utc_offset_s, r.sunrise_min, r.sunset_min);
+        r.has_sun = true;
+    }
+
+    // The next twelve hours after the current one (local time strings "2026-11-14T15:00").
     const Json* htime = hourly->Get("time");
     const Json* htemp = hourly->Get("temperature_2m");
     const Json* hcode = hourly->Get("weather_code");
+    const Json* hday = hourly->Get("is_day");
     const Json* ctime = cur->Get("time");
     if (htime && htemp && hcode && ctime && ctime->str.size() >= 13) {
         const std::string now_hour = ctime->str.substr(0, 13);
@@ -224,7 +283,11 @@ WeatherResult FetchWeather(const std::wstring& city) {
         for (size_t n = 0; n < 12 && i + n < htime->arr.size() && i + n < htemp->arr.size() && i + n < hcode->arr.size(); ++n) {
             const std::string& t = htime->arr[i + n].str;
             const int h = t.size() >= 13 ? std::atoi(t.c_str() + 11) : 0;
-            r.hours.push_back({std::to_wstring(h) + L"时", Round(&hcode->arr[i + n]), Round(&htemp->arr[i + n])});
+            bool is_day = (h >= 6 && h < 18);
+            if (hday && i + n < hday->arr.size() && hday->arr[i + n].kind == Json::Kind::Number) {
+                is_day = (hday->arr[i + n].num > 0.5);
+            }
+            r.hours.push_back({std::to_wstring(h) + L"时", Round(&hcode->arr[i + n]), Round(&htemp->arr[i + n]), is_day});
         }
     }
     static constexpr const wchar_t* kWd[7] = {L"周日", L"周一", L"周二", L"周三", L"周四", L"周五", L"周六"};
@@ -250,11 +313,112 @@ WeatherResult FetchWeather(const std::wstring& city) {
 
 SystemSampler::~SystemSampler() {
     if (pdh_query_) PdhCloseQuery(static_cast<PDH_HQUERY>(pdh_query_));
+    if (pdh_vram_query_) PdhCloseQuery(static_cast<PDH_HQUERY>(pdh_vram_query_));
+    if (dxgi_adapter3_) static_cast<IDXGIAdapter3*>(dxgi_adapter3_)->Release();
+}
+
+uint32_t QueryPhysicalCoreCount() noexcept {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (len == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) return 0;
+    std::vector<BYTE> buf(len);
+    auto* ptr = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data());
+    if (!GetLogicalProcessorInformationEx(RelationProcessorCore, ptr, &len)) return 0;
+    uint32_t count = 0;
+    DWORD offset = 0;
+    while (offset < len) {
+        const auto* info = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buf.data() + offset);
+        if (info->Relationship == RelationProcessorCore) ++count;
+        if (info->Size == 0) break;
+        offset += info->Size;
+    }
+    return count;
+}
+
+std::wstring QuerySystemDriveRoot() {
+    wchar_t win_dir[MAX_PATH]{};
+    const UINT n = GetWindowsDirectoryW(win_dir, ARRAYSIZE(win_dir));
+    if (n >= 3 && std::iswalpha(win_dir[0]) && win_dir[1] == L':') {
+        std::wstring root(3, L'\0');
+        root[0] = static_cast<wchar_t>(std::towupper(win_dir[0]));
+        root[1] = L':';
+        root[2] = L'\\';
+        return root;
+    }
+    return L"C:\\";
+}
+
+void SystemSampler::ProbeGpuOnce() {
+    if (gpu_probed_) return;
+    gpu_probed_ = true;
+    logical_cores_ = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    physical_cores_ = QueryPhysicalCoreCount();
+    if (physical_cores_ == 0) physical_cores_ = logical_cores_;
+
+    // Pick hardware GPU adapter with largest dedicated VRAM (tracks discrete GPU on dual-GPU rigs,
+    // ignoring software renderers and 0-VRAM virtual display adapters).
+    IDXGIFactory4* fac = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), reinterpret_cast<void**>(&fac))) && fac) {
+        IDXGIAdapter3* best_adapter = nullptr;
+        SIZE_T best_dedicated = 0;
+        LUID best_luid{};
+        std::wstring best_name;
+
+        for (UINT i = 0;; ++i) {
+            IDXGIAdapter1* ad1 = nullptr;
+            if (fac->EnumAdapters1(i, &ad1) == DXGI_ERROR_NOT_FOUND) break;
+            if (!ad1) continue;
+            DXGI_ADAPTER_DESC1 desc{};
+            if (SUCCEEDED(ad1->GetDesc1(&desc)) && !(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) &&
+                desc.DedicatedVideoMemory > (100ull << 20)) {
+                IDXGIAdapter3* ad3 = nullptr;
+                if (SUCCEEDED(ad1->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&ad3))) && ad3) {
+                    if (!best_adapter || desc.DedicatedVideoMemory > best_dedicated) {
+                        if (best_adapter) best_adapter->Release();
+                        best_adapter = ad3;
+                        best_dedicated = desc.DedicatedVideoMemory;
+                        best_luid = desc.AdapterLuid;
+                        best_name = ShortenGpuName(desc.Description);
+                    } else {
+                        ad3->Release();
+                    }
+                }
+            }
+            ad1->Release();
+        }
+        fac->Release();
+
+        if (best_adapter) {
+            dxgi_adapter3_ = best_adapter;
+            adapter_luid_low_ = static_cast<uint32_t>(best_luid.LowPart);
+            adapter_luid_high_ = static_cast<int32_t>(best_luid.HighPart);
+            dedicated_vram_bytes_ = static_cast<uint64_t>(best_dedicated);
+            gpu_name_ = std::move(best_name);
+            has_vram_adapter_ = (dedicated_vram_bytes_ > (100ull << 20));
+        }
+    }
+
+    // System-wide dedicated VRAM counter matching Task Manager.
+    PDH_HQUERY q = nullptr;
+    if (PdhOpenQueryW(nullptr, 0, &q) == ERROR_SUCCESS && q) {
+        PDH_HCOUNTER c = nullptr;
+        if (PdhAddEnglishCounterW(q, L"\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &c) == ERROR_SUCCESS && c) {
+            pdh_vram_query_ = q;
+            pdh_vram_counter_ = c;
+        } else {
+            PdhCloseQuery(q);
+        }
+    }
 }
 
 SystemSample SystemSampler::Sample() {
+    ProbeGpuOnce();
     SystemSample s;
-    int utility = -1;
+    s.physical_cores = physical_cores_;
+    s.logical_cores = logical_cores_;
+    s.gpu_name = gpu_name_;
+
+    double pdh_cpu_f = -1.0;
     if (!pdh_tried_) {
         pdh_tried_ = true;
         PDH_HQUERY q = nullptr;
@@ -273,41 +437,147 @@ SystemSample SystemSampler::Sample() {
         PDH_FMT_COUNTERVALUE v{};
         // NOCAP100 then clamp ourselves: Task Manager also shows at most 100%.
         if (pdh_primed_ && PdhGetFormattedCounterValue(static_cast<PDH_HCOUNTER>(pdh_cpu_), PDH_FMT_DOUBLE | PDH_FMT_NOCAP100,
-                                                       nullptr, &v) == ERROR_SUCCESS && v.CStatus == ERROR_SUCCESS)
-            utility = static_cast<int>(std::clamp(std::lround(v.doubleValue), 0L, 100L));
+                                                       nullptr, &v) == ERROR_SUCCESS && v.CStatus == ERROR_SUCCESS) {
+            pdh_cpu_f = std::clamp(v.doubleValue, 0.0, 100.0);
+        }
         pdh_primed_ = true;
     }
+    double sys_cpu_f = -1.0;
     FILETIME idle{}, kern{}, user{};
     if (GetSystemTimes(&idle, &kern, &user)) {
         auto u64 = [](FILETIME f) { return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime; };
         const uint64_t i = u64(idle), k = u64(kern), u = u64(user);
         if (primed_) {
-            const uint64_t di = i - idle_, dt = (k - kernel_) + (u - user_);  // kernel time includes idle
-            if (dt > 0) s.cpu_pct = static_cast<int>(std::clamp<int64_t>(100 - static_cast<int64_t>(di * 100 / dt), 0, 100));
+            const uint64_t di = (i >= idle_) ? (i - idle_) : 0;
+            const uint64_t dt = ((k >= kernel_) ? (k - kernel_) : 0) + ((u >= user_) ? (u - user_) : 0);
+            if (dt > 0) {
+                const double busy = (dt > di) ? (static_cast<double>(dt - di) * 100.0 / static_cast<double>(dt)) : 0.0;
+                sys_cpu_f = std::clamp(busy, 0.0, 100.0);
+            }
         }
         idle_ = i; kernel_ = k; user_ = u;
     }
-    if (utility >= 0) s.cpu_pct = utility;
+    const bool has_cpu_sample = (pdh_cpu_f >= 0.0) || (sys_cpu_f >= 0.0);
+    const double cpu_pct_f = (pdh_cpu_f >= 0.0) ? pdh_cpu_f : ((sys_cpu_f >= 0.0) ? sys_cpu_f : 0.0);
+    s.cpu_pct_exact = static_cast<float>(cpu_pct_f);
+    s.cpu_pct = static_cast<int>(std::clamp(std::lround(cpu_pct_f), 0L, 100L));
+
     MEMORYSTATUSEX ms{sizeof(ms)};
-    if (GlobalMemoryStatusEx(&ms)) { s.mem_total = ms.ullTotalPhys; s.mem_used = ms.ullTotalPhys - ms.ullAvailPhys; }
-    ULARGE_INTEGER avail{}, total{}, free_total{};
-    if (GetDiskFreeSpaceExW(L"C:\\", &avail, &total, &free_total) && total.QuadPart) {
-        s.disk_free = avail.QuadPart;
-        s.disk_used_pct = static_cast<int>((total.QuadPart - free_total.QuadPart) * 100 / total.QuadPart);
+    float mem_pct_f = 0.0f;
+    if (GlobalMemoryStatusEx(&ms)) {
+        s.mem_total = ms.ullTotalPhys;
+        s.mem_used = (ms.ullTotalPhys >= ms.ullAvailPhys) ? (ms.ullTotalPhys - ms.ullAvailPhys) : 0;
+        if (s.mem_total > 0) {
+            mem_pct_f = std::clamp(static_cast<float>(static_cast<double>(s.mem_used) * 100.0 / static_cast<double>(s.mem_total)), 0.0f, 100.0f);
+        }
     }
+    s.mem_pct_exact = mem_pct_f;
+
+    // System-wide dedicated GPU VRAM usage (strictly matched by target adapter LUID via PDH;
+    // never falls back to a different GPU's counter or DXGI per-process CurrentUsage).
+    if (has_vram_adapter_ && dedicated_vram_bytes_ > (100ull << 20)) {
+        constexpr double kGb = 1024.0 * 1024.0 * 1024.0;
+        const double total_bytes = static_cast<double>(dedicated_vram_bytes_);
+        double used_bytes = -1.0;
+
+        if (pdh_vram_query_ && pdh_vram_counter_) {
+            if (PdhCollectQueryData(static_cast<PDH_HQUERY>(pdh_vram_query_)) == ERROR_SUCCESS) {
+                DWORD buf_size = 0;
+                DWORD item_count = 0;
+                const PDH_STATUS st = PdhGetFormattedCounterArrayW(
+                    static_cast<PDH_HCOUNTER>(pdh_vram_counter_), PDH_FMT_LARGE, &buf_size, &item_count, nullptr);
+                if (st == PDH_MORE_DATA && buf_size > 0) {
+                    std::vector<BYTE> buf(buf_size);
+                    auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buf.data());
+                    if (PdhGetFormattedCounterArrayW(
+                            static_cast<PDH_HCOUNTER>(pdh_vram_counter_), PDH_FMT_LARGE, &buf_size, &item_count, items) == ERROR_SUCCESS) {
+                        wchar_t target_prefix[64]{};
+                        std::swprintf(target_prefix, ARRAYSIZE(target_prefix), L"luid_0x%08x_0x%08x",
+                                      static_cast<unsigned int>(adapter_luid_high_),
+                                      static_cast<unsigned int>(adapter_luid_low_));
+                        double matched_sum = 0.0;
+                        bool matched_any = false;
+                        for (DWORD i = 0; i < item_count; ++i) {
+                            if (items[i].FmtValue.CStatus != ERROR_SUCCESS && items[i].FmtValue.CStatus != PDH_CSTATUS_NEW_DATA) continue;
+                            if (!items[i].szName) continue;
+                            std::wstring name(items[i].szName);
+                            for (auto& ch : name) ch = static_cast<wchar_t>(std::towlower(ch));
+                            if (name.find(target_prefix) != std::wstring::npos) {
+                                matched_sum += static_cast<double>(std::max<LONGLONG>(0, items[i].FmtValue.largeValue));
+                                matched_any = true;
+                            }
+                        }
+                        if (matched_any) {
+                            used_bytes = std::min(matched_sum, total_bytes);
+                        }
+                    }
+                }
+            }
+        }
+        if (used_bytes >= 0.0) {
+            s.vram_used_gb = static_cast<float>(used_bytes / kGb);
+            s.vram_total_gb = static_cast<float>(total_bytes / kGb);
+            s.vram_pct = std::clamp(static_cast<float>(used_bytes * 100.0 / total_bytes), 0.0f, 100.0f);
+            s.has_vram = (s.vram_total_gb > 0.1f);
+        }
+    }
+
+    static const std::wstring sys_drive = QuerySystemDriveRoot();
+    ULARGE_INTEGER avail{}, total{}, free_total{};
+    if (GetDiskFreeSpaceExW(sys_drive.c_str(), &avail, &total, &free_total) && total.QuadPart) {
+        s.disk_free = avail.QuadPart;
+        const uint64_t used = (total.QuadPart > avail.QuadPart) ? (total.QuadPart - avail.QuadPart) : 0;
+        s.disk_used_pct = static_cast<int>(std::clamp<uint64_t>((used * 100 + total.QuadPart / 2) / total.QuadPart, 0, 100));
+    }
+
+    // Per-LUID hardware NIC deltas: excludes virtual VPN/TUN adapters (e.g. FlClash/Tailscale)
+    // to prevent double-counting, and ignores newly connected adapters on their first tick so
+    // hot-plug or wake-from-sleep never injects bogus GB/s spikes.
+    bool has_net_sample = false;
     MIB_IF_TABLE2* table = nullptr;
-    if (GetIfTable2(&table) == NO_ERROR && table) {
-        uint64_t bytes = 0;
+    if (GetIfTable2Ex(MibIfTableNormal, &table) == NO_ERROR && table) {
+        std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> cur_by_luid;
         for (ULONG n = 0; n < table->NumEntries; ++n) {
             const auto& row = table->Table[n];
-            if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK || row.OperStatus != IfOperStatusUp || !row.InterfaceAndOperStatusFlags.HardwareInterface) continue;
-            bytes += row.InOctets;
+            if (row.OperStatus != IfOperStatusUp) continue;
+            if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK || row.Type == IF_TYPE_TUNNEL) continue;
+            if (row.InterfaceAndOperStatusFlags.FilterInterface) continue;
+            if (!row.InterfaceAndOperStatusFlags.HardwareInterface) continue;
+            if (!row.InterfaceAndOperStatusFlags.ConnectorPresent) continue;
+            cur_by_luid[row.InterfaceLuid.Value] = {row.InOctets, row.OutOctets};
         }
         FreeMibTable(table);
         const uint64_t now = GetTickCount64();
-        if (primed_ && now > net_tick_ && bytes >= net_bytes_) s.net_down_bps = (bytes - net_bytes_) * 1000 / (now - net_tick_);
-        net_bytes_ = bytes; net_tick_ = now;
+        if (net_primed_ && now > net_tick_) {
+            const uint64_t dt_ms = now - net_tick_;
+            if (dt_ms >= 50 && dt_ms <= 10000) {
+                uint64_t delta_in = 0;
+                uint64_t delta_out = 0;
+                for (const auto& [luid, cur] : cur_by_luid) {
+                    if (auto prev = net_prev_by_luid_.find(luid); prev != net_prev_by_luid_.end()) {
+                        if (cur.first >= prev->second.first) delta_in += (cur.first - prev->second.first);
+                        if (cur.second >= prev->second.second) delta_out += (cur.second - prev->second.second);
+                    }
+                }
+                s.net_down_bps = delta_in * 1000 / dt_ms;
+                s.net_up_bps = delta_out * 1000 / dt_ms;
+                has_net_sample = true;
+            }
+        }
+        net_prev_by_luid_ = std::move(cur_by_luid);
+        net_tick_ = now;
+        net_primed_ = true;
     }
+
+    if (has_cpu_sample) PushHistory(cpu_history_, s.cpu_pct_exact);
+    PushHistory(mem_history_, mem_pct_f);
+    if (has_net_sample) {
+        PushHistory(net_history_, static_cast<float>(static_cast<double>(s.net_down_bps + s.net_up_bps) / 1024.0));
+    }
+    s.cpu_history.assign(cpu_history_.begin(), cpu_history_.end());
+    s.mem_history.assign(mem_history_.begin(), mem_history_.end());
+    s.net_history.assign(net_history_.begin(), net_history_.end());
+
     primed_ = true;
     s.valid = true;
     return s;

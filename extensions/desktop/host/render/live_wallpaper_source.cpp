@@ -5,6 +5,7 @@
 #include "../../../../src/ui/window_material.h"
 
 #include <d2d1effects.h>
+#include <d3d11_4.h>
 #include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <roapi.h>
@@ -82,6 +83,69 @@ uint64_t SampleChecksum64(const uint8_t* bgra, uint32_t w, uint32_t h, uint32_t 
     return all_zero ? 0ull : (hash | 1ull);
 }
 
+bool IsTextureMostlyBlackRegion(ID3D11Device* dev,
+                                ID3D11DeviceContext* ctx,
+                                ID3D11Texture2D* tex,
+                                uint32_t region_x,
+                                uint32_t region_y,
+                                uint32_t region_w,
+                                uint32_t region_h,
+                                ComPtr<ID3D11Texture2D>& staging_cache) noexcept {
+    if (!dev || !ctx || !tex || region_w < 8 || region_h < 8) return false;
+    D3D11_TEXTURE2D_DESC src_desc{};
+    tex->GetDesc(&src_desc);
+    if (region_x >= src_desc.Width || region_y >= src_desc.Height) return false;
+    const uint32_t safe_w = std::min(region_w, src_desc.Width - region_x);
+    const uint32_t safe_h = std::min(region_h, src_desc.Height - region_y);
+    if (safe_w < 8 || safe_h < 8) return false;
+
+    if (!staging_cache) {
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width = 9;
+        sd.Height = 1;
+        sd.MipLevels = 1;
+        sd.ArraySize = 1;
+        sd.Format = src_desc.Format;
+        sd.SampleDesc.Count = 1;
+        sd.Usage = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(dev->CreateTexture2D(&sd, nullptr, &staging_cache)) || !staging_cache) {
+            return false;
+        }
+    } else {
+        D3D11_TEXTURE2D_DESC existing{};
+        staging_cache->GetDesc(&existing);
+        if (existing.Format != src_desc.Format) {
+            staging_cache.Reset();
+            return IsTextureMostlyBlackRegion(dev, ctx, tex, region_x, region_y, region_w, region_h, staging_cache);
+        }
+    }
+
+    for (uint32_t i = 0; i < 9; ++i) {
+        const uint32_t sx = region_x + (safe_w * (1u + (i % 3u) * 2u)) / 6u;
+        const uint32_t sy = region_y + (safe_h * (1u + (i / 3u) * 2u)) / 6u;
+        const D3D11_BOX box{sx, sy, 0, sx + 1u, sy + 1u, 1};
+        ctx->CopySubresourceRegion(staging_cache.Get(), 0, i, 0, 0, tex, 0, &box);
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(ctx->Map(staging_cache.Get(), 0, D3D11_MAP_READ, 0, &mapped)) || !mapped.pData) {
+        return false;
+    }
+
+    bool all_black = true;
+    const auto* bytes = static_cast<const uint8_t*>(mapped.pData);
+    for (uint32_t i = 0; i < 9; ++i) {
+        const uint8_t* p = bytes + i * 4u;
+        if (p[0] >= 6u || p[1] >= 6u || p[2] >= 6u) {
+            all_black = false;
+            break;
+        }
+    }
+    ctx->Unmap(staging_cache.Get(), 0);
+    return all_black;
+}
+
 bool EnsureRoInitialized() noexcept {
     struct ThreadRo {
         HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -123,6 +187,7 @@ struct LiveWallpaperSource::Impl {
     ComPtr<ID2D1Bitmap1> frost_bitmap;
     ComPtr<ID3D11Texture2D> lum_probe_gpu;
     ComPtr<ID3D11Texture2D> lum_probe_staging;
+    ComPtr<ID3D11Texture2D> black_probe_staging;
     float avg_luminance = -1.0f;
     uint64_t last_lum_sample_ms = 0;
     bool frost_valid = false;
@@ -137,11 +202,24 @@ struct LiveWallpaperSource::Impl {
     wgc::GraphicsCaptureSession wgc_session{nullptr};
     wgc::Direct3D11CaptureFramePool::FrameArrived_revoker wgc_arrived_revoker;
     winrt::Windows::Graphics::SizeInt32 wgc_pool_size{0, 0};
+    std::mutex wgc_frame_mtx;
+    wgc::Direct3D11CaptureFrame wgc_latest_frame{nullptr};
     bool wgc_permanently_denied = false;
+    bool desktop_host_black = false;
+    bool desktop_host_verified_nonblack = false;
+    uint32_t desktop_host_black_strikes = 0;
+    uint64_t last_wgc_fail_ms = 0;
 
     std::atomic<bool> frame_ready{false};
-    std::atomic<uint64_t> last_post_tick_ms{0};
+    std::atomic<bool> wake_posted{false};
     std::atomic<uint32_t> min_interval_ms{33};
+
+    // Direct internal video wallpaper state (bypasses WGC/PrintWindow)
+    bool internal_video_mode = false;
+    HANDLE opened_shared_handle = nullptr;
+    ComPtr<ID3D11Device> opened_shared_dev;
+    ComPtr<ID3D11Texture2D> opened_shared_tex;
+    ComPtr<IDXGIKeyedMutex> opened_shared_km;
 
     // Fallback worker state (Win10 / WGC-denied)
     std::mutex fb_mtx;
@@ -159,14 +237,28 @@ struct LiveWallpaperSource::Impl {
     }
 
     void StopWgc() noexcept {
+        wgc::Direct3D11CaptureFrame pending{nullptr};
+        wgc::GraphicsCaptureSession sess{nullptr};
+        wgc::Direct3D11CaptureFramePool pool{nullptr};
         try {
             wgc_arrived_revoker.revoke();
-            if (wgc_session) { wgc_session.Close(); wgc_session = nullptr; }
-            if (wgc_pool) { wgc_pool.Close(); wgc_pool = nullptr; }
-            wgc_item = nullptr;
-            winrt_device = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(wgc_frame_mtx);
+                pending = std::move(wgc_latest_frame);
+                wgc_latest_frame = nullptr;
+                sess = std::move(wgc_session);
+                wgc_session = nullptr;
+                pool = std::move(wgc_pool);
+                wgc_pool = nullptr;
+                wgc_item = nullptr;
+                winrt_device = nullptr;
+                wgc_pool_size = {0, 0};
+            }
+            if (pending) pending.Close();
+            if (sess) sess.Close();
+            if (pool) pool.Close();
         } catch (...) {}
-        wgc_pool_size = {0, 0};
+        wake_posted.store(false, std::memory_order_release);
     }
 
     void StopFallbackWorker() noexcept {
@@ -188,9 +280,14 @@ struct LiveWallpaperSource::Impl {
         running = false;
         backend = LiveCaptureBackend::None;
         frame_ready.store(false, std::memory_order_relaxed);
+        wake_posted.store(false, std::memory_order_release);
     }
 
     void ReleaseGpu() noexcept {
+        opened_shared_handle = nullptr;
+        opened_shared_dev.Reset();
+        opened_shared_tex.Reset();
+        opened_shared_km.Reset();
         scale_fx.Reset();
         blur_fx.Reset();
         bake_dc.Reset();
@@ -199,6 +296,7 @@ struct LiveWallpaperSource::Impl {
         gpu_sharp_tex.Reset();
         lum_probe_gpu.Reset();
         lum_probe_staging.Reset();
+        black_probe_staging.Reset();
         owner_dc.Reset();
         owner_d3d.Reset();
         sharp_w = sharp_h = frost_w = frost_h = surf_w = surf_h = 0;
@@ -207,13 +305,14 @@ struct LiveWallpaperSource::Impl {
     }
 
     void PostCoalescedFrameWake() noexcept {
-        const uint64_t now = GetTickCount64();
-        const uint64_t prev = last_post_tick_ms.load(std::memory_order_relaxed);
-        const uint32_t interval = min_interval_ms.load(std::memory_order_relaxed);
-        if (now - prev < interval) return;
-        last_post_tick_ms.store(now, std::memory_order_relaxed);
-        if (notify_hwnd && frame_msg != 0 && IsWindow(notify_hwnd)) {
-            PostMessageW(notify_hwnd, frame_msg, 0, 0);
+        // Latch-coalesced UI wakeup: guarantees at most one message in flight while NEVER
+        // dropping the final frame of a wallpaper transition or video stream.
+        if (!wake_posted.exchange(true, std::memory_order_acq_rel)) {
+            if (notify_hwnd && frame_msg != 0 && IsWindow(notify_hwnd)) {
+                PostMessageW(notify_hwnd, frame_msg, 0, 0);
+            } else {
+                wake_posted.store(false, std::memory_order_release);
+            }
         }
     }
 
@@ -227,14 +326,21 @@ struct LiveWallpaperSource::Impl {
         }
         if (!EnsureRoInitialized()) return false;
 
+        const char* wgc_step = "init";
         try {
             if (!wgc::GraphicsCaptureSession::IsSupported()) {
                 return false;
+            }
+            // Match reference gpu_adapter.cpp:87-89: protect D3D11 device for free-threaded WGC callback.
+            ComPtr<ID3D11Multithread> d3d_mt;
+            if (SUCCEEDED(d3d->QueryInterface(IID_PPV_ARGS(&d3d_mt))) && d3d_mt) {
+                d3d_mt->SetMultithreadProtected(TRUE);
             }
             ComPtr<IDXGIDevice> dxgi_dev;
             if (FAILED(d3d->QueryInterface(IID_PPV_ARGS(&dxgi_dev))) || !dxgi_dev) {
                 return false;
             }
+            wgc_step = "d3d_interop";
             winrt::com_ptr<::IInspectable> inspectable_dev;
             if (FAILED(CreateDirect3D11DeviceFromDXGIDevice(dxgi_dev.Get(), inspectable_dev.put())) ||
                 !inspectable_dev) {
@@ -242,10 +348,11 @@ struct LiveWallpaperSource::Impl {
             }
             winrt_device = inspectable_dev.as<wgdd::IDirect3DDevice>();
 
+            wgc_step = "create_item";
             auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
             wgc::GraphicsCaptureItem item{nullptr};
             winrt::check_hresult(interop->CreateForWindow(
-                target, winrt::guid_of<ABI::Windows::Graphics::Capture::IGraphicsCaptureItem>(),
+                target, winrt::guid_of<wgc::GraphicsCaptureItem>(),
                 winrt::put_abi(item)));
             if (!item) return false;
 
@@ -254,61 +361,119 @@ struct LiveWallpaperSource::Impl {
                 return false;
             }
 
-            // Best-effort borderless capability request (non-blocking).
-            try {
-                using winrt::Windows::Foundation::Metadata::ApiInformation;
-                if (ApiInformation::IsTypePresent(L"Windows.Graphics.Capture.GraphicsCaptureAccess")) {
-                    (void)wgc::GraphicsCaptureAccess::RequestAccessAsync(
-                        wgc::GraphicsCaptureAccessKind::Borderless);
-                }
-            } catch (...) {}
-
+            // Double-buffered free-threaded pool (matches reference window_capture.cpp) so live
+            // 60fps video frames never stall on a single occupied frame slot.
+            wgc_step = "create_pool";
             auto pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
                 winrt_device,
                 wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                1,
+                2,
                 item_sz);
+            wgc_step = "create_session";
             auto session = pool.CreateCaptureSession(item);
 
             // Strict requirement: NEVER show a yellow border around the user's desktop!
+            wgc_step = "cursor";
             session.IsCursorCaptureEnabled(false);
+            wgc_step = "border";
             session.IsBorderRequired(false);
 
-            try {
-                using winrt::Windows::Foundation::Metadata::ApiInformation;
-                if (ApiInformation::IsPropertyPresent(
-                        L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval")) {
-                    session.MinUpdateInterval(
-                        std::chrono::milliseconds(min_interval_ms.load(std::memory_order_relaxed)));
+            auto configure_optional = [&](auto& sess) {
+                if constexpr (requires { sess.DirtyRegionMode(); }) {
+                    using ModeT = decltype(sess.DirtyRegionMode());
+                    if constexpr (requires { ModeT::ReportOnly; }) {
+                        try {
+                            sess.DirtyRegionMode(ModeT::ReportOnly);
+                        } catch (...) {}
+                    }
                 }
-            } catch (...) {}
+                if constexpr (requires { sess.MinUpdateInterval(std::chrono::milliseconds(16)); }) {
+                    try {
+                        using winrt::Windows::Foundation::Metadata::ApiInformation;
+                        if (ApiInformation::IsPropertyPresent(
+                                L"Windows.Graphics.Capture.GraphicsCaptureSession", L"MinUpdateInterval")) {
+                            sess.MinUpdateInterval(
+                                std::chrono::milliseconds(min_interval_ms.load(std::memory_order_relaxed)));
+                        }
+                    } catch (...) {}
+                }
+            };
+            configure_optional(session);
 
-            wgc_item = item;
-            wgc_pool = pool;
-            wgc_session = session;
-            wgc_pool_size = item_sz;
+            {
+                std::lock_guard<std::mutex> lk(wgc_frame_mtx);
+                wgc_item = item;
+                wgc_pool = pool;
+                wgc_session = session;
+                wgc_pool_size = item_sz;
+                wgc_latest_frame = nullptr;
+            }
+            desktop_host_verified_nonblack = false;
+            desktop_host_black_strikes = 0;
 
             wgc_arrived_revoker = wgc_pool.FrameArrived(
                 winrt::auto_revoke,
-                [this](wgc::Direct3D11CaptureFramePool const&, winrt::Windows::Foundation::IInspectable const&) {
-                    frame_ready.store(true, std::memory_order_release);
-                    PostCoalescedFrameWake();
+                [this](wgc::Direct3D11CaptureFramePool const& active_pool, winrt::Windows::Foundation::IInspectable const&) {
+                    try {
+                        wgc::Direct3D11CaptureFrame latest{nullptr};
+                        while (auto next = active_pool.TryGetNextFrame()) {
+                            if (latest) latest.Close();
+                            latest = std::move(next);
+                        }
+                        if (!latest) return;
+
+                        const auto cs = latest.ContentSize();
+                        wgc::Direct3D11CaptureFrame old{nullptr};
+                        {
+                            std::lock_guard<std::mutex> lk(wgc_frame_mtx);
+                            if (!wgc_pool) {
+                                latest.Close();
+                                return;
+                            }
+                            old = std::move(wgc_latest_frame);
+                            wgc_latest_frame = std::move(latest);
+                            if (cs.Width > 0 && cs.Height > 0 &&
+                                (cs.Width != wgc_pool_size.Width || cs.Height != wgc_pool_size.Height)) {
+                                wgc_pool_size = cs;
+                                try {
+                                    active_pool.Recreate(
+                                        winrt_device,
+                                        wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                                        2,
+                                        cs);
+                                } catch (...) {}
+                            }
+                        }
+                        if (old) old.Close();
+                        frame_ready.store(true, std::memory_order_release);
+                        PostCoalescedFrameWake();
+                    } catch (...) {}
                 });
 
+            wgc_step = "start";
             wgc_session.StartCapture();
             backend = LiveCaptureBackend::WgcWindow;
             running = true;
-            ui::LogWindowMaterial("liquid glass live WGC active target=%p size=%dx%d",
-                                  target, item_sz.Width, item_sz.Height);
+            ui::LogWindowMaterial("liquid glass live WGC active target=%p desktop_host=%d size=%dx%d",
+                                  target, decision.is_desktop_host ? 1 : 0, item_sz.Width, item_sz.Height);
             return true;
         } catch (const winrt::hresult_error& err) {
             if (err.code() == E_ACCESSDENIED) {
                 wgc_permanently_denied = true;
+            } else if (decision.is_desktop_host &&
+                       (err.code() == E_INVALIDARG || err.code() == E_FAIL || err.code() == E_NOINTERFACE)) {
+                // Explorer's Progman/WorkerW desktop host is rejected by WGC on this Windows build;
+                // stop retrying every 5s until the target HWND changes (e.g. a live wallpaper attaches).
+                desktop_host_black = true;
             }
-            ui::LogWindowMaterial("liquid glass live WGC unavailable hr=0x%08lX; trying PrintWindow fallback",
-                                  static_cast<unsigned long>(err.code().value));
+            ui::LogWindowMaterial("liquid glass live WGC unavailable step=%s hr=0x%08lX desktop_host=%d",
+                                  wgc_step,
+                                  static_cast<unsigned long>(err.code().value),
+                                  decision.is_desktop_host ? 1 : 0);
         } catch (...) {
-            ui::LogWindowMaterial("liquid glass live WGC unexpected error; trying PrintWindow fallback");
+            ui::LogWindowMaterial("liquid glass live WGC unexpected error step=%s desktop_host=%d",
+                                  wgc_step,
+                                  decision.is_desktop_host ? 1 : 0);
         }
         StopWgc();
         return false;
@@ -561,8 +726,8 @@ struct LiveWallpaperSource::Impl {
 
         if (!lum_probe_staging) {
             D3D11_TEXTURE2D_DESC sd{};
-            sd.Width = 8;
-            sd.Height = 8;
+            sd.Width = 4;
+            sd.Height = 4;
             sd.MipLevels = 1;
             sd.ArraySize = 1;
             sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -576,11 +741,11 @@ struct LiveWallpaperSource::Impl {
         d3d->GetImmediateContext(&ctx);
         if (!ctx) return;
 
-        // Copy 8 distributed single-pixel probes across the scene into staging[y, x] — 0.01 ms!
-        for (uint32_t y = 0; y < 8; ++y) {
-            const uint32_t sy = ((2 * y + 1) * sharp_h) / 16;
-            for (uint32_t x = 0; x < 8; ++x) {
-                const uint32_t sx = ((2 * x + 1) * sharp_w) / 16;
+        // Copy 4x4 distributed single-pixel probes across the scene into staging[y, x].
+        for (uint32_t y = 0; y < 4; ++y) {
+            const uint32_t sy = ((2 * y + 1) * sharp_h) / 8;
+            for (uint32_t x = 0; x < 4; ++x) {
+                const uint32_t sx = ((2 * x + 1) * sharp_w) / 8;
                 const D3D11_BOX box{sx, sy, 0, sx + 1, sy + 1, 1};
                 ctx->CopySubresourceRegion(lum_probe_staging.Get(), 0, x, y, 0, gpu_sharp_tex.Get(), 0, &box);
             }
@@ -590,15 +755,15 @@ struct LiveWallpaperSource::Impl {
         if (SUCCEEDED(ctx->Map(lum_probe_staging.Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)) &&
             mapped.pData) {
             double sum = 0.0;
-            for (uint32_t y = 0; y < 8; ++y) {
+            for (uint32_t y = 0; y < 4; ++y) {
                 const auto* row = static_cast<const uint8_t*>(mapped.pData) + y * mapped.RowPitch;
-                for (uint32_t x = 0; x < 8; ++x) {
+                for (uint32_t x = 0; x < 4; ++x) {
                     const uint8_t* p = row + x * 4u;
                     sum += text_contrast::RelativeLuminance({p[2] / 255.0f, p[1] / 255.0f, p[0] / 255.0f});
                 }
             }
             ctx->Unmap(lum_probe_staging.Get(), 0);
-            const float inst = static_cast<float>(sum / 64.0);
+            const float inst = static_cast<float>(sum / 16.0);
             avg_luminance = (avg_luminance < 0.0f) ? inst : (avg_luminance * 0.65f + inst * 0.35f);
         }
     }
@@ -621,6 +786,14 @@ void LiveWallpaperSource::SyncState(ID3D11Device* d3d_device,
                                     bool glass_visible,
                                     bool paused) noexcept {
     if (!impl_) return;
+    if (impl_->internal_video_mode) {
+        impl_->surf_w = static_cast<uint32_t>(std::max<LONG>(1, surface_screen_px.right - surface_screen_px.left));
+        impl_->surf_h = static_cast<uint32_t>(std::max<LONG>(1, surface_screen_px.bottom - surface_screen_px.top));
+        impl_->surface_screen_px = surface_screen_px;
+        impl_->paused_state = paused;
+        impl_->rate_mode = rate_mode;
+        return;
+    }
 
     impl_->surf_w = static_cast<uint32_t>(std::max<LONG>(1, surface_screen_px.right - surface_screen_px.left));
     impl_->surf_h = static_cast<uint32_t>(std::max<LONG>(1, surface_screen_px.bottom - surface_screen_px.top));
@@ -629,11 +802,18 @@ void LiveWallpaperSource::SyncState(ID3D11Device* d3d_device,
 
     const bool should_capture = decision.active && glass_visible && !paused && d3d_device && d2d_dc;
     if (!should_capture) {
-        if (impl_->running) {
-            // Stop capture immediately (0 idle CPU/GPU!), while retaining last frame in `sharp_bitmap`.
+        if (!decision.active) {
+            if (impl_->running) impl_->StopCapture();
+            if (impl_->sharp_bitmap) impl_->ReleaseGpu();
+            impl_->inactive_since_ms = 0;
+            impl_->desktop_host_black = false;
+            impl_->desktop_host_verified_nonblack = false;
+            impl_->desktop_host_black_strikes = 0;
+        } else if (impl_->running) {
+            // Stop capture immediately (0 idle CPU/GPU!), while retaining last frame while paused/hidden.
             impl_->StopCapture();
             impl_->inactive_since_ms = GetTickCount64();
-        } else if (!glass_visible || !decision.active) {
+        } else if (!glass_visible) {
             if (impl_->sharp_bitmap && impl_->inactive_since_ms != 0 &&
                 GetTickCount64() - impl_->inactive_since_ms > 30000ull) {
                 impl_->ReleaseGpu();
@@ -651,8 +831,17 @@ void LiveWallpaperSource::SyncState(ID3D11Device* d3d_device,
     impl_->decision = decision;
     impl_->rate_mode = rate_mode;
 
-    if (target_changed && impl_->running) {
-        impl_->StopCapture();
+    if (target_changed) {
+        if (impl_->running) impl_->StopCapture();
+        impl_->ReleaseGpu();
+        impl_->desktop_host_black = false;
+        impl_->desktop_host_verified_nonblack = false;
+        impl_->desktop_host_black_strikes = 0;
+        impl_->last_wgc_fail_ms = 0;
+    }
+    if (impl_->decision.is_desktop_host && impl_->desktop_host_black) {
+        // Driver produced all-black frames for Explorer's desktop host; let WallpaperBackdrop serve cleanly.
+        return;
     }
     if (rate_changed && impl_->running) {
         const bool is_fb = (impl_->backend == LiveCaptureBackend::PrintWindowFallback);
@@ -670,9 +859,18 @@ void LiveWallpaperSource::SyncState(ID3D11Device* d3d_device,
     }
 
     if (!impl_->running) {
+        const uint64_t now = GetTickCount64();
+        if (impl_->last_wgc_fail_ms != 0 && (now - impl_->last_wgc_fail_ms) < 5000ull) {
+            return;
+        }
         impl_->min_interval_ms.store(IntervalMsForRate(rate_mode, false), std::memory_order_relaxed);
         if (!impl_->TryStartWgc(d3d_device)) {
-            impl_->TryStartFallbackWorker();
+            impl_->last_wgc_fail_ms = now;
+            if (!impl_->decision.is_desktop_host) {
+                impl_->TryStartFallbackWorker();
+            }
+        } else {
+            impl_->last_wgc_fail_ms = 0;
         }
     }
 }
@@ -682,6 +880,7 @@ bool LiveWallpaperSource::ConsumePendingFrame(ID3D11Device* d3d_device,
                                               bool need_frost,
                                               std::span<const RECT> glass_cards_surface_px) noexcept {
     if (!impl_ || !d3d_device || !d2d_dc) return false;
+    impl_->wake_posted.store(false, std::memory_order_release);
     if (!impl_->frame_ready.exchange(false, std::memory_order_acq_rel)) {
         if (need_frost && impl_->sharp_bitmap && !impl_->frost_valid) {
             impl_->BakeQuarterFrost(d2d_dc);
@@ -692,26 +891,23 @@ bool LiveWallpaperSource::ConsumePendingFrame(ID3D11Device* d3d_device,
     if (impl_->backend == LiveCaptureBackend::WgcWindow && impl_->wgc_pool) {
         try {
             wgc::Direct3D11CaptureFrame latest{nullptr};
-            while (auto next = impl_->wgc_pool.TryGetNextFrame()) {
-                if (latest) latest.Close();
-                latest = std::move(next);
+            {
+                std::lock_guard<std::mutex> lk(impl_->wgc_frame_mtx);
+                latest = std::move(impl_->wgc_latest_frame);
+                impl_->wgc_latest_frame = nullptr;
             }
             if (!latest) return false;
 
             const auto content_sz = latest.ContentSize();
-            if (content_sz.Width > 0 && content_sz.Height > 0 &&
-                (content_sz.Width != impl_->wgc_pool_size.Width ||
-                 content_sz.Height != impl_->wgc_pool_size.Height)) {
-                impl_->wgc_pool_size = content_sz;
-                impl_->wgc_pool.Recreate(
-                    impl_->winrt_device,
-                    wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-                    1,
-                    content_sz);
-            }
-
             const HWND target_hwnd = reinterpret_cast<HWND>(impl_->decision.capture_target_hwnd);
-            const RECT target_rc = QueryWindowCaptureBounds(target_hwnd);
+            // Pixel-exact alignment (matches reference liquid_glass.cpp:786-791): WGC ContentSize
+            // matches GetWindowRect when DWM borders are included, or DWMWA_EXTENDED_FRAME_BOUNDS otherwise.
+            RECT target_rc{};
+            GetWindowRect(target_hwnd, &target_rc);
+            if (content_sz.Width != (target_rc.right - target_rc.left) ||
+                content_sz.Height != (target_rc.bottom - target_rc.top)) {
+                target_rc = QueryWindowCaptureBounds(target_hwnd);
+            }
             const LONG off_x = impl_->surface_screen_px.left - target_rc.left;
             const LONG off_y = impl_->surface_screen_px.top - target_rc.top;
 
@@ -757,21 +953,65 @@ bool LiveWallpaperSource::ConsumePendingFrame(ID3D11Device* d3d_device,
 
             D3D11_TEXTURE2D_DESC src_desc{};
             src_tex->GetDesc(&src_desc);
-            const uint32_t sx = static_cast<uint32_t>(std::clamp<LONG>(off_x, 0, std::max<LONG>(0, static_cast<LONG>(src_desc.Width) - 1)));
-            const uint32_t sy = static_cast<uint32_t>(std::clamp<LONG>(off_y, 0, std::max<LONG>(0, static_cast<LONG>(src_desc.Height) - 1)));
-            const uint32_t cw = std::min<uint32_t>(impl_->surf_w, src_desc.Width - sx);
-            const uint32_t ch = std::min<uint32_t>(impl_->surf_h, src_desc.Height - sy);
-            if (cw == 0 || ch == 0 || !impl_->EnsureGpuTargets(d3d_device, d2d_dc, cw, ch)) {
+            const LONG valid_src_w = std::min<LONG>(static_cast<LONG>(src_desc.Width),
+                                                    content_sz.Width > 0 ? content_sz.Width : static_cast<LONG>(src_desc.Width));
+            const LONG valid_src_h = std::min<LONG>(static_cast<LONG>(src_desc.Height),
+                                                    content_sz.Height > 0 ? content_sz.Height : static_cast<LONG>(src_desc.Height));
+            const LONG dst_x = (off_x < 0) ? -off_x : 0;
+            const LONG dst_y = (off_y < 0) ? -off_y : 0;
+            const LONG sx_signed = (off_x > 0) ? off_x : 0;
+            const LONG sy_signed = (off_y > 0) ? off_y : 0;
+            if (sx_signed >= valid_src_w || sy_signed >= valid_src_h ||
+                dst_x >= static_cast<LONG>(impl_->surf_w) || dst_y >= static_cast<LONG>(impl_->surf_h)) {
+                latest.Close();
+                return false;
+            }
+            const uint32_t sx = static_cast<uint32_t>(sx_signed);
+            const uint32_t sy = static_cast<uint32_t>(sy_signed);
+            const uint32_t copy_w = static_cast<uint32_t>(
+                std::min<LONG>(static_cast<LONG>(impl_->surf_w) - dst_x, valid_src_w - sx_signed));
+            const uint32_t copy_h = static_cast<uint32_t>(
+                std::min<LONG>(static_cast<LONG>(impl_->surf_h) - dst_y, valid_src_h - sy_signed));
+            if (copy_w == 0 || copy_h == 0) {
                 latest.Close();
                 return false;
             }
 
             ComPtr<ID3D11DeviceContext> d3d_ctx;
             d3d_device->GetImmediateContext(&d3d_ctx);
-            if (d3d_ctx) {
-                const D3D11_BOX box{sx, sy, 0, sx + cw, sy + ch, 1};
-                d3d_ctx->CopySubresourceRegion(impl_->gpu_sharp_tex.Get(), 0, 0, 0, 0, src_tex.Get(), 0, &box);
+            if (!d3d_ctx) {
+                latest.Close();
+                return false;
             }
+
+            // Reference 9-point black-frame guard: if Explorer's Progman/WorkerW capture yields
+            // all-black frames on this GPU/OS combination, fall back gracefully to WallpaperBackdrop.
+            if (impl_->decision.is_desktop_host && !impl_->desktop_host_verified_nonblack) {
+                if (IsTextureMostlyBlackRegion(d3d_device, d3d_ctx.Get(), src_tex.Get(),
+                                               sx, sy, copy_w, copy_h, impl_->black_probe_staging)) {
+                    latest.Close();
+                    ++impl_->desktop_host_black_strikes;
+                    if (impl_->desktop_host_black_strikes >= 3u) {
+                        impl_->desktop_host_black = true;
+                        ui::LogWindowMaterial("liquid glass desktop host WGC produced black frames; falling back to static wallpaper");
+                        impl_->StopCapture();
+                        impl_->ReleaseGpu();
+                    }
+                    return false;
+                }
+                impl_->desktop_host_verified_nonblack = true;
+                impl_->desktop_host_black_strikes = 0;
+            }
+
+            if (!impl_->EnsureGpuTargets(d3d_device, d2d_dc, impl_->surf_w, impl_->surf_h)) {
+                latest.Close();
+                return false;
+            }
+
+            const D3D11_BOX box{sx, sy, 0, sx + copy_w, sy + copy_h, 1};
+            d3d_ctx->CopySubresourceRegion(impl_->gpu_sharp_tex.Get(), 0,
+                                           static_cast<UINT>(dst_x), static_cast<UINT>(dst_y), 0,
+                                           src_tex.Get(), 0, &box);
             latest.Close();
 
             impl_->frost_valid = false;
@@ -783,7 +1023,9 @@ bool LiveWallpaperSource::ConsumePendingFrame(ID3D11Device* d3d_device,
             return true;
         } catch (...) {
             impl_->StopWgc();
-            impl_->TryStartFallbackWorker();
+            if (!impl_->decision.is_desktop_host) {
+                impl_->TryStartFallbackWorker();
+            }
             return false;
         }
     }
@@ -819,10 +1061,183 @@ bool LiveWallpaperSource::ConsumePendingFrame(ID3D11Device* d3d_device,
     return false;
 }
 
+void LiveWallpaperSource::SetInternalVideoMode(bool active) noexcept {
+    if (!impl_) return;
+    if (impl_->internal_video_mode == active) return;
+    impl_->StopCapture();
+    impl_->internal_video_mode = active;
+    if (active) {
+        impl_->backend = LiveCaptureBackend::VideoWallpaperShared;
+        impl_->running = true;
+        impl_->inactive_since_ms = 0;
+    } else {
+        impl_->opened_shared_handle = nullptr;
+        impl_->opened_shared_dev.Reset();
+        impl_->opened_shared_tex.Reset();
+        impl_->opened_shared_km.Reset();
+        impl_->ReleaseGpu();
+        impl_->backend = LiveCaptureBackend::None;
+        impl_->running = false;
+    }
+}
+
+bool LiveWallpaperSource::IsInternalVideoMode() const noexcept {
+    return impl_ && impl_->internal_video_mode;
+}
+
+bool LiveWallpaperSource::ImportSharedVideoTexture(ID3D11Device* d3d_device,
+                                                   ID2D1DeviceContext* d2d_dc,
+                                                   HANDLE shared_nt_handle,
+                                                   uint32_t w,
+                                                   uint32_t h,
+                                                   uint32_t logical_w,
+                                                   uint32_t logical_h,
+                                                   bool need_frost) noexcept {
+    if (!impl_ || !d3d_device || !d2d_dc || !shared_nt_handle || w == 0 || h == 0) return false;
+    if (!impl_->internal_video_mode) {
+        SetInternalVideoMode(true);
+    }
+
+    // Ensure owner_d3d/owner_dc are bound before caching the opened shared resource so
+    // EnsureGpuTargets' device-change ReleaseGpu() cannot wipe opened_shared_tex/km.
+    if (impl_->owner_d3d.Get() != d3d_device || impl_->owner_dc.Get() != d2d_dc) {
+        if (!impl_->EnsureGpuTargets(d3d_device, d2d_dc, w, h)) return false;
+    }
+
+    if (impl_->opened_shared_handle != shared_nt_handle || impl_->opened_shared_dev.Get() != d3d_device ||
+        !impl_->opened_shared_tex || !impl_->opened_shared_km) {
+        impl_->opened_shared_handle = nullptr;
+        impl_->opened_shared_dev.Reset();
+        impl_->opened_shared_tex.Reset();
+        impl_->opened_shared_km.Reset();
+
+        ComPtr<ID3D11Device1> dev1;
+        if (FAILED(d3d_device->QueryInterface(IID_PPV_ARGS(&dev1))) || !dev1) return false;
+        ComPtr<ID3D11Texture2D> shared_tex;
+        if (FAILED(dev1->OpenSharedResource1(shared_nt_handle, IID_PPV_ARGS(&shared_tex))) || !shared_tex) {
+            return false;
+        }
+        ComPtr<IDXGIKeyedMutex> km;
+        if (FAILED(shared_tex.As(&km)) || !km) {
+            return false;
+        }
+        impl_->opened_shared_handle = shared_nt_handle;
+        impl_->opened_shared_dev = d3d_device;
+        impl_->opened_shared_tex = shared_tex;
+        impl_->opened_shared_km = km;
+    }
+
+    D3D11_TEXTURE2D_DESC sd{};
+    impl_->opened_shared_tex->GetDesc(&sd);
+    const uint32_t tw = sd.Width ? sd.Width : w;
+    const uint32_t th = sd.Height ? sd.Height : h;
+    if (!impl_->EnsureGpuTargets(d3d_device, d2d_dc, tw, th)) return false;
+    if (!impl_->opened_shared_tex || !impl_->opened_shared_km || !impl_->gpu_sharp_tex) return false;
+
+    ComPtr<ID3D11DeviceContext> ctx;
+    d3d_device->GetImmediateContext(&ctx);
+    if (!ctx) return false;
+
+    // This runs on the desktop/menu UI thread. Never spend an input frame waiting
+    // for the video device: keep the last complete image until the next publication.
+    if (impl_->opened_shared_km->AcquireSync(0, 0) != S_OK) {
+        return false;
+    }
+    ctx->CopyResource(impl_->gpu_sharp_tex.Get(), impl_->opened_shared_tex.Get());
+    impl_->opened_shared_km->ReleaseSync(0);
+
+    impl_->surf_w = logical_w ? logical_w : tw;
+    impl_->surf_h = logical_h ? logical_h : th;
+    impl_->backend = LiveCaptureBackend::VideoWallpaperShared;
+    impl_->running = true;
+    impl_->frost_valid = false;
+    if (need_frost) {
+        impl_->BakeQuarterFrost(d2d_dc);
+    }
+    impl_->MaybeUpdateAverageLuminance(d3d_device);
+    ++impl_->frames_imported;
+    return true;
+}
+
+bool LiveWallpaperSource::ImportBgraSnapshot(ID3D11Device* d3d_device,
+                                             ID2D1DeviceContext* d2d_dc,
+                                             const uint8_t* bgra,
+                                             uint32_t w,
+                                             uint32_t h,
+                                             uint32_t stride,
+                                             uint32_t logical_w,
+                                             uint32_t logical_h,
+                                             bool need_frost) noexcept {
+    if (!impl_ || !d3d_device || !d2d_dc || !bgra || w == 0 || h == 0) return false;
+    if (!impl_->internal_video_mode) {
+        SetInternalVideoMode(true);
+    }
+
+    // Drop any cross-device shared video texture reference so the player device can
+    // fully release its glass texture VRAM during FreezeAndRelease.
+    impl_->opened_shared_handle = nullptr;
+    impl_->opened_shared_dev.Reset();
+    impl_->opened_shared_tex.Reset();
+    impl_->opened_shared_km.Reset();
+
+    // Cap frozen glass backdrop to 1/4-res (max 960x540 = ~2 MB VRAM instead of 33 MB at 4K).
+    const uint32_t src_pitch = stride ? stride : (w * 4u);
+    uint32_t dst_w = w;
+    uint32_t dst_h = h;
+    std::vector<uint8_t> scaled;
+    const uint8_t* upload_ptr = bgra;
+    UINT upload_pitch = src_pitch;
+    if (w > 960u || h > 540u) {
+        const double s = std::min(960.0 / static_cast<double>(w), 540.0 / static_cast<double>(h));
+        dst_w = std::max(16u, static_cast<uint32_t>(std::lround(static_cast<double>(w) * s)));
+        dst_h = std::max(16u, static_cast<uint32_t>(std::lround(static_cast<double>(h) * s)));
+        scaled.resize(static_cast<size_t>(dst_w) * dst_h * 4u);
+        for (uint32_t y = 0; y < dst_h; ++y) {
+            const uint32_t sy = std::min(h - 1u, static_cast<uint32_t>((static_cast<uint64_t>(y) * h) / dst_h));
+            const uint8_t* srow = bgra + static_cast<size_t>(sy) * src_pitch;
+            uint8_t* drow = scaled.data() + static_cast<size_t>(y) * dst_w * 4u;
+            for (uint32_t x = 0; x < dst_w; ++x) {
+                const uint32_t sx = std::min(w - 1u, static_cast<uint32_t>((static_cast<uint64_t>(x) * w) / dst_w));
+                std::memcpy(drow + static_cast<size_t>(x) * 4u, srow + static_cast<size_t>(sx) * 4u, 4u);
+            }
+        }
+        upload_ptr = scaled.data();
+        upload_pitch = dst_w * 4u;
+    }
+
+    if (!impl_->EnsureGpuTargets(d3d_device, d2d_dc, dst_w, dst_h)) return false;
+
+    ComPtr<ID3D11DeviceContext> ctx;
+    d3d_device->GetImmediateContext(&ctx);
+    if (!ctx) return false;
+
+    ctx->UpdateSubresource(impl_->gpu_sharp_tex.Get(), 0, nullptr, upload_ptr, upload_pitch, 0);
+
+    impl_->surf_w = logical_w ? logical_w : dst_w;
+    impl_->surf_h = logical_h ? logical_h : dst_h;
+    impl_->backend = LiveCaptureBackend::VideoWallpaperShared;
+    impl_->running = true;
+    impl_->frost_valid = false;
+    if (need_frost) {
+        impl_->BakeQuarterFrost(d2d_dc);
+    }
+    impl_->MaybeUpdateAverageLuminance(d3d_device);
+    ++impl_->frames_imported;
+    return true;
+}
+
 void LiveWallpaperSource::ReleaseDeviceResources() noexcept {
     if (!impl_) return;
     impl_->StopCapture();
     impl_->ReleaseGpu();
+}
+
+void LiveWallpaperSource::ResetDesktopBlackFallback() noexcept {
+    if (!impl_) return;
+    impl_->desktop_host_black = false;
+    impl_->desktop_host_verified_nonblack = false;
+    impl_->desktop_host_black_strikes = 0;
+    impl_->last_wgc_fail_ms = 0;
 }
 
 bool LiveWallpaperSource::HasFrame() const noexcept {

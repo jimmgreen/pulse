@@ -92,11 +92,13 @@ void AssignSharedMenuGlassPainter(ui::FluentMenu* menu,
     const uint8_t opacity = glass_cfg.card_opacity_percent;
     const uint8_t disp_tier = model::MapGlassGainToLegacyTier(glass_cfg.glass_dispersion);
     menu->SetMaterialPainter(
-        [source, opacity, disp_tier, glass_cfg](ID2D1DeviceContext* dc, const D2D1_RECT_F& card_px,
+        [menu, source, opacity, disp_tier, glass_cfg](ID2D1DeviceContext* dc, const D2D1_RECT_F& card_px,
                                                  POINT popup_px, float radius_px, bool dark) {
-            return source->DrawMenuMaterial(
+            const bool drawn = source->DrawMenuMaterial(
                 dc, card_px, popup_px, radius_px, model::CardMaterial::LiquidGlass,
                 dark, opacity, disp_tier, &glass_cfg);
+            if (source->MenuUnderlayPending()) menu->RequestMaterialRefresh();
+            return drawn;
         });
 }
 }
@@ -431,6 +433,7 @@ void DesktopOverlayController::ShowPopupEditContextMenu(HWND edit_hwnd, POINT sc
     shared_menu_source_ = backdrop_;
     shared_menu_source_dc_ = backdrop_owner_dc_;
     shared_menu_->SetTheme(dark_mode_, MenuColor(accent_argb_));
+    shared_menu_->SetGlassSurface(liquid_glass || native_acrylic);
     shared_menu_->SetNativeAcrylic(false);
     shared_menu_->SetMaterialPainter({});
     if (liquid_glass) {
@@ -667,13 +670,16 @@ void DesktopOverlayController::PulseButton(ID2D1DeviceContext* dc, float ox, flo
     if (enabled)
         click_regions_.push_back({action, RECT{static_cast<LONG>(r.left), static_cast<LONG>(r.top), static_cast<LONG>(r.right),
                                                static_cast<LONG>(r.bottom)}});
-    if (dc == d2d_dc_.Get() && EnsureUiCompositor()) {
+    // The widgets' and the dock's glass popups use capsule buttons (macOS); other panels keep Pulse's own.
+    const bool capsule = active_kind_ == OverlayKind::WidgetDetail || active_kind_ == OverlayKind::WidgetGalleryDrawer ||
+                         active_kind_ == OverlayKind::DockSystemPanel;
+    if (!capsule && dc == d2d_dc_.Get() && EnsureUiCompositor()) {
         pulse_buttons_.push_back({b, text, primary, hot, enabled});
         return;
     }
     const float dim = enabled ? 1.0f : 0.45f;
-    // Snapshot look-alike of the fluent button: 4 DIP corners, a quiet fill, a slightly darker bottom edge.
-    const float rad = 4.0f;
+    // Snapshot look-alike of the fluent button (4 DIP corners), or a capsule on the glass popups.
+    const float rad = capsule ? (b.bottom - b.top) * 0.5f : 4.0f;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
     auto fill = [&](const D2D1_RECT_F& rc, D2D1_COLOR_F c) {
         brush.Reset();
@@ -691,6 +697,8 @@ void DesktopOverlayController::PulseButton(ID2D1DeviceContext* dc, float ox, flo
         c.a *= dim;
         fill(b, c);
         stroke(b, D2D1::ColorF(1, 1, 1, 0.08f));
+    } else if (capsule) {
+        fill(b, dark_mode_ ? D2D1::ColorF(1, 1, 1, (hot ? 0.24f : 0.16f) * dim) : D2D1::ColorF(0, 0, 0, (hot ? 0.11f : 0.07f) * dim));
     } else {
         fill(b, dark_mode_ ? D2D1::ColorF(1, 1, 1, hot ? 0.083f : 0.061f) : D2D1::ColorF(1, 1, 1, hot ? 0.5f : 0.7f));
         stroke(b, dark_mode_ ? D2D1::ColorF(1, 1, 1, 0.09f) : D2D1::ColorF(0, 0, 0, 0.073f));
@@ -800,6 +808,10 @@ bool DesktopOverlayController::EnsureSharedMenu() {
 
     menu->SetTopmost(false);
     menu->SetActivateOnOpen(true);
+    // macOS menu geometry: 14 DIP corners, a concentric highlight inset 6 DIP, compact rows.
+    menu->SetCornerRadiusDip(14.0f);
+    menu->SetHoverPlate(8.0f, 6.0f);
+    menu->SetRowHeightDip(28.0f);
     shared_menu_ = std::move(menu);
     return true;
 }
@@ -818,11 +830,12 @@ std::vector<ui::FluentMenuItem> DesktopOverlayController::BuildSharedMenuItems()
     // `checked` draws nothing, so each stateful desktop row is mapped to its kind here.
     const auto is_toggle = [](const std::string& id) {
         return id == "toggle-tile-live" || id == "photo-shuffle" || id == "tile-show-title" ||
-               id == "tile-stack-rotate" || id == "toggle-focus";
+               id == "tile-stack-rotate" || id == "toggle-focus" || id == "dock-mag-toggle";
     };
     const auto is_choice = [](const std::string& id) {
         for (const char* prefix : {"photo-interval:", "weather-city:", "tile-stack-sel:", "move-to-group:", "tile-mat:",
-                                   "tile-size:", "note-color:"})
+                                   "tile-size:", "note-color:", "dock-size:", "dock-scale:", "dock-hide:", "dock-minfx:", "dock-pos:",
+                                   "dock-focus-win:"})
             if (id.starts_with(prefix)) return true;
         return id == "move-to-loose" || id == "tile-bg:material" || id == "sub:tile-color" || id == "sub:tile-image";
     };
@@ -898,18 +911,13 @@ void DesktopOverlayController::TrackSharedMenu() {
         ? host_material_ : beautify_settings_.default_material;
     const bool liquid_glass =
         appearance.transparency && material == model::CardMaterial::LiquidGlass && backdrop_ != nullptr;
-    // Transient flyouts use live Acrylic even on wallpaper-only Mica cards.
+    // Acrylic, Mica, and MicaAlt transient menus use real Windows 11 HostBackdrop Acrylic;
     // Solid and the system transparency preference remain explicit opt-outs.
     const bool native_acrylic =
         appearance.transparency && material != model::CardMaterial::Solid && !liquid_glass;
-    // Over a dark wallpaper a light flyout's thin material leaves dark text unreadable: the menu takes the
-    // dark theme there (and the light one over a bright wallpaper in dark mode is not needed: white on dark wins).
-    bool menu_dark = dark_mode_;
-    if (!menu_dark && (native_acrylic || liquid_glass) && backdrop_) {
-        const float x = static_cast<float>(menu_spec_.screen_anchor.x), y = static_cast<float>(menu_spec_.screen_anchor.y);
-        const float wall = backdrop_->AverageLuminance(D2D1::RectF(x, y, x + 280.0f, y + 360.0f));
-        menu_dark = wall >= 0.0f && wall < 0.10f;
-    }
+    // Both Liquid Glass menus and Win11 Acrylic menus now clamp backdrop luminance into the active
+    // theme's readable band (matching WacOS and Fluent 2), so menu theme follows dark_mode_ stably.
+    const bool menu_dark = dark_mode_;
     const uint64_t key = BuildSharedMenuMaterialKey(
         native_acrylic, menu_dark, liquid_glass, beautify_settings_, scale_);
     if (shared_menu_ && (shared_menu_material_key_ != key || shared_menu_source_ != backdrop_ ||
@@ -919,6 +927,7 @@ void DesktopOverlayController::TrackSharedMenu() {
     shared_menu_source_ = backdrop_;
     shared_menu_source_dc_ = backdrop_owner_dc_;
     shared_menu_->SetTheme(menu_dark, MenuColor(accent_argb_));
+    shared_menu_->SetGlassSurface(liquid_glass || native_acrylic);
     shared_menu_->SetNativeAcrylic(false);
     shared_menu_->SetMaterialPainter({});
     const POINT anchor_px{ToPx(menu_spec_.screen_anchor.x), ToPx(menu_spec_.screen_anchor.y)};
@@ -978,7 +987,9 @@ bool DesktopOverlayController::SaveContextMenuSnapshot(const wchar_t* path, cons
     shared_menu_->SetTheme(dark, MenuColor(accent_argb_));
     const auto material = settings.default_material == model::CardMaterial::FollowHost
         ? host_material_ : settings.default_material;
-    if (material == model::CardMaterial::LiquidGlass && backdrop_ != nullptr) {
+    const bool use_glass = (material == model::CardMaterial::LiquidGlass) && backdrop_ != nullptr;
+    shared_menu_->SetGlassSurface(use_glass || material != model::CardMaterial::Solid);
+    if (use_glass) {
         const POINT anchor_px{ToPx(spec.screen_anchor.x), ToPx(spec.screen_anchor.y)};
         if (callbacks_.on_prepare_menu_underlay) callbacks_.on_prepare_menu_underlay(anchor_px);
         AssignSharedMenuGlassPainter(shared_menu_.get(), backdrop_, settings);
