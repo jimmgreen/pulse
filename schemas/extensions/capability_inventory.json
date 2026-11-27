@@ -907,6 +907,27 @@
       "publicId": null
     },
     {
+      "internalActionId": "git.sync",
+      "internalRisk": "External",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "git.branches",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "git.history",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
       "internalActionId": "toolbar.open_with",
       "internalRisk": "External",
       "riskDependsOnTarget": false,
