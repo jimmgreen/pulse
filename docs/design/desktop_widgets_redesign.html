@@ -1,0 +1,1328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>桌面整理 · 小组件重设计</title>
+<style>
+:root{
+  --ui:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","PingFang SC",sans-serif;
+  --disp:"Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI",sans-serif;
+  --red:#FF3B30; --orange:#FF9500; --amber:#FF9F0A; --green:#30D158; --sun:#FFD60A; --drop:#63C7FF;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font-family:var(--ui);background:#111;color:#eee;overflow:hidden}
+button{font:inherit;color:inherit}
+
+/* ---------- mockup chrome (not part of Pulse) ---------- */
+.bar{position:fixed;inset:0 0 auto 0;height:48px;display:flex;align-items:center;gap:18px;padding:0 16px;
+  background:rgba(18,18,20,.86);backdrop-filter:blur(20px);border-bottom:1px solid rgba(255,255,255,.07);z-index:50;font-size:12.5px;color:#c9c9cc}
+.bar b{color:#fff;font-weight:600;font-size:13px;margin-right:4px}
+.seg{display:inline-flex;background:rgba(255,255,255,.07);border-radius:7px;padding:2px;gap:2px}
+.seg button{border:0;background:transparent;padding:4px 10px;border-radius:5px;cursor:pointer;color:#bdbdc2;font-size:12px}
+.seg button.on{background:rgba(255,255,255,.16);color:#fff}
+.bar .grp{display:flex;align-items:center;gap:6px}
+.bar .grp>span{color:#8a8a90}
+.bar .sp{flex:1}
+main{position:absolute;inset:48px 0 0 0}
+.view{position:absolute;inset:0;display:none}
+.view.on{display:block}
+
+/* ---------- wallpaper ---------- */
+.wall{position:absolute;inset:0;overflow:hidden}
+.wall svg{width:100%;height:100%;display:block}
+
+/* ---------- desktop view ---------- */
+#v-desktop .fit{position:absolute;left:50%;top:50%;transform-origin:0 0}
+.desk{position:relative;width:1600px;height:960px;overflow:hidden;border-radius:6px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+.taskbar{position:absolute;left:0;right:0;bottom:0;height:48px;background:rgba(32,32,34,.72);backdrop-filter:blur(30px) saturate(1.5);
+  border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;justify-content:center;gap:6px}
+.taskbar i{width:36px;height:36px;border-radius:6px;display:block;background:rgba(255,255,255,.08)}
+.taskbar i.win{background:none;display:grid;grid-template-columns:1fr 1fr;gap:2px;padding:10px}
+.taskbar i.win s{background:#4cc2ff;border-radius:1px}
+.taskbar .tray{position:absolute;right:14px;font-size:12px;color:#fff;text-align:right;line-height:1.35}
+.board{position:absolute}
+.hint{position:absolute;left:28px;top:24px;width:420px;color:#fff;font-size:13px;line-height:1.6;text-shadow:0 1px 3px rgba(0,0,0,.45)}
+.hint h2{font:600 22px/1.3 var(--disp);margin:0 0 6px}
+.hint p{margin:0 0 4px;opacity:.88}
+.hint kbd{font:600 11px var(--ui);background:rgba(255,255,255,.18);border-radius:4px;padding:1px 5px}
+
+/* ---------- widget base ---------- */
+.w{position:absolute;border-radius:22px;overflow:hidden;color:var(--ink);font-family:var(--ui);
+  -webkit-font-smoothing:antialiased;user-select:none;transition:transform .18s cubic-bezier(.2,.8,.2,1)}
+.w[data-size="1x1"]{border-radius:20px}
+.w .wc{position:absolute;inset:0;padding:14px}
+.w[data-size="1x1"] .wc{padding:11px}
+.w .bgl{position:absolute;inset:0}
+.w:active{transform:scale(.985)}
+.num{font-variant-numeric:tabular-nums}
+
+/* materials: one recipe, three inks */
+.w.m-dark{--ink:#fff;--ink2:rgba(255,255,255,.62);--ink3:rgba(255,255,255,.38);--hair:rgba(255,255,255,.13);--track:rgba(255,255,255,.16);--fill:rgba(255,255,255,.12);--fill2:rgba(255,255,255,.2);
+  background:rgba(28,28,30,.42);backdrop-filter:blur(30px) saturate(1.7);
+  box-shadow:inset 0 0 0 .5px rgba(255,255,255,.17),inset 0 1px 0 rgba(255,255,255,.08),0 14px 34px -12px rgba(0,0,0,.45)}
+.w.m-light{--ink:#1d1d1f;--ink2:rgba(0,0,0,.54);--ink3:rgba(0,0,0,.32);--hair:rgba(0,0,0,.08);--track:rgba(0,0,0,.09);--fill:rgba(0,0,0,.06);--fill2:rgba(0,0,0,.1);
+  background:rgba(250,250,248,.64);backdrop-filter:blur(30px) saturate(1.8);
+  box-shadow:inset 0 0 0 .5px rgba(255,255,255,.75),0 14px 34px -12px rgba(0,0,0,.32)}
+.w.m-tint{--ink:#fff;--ink2:rgba(255,255,255,.72);--ink3:rgba(255,255,255,.46);--hair:rgba(255,255,255,.18);--track:rgba(255,255,255,.22);--fill:rgba(255,255,255,.16);--fill2:rgba(255,255,255,.26);
+  background:color-mix(in srgb,var(--tint) 64%,rgba(16,16,18,.35));backdrop-filter:blur(30px) saturate(1.6);
+  box-shadow:inset 0 0 0 .5px rgba(255,255,255,.22),0 14px 34px -12px rgba(0,0,0,.45)}
+.w.fx-solid{backdrop-filter:none}
+.w.fx-solid.m-dark{background:#1c1c1e}
+.w.fx-solid.m-light{background:#fff}
+.w.fx-solid.m-tint{background:var(--tint)}
+.w.sky{--ink:#fff;--ink2:rgba(255,255,255,.78);--ink3:rgba(255,255,255,.5);--hair:rgba(255,255,255,.22);--track:rgba(255,255,255,.22);--fill:rgba(255,255,255,.18)}
+.w.paper{--ink:#3a3320;--ink2:rgba(58,51,32,.6);--ink3:rgba(58,51,32,.38)}
+.w.paper.pd{--ink:#f3eedc;--ink2:rgba(243,238,220,.62);--ink3:rgba(243,238,220,.36)}
+.w.photo{--ink:#fff;--ink2:rgba(255,255,255,.8)}
+
+/* type scale */
+.t-lab{font:600 12px/16px var(--ui);color:var(--ink2)}
+.t-cap{font:500 11px/14px var(--ui);color:var(--ink2)}
+.t-body{font:600 13px/17px var(--ui)}
+.t-red{color:var(--red)}
+.t-hero{font:300 46px/1 var(--disp);letter-spacing:-.025em}
+.ellip{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row{display:flex;align-items:center;gap:8px}
+.col{display:flex;flex-direction:column}
+.abs{position:absolute}
+.bar-t{height:4px;border-radius:2px;background:var(--track);overflow:hidden}
+.bar-t>i{display:block;height:100%;border-radius:2px;background:var(--ink)}
+.dots{position:absolute;right:6px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:4px}
+.dots i{width:4px;height:4px;border-radius:50%;background:var(--ink3)}
+.dots i.on{background:var(--ink)}
+.ibtn{width:30px;height:30px;border-radius:50%;border:0;background:var(--fill);display:grid;place-items:center;cursor:pointer;color:var(--ink);padding:0}
+.ibtn:hover{background:var(--fill2)}
+.ibtn.plain{background:transparent}
+.skel{background:var(--fill);border-radius:5px}
+.skel.anim{animation:sk 1.4s ease-in-out infinite}
+@keyframes sk{50%{opacity:.45}}
+.empty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:6px;padding:16px;color:var(--ink2)}
+.empty b{color:var(--ink);font:600 13px var(--ui)}
+.empty span{font-size:11.5px;line-height:1.45}
+.fileic{flex:none}
+.todo-i{display:flex;align-items:center;gap:9px;height:26px;cursor:pointer}
+.todo-i .c{width:17px;height:17px;border-radius:50%;border:1.5px solid var(--ink3);flex:none;display:grid;place-items:center}
+.todo-i.done .c{background:var(--tint,#0A84FF);border-color:transparent}
+.todo-i.done span{color:var(--ink3);text-decoration:line-through}
+.todo-i span{font:500 13px/17px var(--ui)}
+.pill{height:30px;padding:0 14px;border-radius:15px;border:0;background:var(--fill);color:var(--ink);font:600 12.5px var(--ui);display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.pill:hover{background:var(--fill2)}
+.chipkey{font:600 10.5px var(--ui);padding:1px 5px;border-radius:4px;background:var(--fill);color:var(--ink2)}
+
+/* ---------- gallery ---------- */
+#v-gallery .wall{position:fixed;top:48px}
+#v-gallery .scroll{position:absolute;inset:0;overflow:auto;padding:28px 40px 80px}
+.gsec{margin:0 auto 34px;max-width:1500px}
+.gsec .gh{display:inline-block;background:rgba(10,10,14,.42);backdrop-filter:blur(14px);border-radius:8px;padding:7px 12px 8px;margin:0 0 12px}
+.gsec h3{font:600 15px var(--disp);color:#fff;margin:0 0 2px}
+.gsec .gd{font-size:12px;color:rgba(255,255,255,.8);margin:0}
+.gsec .gl{display:flex;flex-wrap:wrap;align-items:flex-start;gap:18px}
+.gitem{display:flex;flex-direction:column;gap:6px}
+.gitem .wbox{position:relative}
+.gitem .wbox .w{position:relative}
+.gitem label{align-self:flex-start;font-size:11px;color:#fff;background:rgba(10,10,14,.4);border-radius:4px;padding:0 6px;line-height:17px}
+.gintro{max-width:1500px;margin:0 auto 26px;color:#fff;background:rgba(10,10,14,.45);backdrop-filter:blur(16px);border-radius:12px;padding:16px 20px}
+.gintro h2{font:600 24px var(--disp);margin:0 0 8px}
+.gintro ol{margin:0;padding-left:20px;font-size:13px;line-height:1.75;opacity:.92;columns:2;column-gap:40px}
+
+/* ---------- context menu & edit sheet (Pulse flyout tokens) ---------- */
+.menu{position:fixed;z-index:80;min-width:220px;padding:4px;border-radius:8px;font:13px var(--ui);display:none}
+body.pt-dark .menu,body.pt-dark .sheet{background:rgba(44,44,44,.96);color:#fff;box-shadow:0 8px 32px rgba(0,0,0,.45),inset 0 0 0 1px rgba(255,255,255,.08)}
+body.pt-light .menu,body.pt-light .sheet{background:rgba(249,249,249,.98);color:#1b1b1b;box-shadow:0 8px 32px rgba(0,0,0,.18),inset 0 0 0 1px rgba(0,0,0,.06)}
+.menu .mi{height:32px;display:flex;align-items:center;gap:10px;padding:0 12px;border-radius:4px;cursor:default;position:relative}
+.menu .mi:hover{background:var(--mh)}
+body.pt-dark{--mh:rgba(255,255,255,.08)}
+body.pt-light{--mh:rgba(0,0,0,.05)}
+.menu .mi .k{margin-left:auto;opacity:.55;font-size:12px}
+.menu .ms{height:1px;margin:4px 0;background:currentColor;opacity:.1}
+.menu .mi svg{opacity:.85}
+.menu .mi.danger{color:#ff6b5e}
+body.pt-light .menu .mi.danger{color:#c42b1c}
+.sizes{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;padding:6px 8px 8px}
+.sizes button{border:0;background:var(--mh);border-radius:6px;padding:6px 0 4px;display:flex;flex-direction:column;align-items:center;gap:3px;font-size:10.5px;cursor:pointer;opacity:.9}
+.sizes button.on{outline:1.5px solid #4cc2ff}
+.sizes button i{display:block;border:1.5px solid currentColor;border-radius:3px;opacity:.7}
+.sheet{position:fixed;z-index:79;width:300px;border-radius:12px;padding:16px;display:none;font:13px var(--ui)}
+.sheet h4{margin:0 0 2px;font:600 15px var(--disp)}
+.sheet .sd{font-size:12px;opacity:.62;margin-bottom:12px}
+.sheet .f{margin:0 0 12px}
+.sheet .f>div:first-child{font-size:12px;opacity:.75;margin-bottom:6px}
+.sheet .foot{display:flex;justify-content:flex-end;gap:8px;margin-top:6px}
+
+/* ---------- Pulse settings window ---------- */
+#v-settings{background:var(--pbg2)}
+body.pt-dark{--pbg:#1A1A1A;--pbg2:#141414;--psheet:#202020;--pcard:#272727;--pstroke:rgba(255,255,255,.06);--ptext:#fff;--ptext2:rgba(255,255,255,.61);--ptext3:rgba(255,255,255,.4);--pinput:rgba(255,255,255,.06);--pinput2:rgba(255,255,255,.09);--pdiv:rgba(255,255,255,.06);--psel:rgba(76,194,255,.12);--pacc:#4CC2FF;--paccfill:#4CC2FF;--paccink:#000;--phover:rgba(255,255,255,.05)}
+body.pt-light{--pbg:#F3F5F1;--pbg2:#E6EAE3;--psheet:#F7F8F4;--pcard:#FFFFFF;--pstroke:#DCE3D9;--ptext:#303B50;--ptext2:#66748A;--ptext3:#929CAE;--pinput:rgba(255,255,255,.9);--pinput2:#fff;--pdiv:rgba(82,125,112,.12);--psel:rgba(0,120,212,.095);--pacc:#0067C0;--paccfill:#0067C0;--paccink:#fff;--phover:rgba(82,125,112,.055)}
+.pwin{position:absolute;inset:18px 24px;border-radius:8px;overflow:hidden;background:var(--pbg);color:var(--ptext);box-shadow:0 18px 50px rgba(0,0,0,.4),0 0 0 1px var(--pstroke);display:flex;flex-direction:column}
+.ptitle{height:44px;display:flex;align-items:center;gap:10px;padding:0 14px;flex:none}
+.ptitle .lg{width:22px;height:22px}
+.ptitle .nm{font-weight:600;font-size:13px}
+.ptitle .tab{margin-left:14px;height:32px;padding:0 16px;display:flex;align-items:center;gap:8px;border-radius:7px 7px 0 0;font-size:12.5px;color:var(--ptext2)}
+.ptitle .tab.on{background:var(--psheet);color:var(--ptext)}
+.ptitle .wc{margin-left:auto;display:flex;gap:26px;color:var(--ptext2);font-size:12px;padding-right:6px}
+.pbody{flex:1;display:flex;min-height:0;background:var(--psheet)}
+.pnav{width:244px;flex:none;padding:12px 8px;overflow:hidden;display:flex;flex-direction:column}
+.pnav .srch{margin:2px 8px 10px;height:32px;border-radius:5px;background:var(--pinput);border:1px solid var(--pstroke);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:12.5px;color:var(--ptext3)}
+.pnav .gh{font-size:11.5px;color:var(--ptext2);padding:10px 14px 4px}
+.pnav .ni{height:36px;display:flex;align-items:center;gap:12px;padding:0 14px;border-radius:6px;font-size:13px;position:relative;color:var(--ptext)}
+.pnav .ni svg{opacity:.8}
+.pnav .ni.on{background:var(--psel)}
+.pnav .ni.on::before{content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--pacc)}
+.pnav .ver{margin-top:auto;font-size:11.5px;color:var(--ptext2);padding:8px 14px}
+.pcontent{flex:1;overflow:auto;padding:20px 28px 60px 24px}
+.pgrid{display:flex;gap:20px;align-items:flex-start;max-width:1300px}
+.pmain{flex:1;min-width:0}
+.pside{width:462px;flex:none;position:sticky;top:0}
+.crumb{font:600 26px/1.25 var(--disp);margin:0 0 4px;display:flex;align-items:center;gap:10px}
+.crumb span{color:var(--ptext2);font-weight:400}
+.pintro{font-size:13px;color:var(--ptext2);margin:0 0 16px}
+.psel{display:flex;align-items:center;gap:12px;margin-bottom:14px;font-size:13px}
+.pselect{height:32px;min-width:200px;border-radius:5px;background:var(--pinput);border:1px solid var(--pstroke);display:flex;align-items:center;padding:0 10px;gap:8px}
+.pselect svg{margin-left:auto;opacity:.6}
+.psec{font:600 14px var(--ui);margin:18px 0 8px}
+.pcard{background:var(--pcard);border-radius:7px;box-shadow:0 0 0 1px var(--pstroke)}
+.prow{display:flex;align-items:center;gap:16px;padding:14px 18px;min-height:64px}
+.prow+.prow{border-top:1px solid var(--pdiv)}
+.prow .tx{flex:1;min-width:0}
+.prow .tt{font-size:13.5px}
+.prow .dd{font-size:12px;color:var(--ptext2);margin-top:2px;line-height:1.45}
+.prow.stack{flex-direction:column;align-items:stretch;gap:10px}
+.pseg{display:inline-flex;background:var(--pinput);border:1px solid var(--pstroke);border-radius:6px;padding:3px;gap:2px;flex:none}
+.pseg button{border:0;background:transparent;height:28px;padding:0 14px;border-radius:4px;font-size:12.5px;cursor:pointer;color:var(--ptext);position:relative;white-space:nowrap}
+.pseg button.on{background:var(--pcard);box-shadow:0 0 0 1px var(--pstroke),0 1px 2px rgba(0,0,0,.08);font-weight:600}
+.pseg button.on::after{content:"";position:absolute;left:50%;bottom:2px;width:14px;height:3px;margin-left:-7px;border-radius:2px;background:var(--pacc)}
+.psw{width:40px;height:20px;border-radius:10px;border:1px solid var(--ptext2);position:relative;cursor:pointer;flex:none;background:transparent}
+.psw::after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;left:3px;top:3px;background:var(--ptext2);transition:left .15s}
+.psw.on{background:var(--paccfill);border-color:var(--paccfill)}
+.psw.on::after{left:23px;background:var(--paccink);width:12px}
+.pin{height:32px;border-radius:5px;background:var(--pinput);border:1px solid var(--pstroke);border-bottom-color:var(--ptext3);padding:0 10px;font:13px var(--ui);color:var(--ptext);outline:none;width:220px}
+.pin:focus{border-bottom:2px solid var(--pacc)}
+.pbtn{height:32px;padding:0 14px;border-radius:5px;border:1px solid var(--pstroke);background:var(--pinput2);font-size:12.5px;cursor:pointer;color:var(--ptext);display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.pbtn.pri{background:var(--paccfill);color:var(--paccink);border-color:transparent}
+.ptabs{display:flex;gap:4px;padding:10px 12px 0;border-bottom:1px solid var(--pdiv);overflow-x:auto}
+.ptabs button{border:0;background:transparent;height:34px;padding:0 12px;font-size:13px;color:var(--ptext2);cursor:pointer;position:relative;white-space:nowrap;display:flex;align-items:center;gap:7px}
+.ptabs button.on{color:var(--ptext);font-weight:600}
+.ptabs button.on::after{content:"";position:absolute;left:12px;right:12px;bottom:-1px;height:3px;border-radius:2px;background:var(--pacc)}
+.optcards{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.optc{border-radius:7px;box-shadow:0 0 0 1px var(--pstroke);padding:8px 8px 9px;cursor:pointer;display:flex;flex-direction:column;gap:7px;align-items:center;font-size:12.5px;background:var(--pinput)}
+.optc.on{box-shadow:0 0 0 2px var(--pacc)}
+.optc .pv{width:100%;height:74px;border-radius:5px;position:relative;overflow:hidden}
+.swatches{display:flex;gap:8px;flex-wrap:wrap}
+.swatches button{width:26px;height:26px;border-radius:50%;border:0;cursor:pointer;box-shadow:inset 0 0 0 1px rgba(0,0,0,.12)}
+.swatches button.on{box-shadow:0 0 0 2px var(--pcard),0 0 0 4px var(--pacc)}
+.swatches .auto{width:auto;border-radius:13px;padding:0 10px;font-size:12px;background:var(--pinput);color:var(--ptext);box-shadow:0 0 0 1px var(--pstroke)}
+.swatches .auto.on{box-shadow:0 0 0 2px var(--pacc)}
+.chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.chip{height:30px;border-radius:15px;padding:0 6px 0 12px;display:inline-flex;align-items:center;gap:6px;background:var(--pinput);box-shadow:0 0 0 1px var(--pstroke);font-size:12.5px}
+.chip small{color:var(--ptext2);font-size:11.5px}
+.chip button{border:0;background:transparent;width:20px;height:20px;border-radius:50%;cursor:pointer;color:var(--ptext2);display:grid;place-items:center;padding:0}
+.chip button:hover{background:var(--phover)}
+.chip.add{padding:0 12px;cursor:pointer;color:var(--pacc)}
+.pcheck{display:inline-flex;align-items:center;gap:8px;font-size:13px;margin-right:18px;cursor:pointer}
+.pcheck i{width:18px;height:18px;border-radius:4px;border:1px solid var(--ptext2);display:grid;place-items:center}
+.pcheck.on i{background:var(--paccfill);border-color:var(--paccfill);color:var(--paccink)}
+.pslider{display:flex;flex-direction:column;gap:4px;width:300px;flex:none}
+.pslider input{width:100%;accent-color:var(--pacc)}
+.pslider .st{display:flex;justify-content:space-between;font-size:11px;color:var(--ptext2)}
+.pslider .cur{font-size:12px;color:var(--ptext);text-align:right}
+.preview{border-radius:8px;overflow:hidden;position:relative;height:auto}
+.preview .wall{position:absolute;inset:0}
+.preview .pvin{position:relative;padding:16px;display:flex;flex-wrap:wrap;gap:12px;justify-content:center}
+.preview .pvin .w{position:relative}
+.pvcap{font-size:12px;color:var(--ptext2);margin:8px 2px 0;line-height:1.5}
+.pnew{display:inline-block;font:600 10px var(--ui);color:var(--pacc);border:1px solid var(--pacc);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:2px}
+.pmuted{opacity:.5;pointer-events:none}
+
+/* ---------- liquid glass (the widgets' default effect) ---------- */
+.w.fx-liquid.m-dark{background:rgba(18,18,24,.20);backdrop-filter:blur(7px) saturate(1.9) brightness(.92);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.38),inset 0 0 0 1px rgba(255,255,255,.13),inset 0 -14px 24px -18px rgba(255,255,255,.35),inset 10px 0 18px -16px rgba(255,255,255,.25),0 14px 34px -12px rgba(0,0,0,.5)}
+.w.fx-liquid.m-light{background:rgba(255,255,255,.30);backdrop-filter:blur(7px) saturate(1.9) brightness(1.06);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.85),inset 0 0 0 1px rgba(255,255,255,.45),inset 0 -14px 24px -18px rgba(255,255,255,.6),0 14px 34px -12px rgba(0,0,0,.28)}
+.w.fx-liquid.m-tint{background:color-mix(in srgb,var(--tint) 50%,rgba(16,16,18,.15));backdrop-filter:blur(7px) saturate(1.8);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.4),inset 0 0 0 1px rgba(255,255,255,.18),0 14px 34px -12px rgba(0,0,0,.45)}
+
+/* ---------- Dock view ---------- */
+#v-dock .fit{position:absolute;left:50%;top:50%;transform-origin:center}
+.gl-dark{--ink:#fff;--ink2:rgba(255,255,255,.64);--ink3:rgba(255,255,255,.4);--hair:rgba(255,255,255,.14);--track:rgba(255,255,255,.18);--fill:rgba(255,255,255,.10);--fill2:rgba(255,255,255,.2);--on:#fff;--on-ink:#1d1d1f}
+.gl-light{--ink:#1d1d1f;--ink2:rgba(0,0,0,.55);--ink3:rgba(0,0,0,.34);--hair:rgba(0,0,0,.09);--track:rgba(0,0,0,.1);--fill:rgba(0,0,0,.05);--fill2:rgba(0,0,0,.1);--on:#1d1d1f;--on-ink:#fff}
+.dock{position:absolute;display:flex;align-items:flex-end;gap:7px;padding:8px 10px;border-radius:26px;color:var(--ink);font-family:var(--ui);user-select:none;z-index:5}
+.dock.gl-dark{background:rgba(20,20,26,.16);backdrop-filter:blur(8px) saturate(1.9) brightness(.95);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.42),inset 0 0 0 1px rgba(255,255,255,.14),inset 0 -16px 26px -20px rgba(255,255,255,.4),0 18px 40px -14px rgba(0,0,0,.55)}
+.dock.gl-light{background:rgba(255,255,255,.32);backdrop-filter:blur(8px) saturate(1.9) brightness(1.06);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.9),inset 0 0 0 1px rgba(255,255,255,.5),0 18px 40px -14px rgba(0,0,0,.3)}
+.dock.bottom{left:50%;bottom:10px;transform:translateX(-50%)}
+.dock.left,.dock.right{flex-direction:column;align-items:center;top:50%;transform:translateY(-50%);padding:10px 8px}
+.dock.left{left:10px}.dock.right{right:10px}
+.dk-app{width:48px;height:48px;position:relative;flex:none;transition:transform .14s cubic-bezier(.2,.8,.2,1);transform-origin:50% 100%;cursor:default}
+.dock.left .dk-app{transform-origin:0 50%}.dock.right .dk-app{transform-origin:100% 50%}
+.dk-app .ico{width:100%;height:100%;border-radius:13px;display:grid;place-items:center;color:#fff;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.28),0 3px 8px rgba(0,0,0,.25)}
+.dk-app .run{position:absolute;bottom:-6px;left:50%;width:4px;height:4px;margin-left:-2px;border-radius:50%;background:var(--ink);opacity:.85}
+.dock.left .dk-app .run{bottom:auto;left:-6px;top:50%;margin:-2px 0 0}.dock.right .dk-app .run{bottom:auto;left:auto;right:-6px;top:50%;margin:-2px 0 0}
+.dk-badge{position:absolute;top:-5px;right:-5px;min-width:19px;height:19px;padding:0 5px;border-radius:10px;background:#FF3B30;color:#fff;font:600 11px/19px var(--ui);text-align:center;box-shadow:0 0 0 1.5px rgba(0,0,0,.15)}
+.dk-sep{width:1px;height:40px;background:var(--hair);margin:0 3px 4px;align-self:center;flex:none}
+.dock.left .dk-sep,.dock.right .dk-sep{width:40px;height:1px;margin:3px 0}
+/* the system area: tray apps and status, one quieter group at the end */
+.dk-sys{display:flex;align-items:center;gap:2px;height:48px;padding:0 4px;border-radius:15px;background:var(--fill);flex:none}
+.dock.left .dk-sys,.dock.right .dk-sys{flex-direction:column;height:auto;width:48px;padding:4px 0}
+.dk-st{min-width:32px;height:40px;padding:0 5px;border-radius:11px;display:flex;align-items:center;justify-content:center;gap:4px;cursor:pointer;position:relative;font:600 12px var(--ui);color:var(--ink)}
+.dock.left .dk-st,.dock.right .dk-st{width:40px;min-width:0;height:34px;padding:0}
+.dk-st:hover,.dk-st.open{background:var(--fill2)}
+.dk-st .mini{position:absolute;top:-3px;right:-3px;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#FF3B30;color:#fff;font:600 9px/14px var(--ui)}
+.dk-tray{width:30px;height:40px;display:grid;place-items:center;border-radius:10px;cursor:pointer;position:relative}
+.dk-tray:hover,.dk-tray.open{background:var(--fill2)}
+.dk-tray .tico{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;color:#fff}
+.dk-time{display:flex;flex-direction:column;align-items:center;line-height:1.15;padding:0 6px}
+.dk-time b{font:600 13px var(--disp)}.dk-time span{font:500 10.5px var(--ui);color:var(--ink2)}
+.ime{font:700 13px var(--ui);width:20px;text-align:center}
+.dk-tip{position:absolute;bottom:calc(100% + 14px);left:50%;transform:translateX(-50%);white-space:nowrap;padding:4px 10px;border-radius:8px;font:500 12px var(--ui);pointer-events:none;opacity:0;transition:opacity .12s}
+.dk-app:hover .dk-tip,.dk-st:hover .dk-tip,.dk-tray:hover .dk-tip{opacity:1}
+.dock.gl-dark .dk-tip{background:rgba(30,30,34,.82);color:#fff;backdrop-filter:blur(20px)}
+.dock.gl-light .dk-tip{background:rgba(255,255,255,.9);color:#1d1d1f;box-shadow:0 2px 10px rgba(0,0,0,.12)}
+.dock.left .dk-tip{bottom:auto;top:50%;left:calc(100% + 14px);transform:translateY(-50%)}
+.dock.right .dk-tip{bottom:auto;top:50%;left:auto;right:calc(100% + 14px);transform:translateY(-50%)}
+/* panels that open from the system area */
+.dk-panel{position:absolute;width:312px;border-radius:22px;padding:14px;color:var(--ink);font-family:var(--ui);z-index:6;animation:pop .16s cubic-bezier(.2,.8,.2,1)}
+@keyframes pop{from{opacity:0;transform:translateY(6px) scale(.98)}to{opacity:1;transform:none}}
+.dk-panel.gl-dark{background:rgba(26,26,32,.56);backdrop-filter:blur(34px) saturate(1.9);box-shadow:inset 0 1px 0 rgba(255,255,255,.3),inset 0 0 0 1px rgba(255,255,255,.12),0 24px 60px -18px rgba(0,0,0,.6)}
+.dk-panel.gl-light{background:rgba(250,250,250,.74);backdrop-filter:blur(34px) saturate(1.9);box-shadow:inset 0 1px 0 #fff,inset 0 0 0 1px rgba(255,255,255,.6),0 24px 60px -18px rgba(0,0,0,.3)}
+.dk-panel h5{margin:0;font:600 15px var(--disp);display:flex;align-items:center;justify-content:space-between}
+.dk-panel .sub{font-size:12px;color:var(--ink2);margin:2px 0 10px}
+.dk-row{display:flex;align-items:center;gap:10px;min-height:42px;padding:0 8px;border-radius:12px;cursor:pointer;font:500 13px var(--ui)}
+.dk-row:hover{background:var(--fill)}
+.dk-row .r-ic{width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:var(--fill2);flex:none}
+.dk-row.on .r-ic{background:var(--on);color:var(--on-ink)}
+.dk-row .r-tx{flex:1;min-width:0}.dk-row .r-tx small{display:block;font-size:11.5px;color:var(--ink2)}
+.dk-row .r-end{font-size:12px;color:var(--ink2)}
+.dk-hr{height:1px;background:var(--hair);margin:8px 4px}
+.dk-link{display:block;padding:8px;border-radius:10px;font:500 12.5px var(--ui);color:var(--ink2);cursor:pointer}
+.dk-link:hover{background:var(--fill)}
+.tg{width:42px;height:24px;border-radius:12px;background:var(--track);position:relative;flex:none;cursor:pointer;transition:background .15s}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:18px;height:18px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:left .15s}
+.tg.on{background:#34C759}.tg.on::after{left:21px}
+.sl{display:flex;align-items:center;gap:10px;padding:4px 8px 8px}
+.sl .bar{flex:1;height:26px;border-radius:13px;background:var(--track);position:relative;overflow:hidden;cursor:pointer}
+.sl .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--on);border-radius:13px}
+.sl .bar svg{position:absolute;left:8px;top:5px;mix-blend-mode:difference;color:#fff}
+.tray-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.tray-grid .tg-i{display:flex;flex-direction:column;align-items:center;gap:5px;padding:8px 2px;border-radius:12px;cursor:pointer;font:500 11px var(--ui);position:relative}
+.tray-grid .tg-i:hover{background:var(--fill)}
+.tray-grid .tg-i .tico{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;color:#fff}
+.tray-grid .pinmark{position:absolute;top:5px;left:9px;width:14px;height:14px;border-radius:50%;box-shadow:inset 0 0 0 1.5px var(--ink3);cursor:pointer}
+.tray-grid .pinmark.on{background:var(--ink);box-shadow:none}
+.tray-grid .pinmark:hover{box-shadow:inset 0 0 0 1.5px var(--ink)}
+.cal7{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;font:600 11.5px var(--ui);row-gap:2px}
+.cal7 span{height:26px;display:grid;place-items:center}
+.cal7 .h{color:var(--ink3);font-size:10px;height:18px}
+.cal7 .t{background:#FF3B30;color:#fff;border-radius:50%;width:24px;height:24px;margin:auto}
+.osd{position:absolute;left:50%;transform:translateX(-50%);padding:8px 14px;border-radius:14px;font:600 12.5px var(--ui);display:flex;align-items:center;gap:10px;z-index:7;pointer-events:none}
+.osd .bar{width:120px;height:5px;border-radius:3px;background:var(--track);overflow:hidden}.osd .bar i{display:block;height:100%;background:var(--ink)}
+.dnote{position:absolute;left:28px;top:24px;width:430px;padding:16px 18px;border-radius:16px;color:#fff;background:rgba(10,10,16,.42);backdrop-filter:blur(16px);font-size:12.5px;line-height:1.65;z-index:4}
+.dnote h2{margin:0 0 6px;font:600 20px var(--disp)}
+.dnote li{margin:2px 0}
+.dnote ol{margin:6px 0 0;padding-left:18px}
+.dnote .k{font:600 11px var(--ui);background:rgba(255,255,255,.16);border-radius:4px;padding:0 5px}
+</style>
+</head>
+<body class="pt-dark">
+
+<div class="bar">
+  <b>小组件重设计</b>
+  <div class="seg" id="c-view"><button data-v="desktop">桌面</button><button data-v="gallery">全部小组件</button><button data-v="settings">设置页</button><button data-v="dock">Dock</button></div>
+  <div class="grp"><span>主题</span><div class="seg" id="c-theme"><button data-v="dark">深色</button><button data-v="light">浅色</button></div></div>
+  <div class="grp"><span>小组件配色</span><div class="seg" id="c-scheme"><button data-v="auto">跟随主题</button><button data-v="light">浅色</button><button data-v="dark">深色</button><button data-v="tint">着色</button></div></div>
+  <div class="grp"><span>窗口效果</span><div class="seg" id="c-fx"><button data-v="liquid">液态玻璃</button><button data-v="glass">亚克力</button><button data-v="solid">无</button></div></div>
+  <div class="grp"><span>壁纸</span><div class="seg" id="c-wall"><button data-v="dusk">黄昏</button><button data-v="day">白天</button><button data-v="night">夜晚</button><button data-v="vivid">花哨</button></div></div>
+  <div class="grp" id="g-dpos" style="display:none"><span>Dock 位置</span><div class="seg" id="c-dpos"><button data-v="bottom">底部</button><button data-v="left">左侧</button><button data-v="right">右侧</button></div></div>
+  <div class="grp" id="g-state"><span>数据</span><div class="seg" id="c-state"><button data-v="ok">正常</button><button data-v="loading">加载中</button><button data-v="error">出错</button><button data-v="empty">空</button></div></div>
+  <div class="sp"></div>
+</div>
+
+<main>
+  <section class="view" id="v-desktop"><div class="fit" id="fit"><div class="desk" id="desk"></div></div></section>
+  <section class="view" id="v-gallery"><div class="wall" id="gwall"></div><div class="scroll" id="gallery"></div></section>
+  <section class="view" id="v-settings"></section>
+  <section class="view" id="v-dock"><div class="fit" id="dfit"><div class="desk" id="ddesk"></div></div></section>
+</main>
+
+<div class="menu" id="menu"></div>
+<div class="sheet" id="sheet"></div>
+
+<script>
+"use strict";
+/* ================= state ================= */
+const Q = new URLSearchParams(location.search);
+const S = {
+  view: Q.get('view') || 'desktop', theme: Q.get('theme') || 'dark', scheme: Q.get('scheme') || 'auto',
+  fx: Q.get('fx') || 'liquid', wall: Q.get('wall') || 'dusk', data: Q.get('state') || 'ok',
+  tintAuto: true, tint: '#0A84FF', sky: true, rotate: true,
+  // 天气
+  city: '上海', unit: 'C', wEvery: 30,
+  // 时钟
+  h24: true, seconds: true, nightFace: true, cities: ['北京', '东京', '伦敦', '纽约'],
+  // 日历
+  lunar: true, weekStart: 1, weekNo: false,
+  // 系统
+  sys: { cpu: true, mem: true, vram: true, disk: true, net: true }, sysEvery: 2, sysWarn: true,
+  // 照片
+  photoEvery: 10, shuffle: false, caption: true, photoDir: 'C:\\Users\\SS\\Pictures\\2026 杭州',
+  // 番茄钟
+  focus: 25, shortB: 5, longB: 15, chime: true,
+  // 电池
+  bt: true, lowBatt: 20,
+  // 正在播放
+  coverBg: true, showSource: true,
+  setTab: Q.get('tab') || 'weather',
+};
+const WALL_TINT = { dusk: '#B65D78', day: '#3D8DB0', night: '#5260B0', vivid: '#C0507E' };
+const SWATCH = ['#0A84FF', '#5E5CE6', '#BF5AF2', '#FF375F', '#FF9F0A', '#30B0C7', '#34C759', '#8E8E93'];
+const TZ = { 北京: 'Asia/Shanghai', 上海: 'Asia/Shanghai', 东京: 'Asia/Tokyo', 伦敦: 'Europe/London', 纽约: 'America/New_York', 巴黎: 'Europe/Paris', 悉尼: 'Australia/Sydney', 旧金山: 'America/Los_Angeles', 新加坡: 'Asia/Singapore', 迪拜: 'Asia/Dubai', 首尔: 'Asia/Seoul' };
+const tintColor = () => S.tintAuto ? WALL_TINT[S.wall] : S.tint;
+
+/* ================= time helpers ================= */
+const WD = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+const WD1 = ['日', '一', '二', '三', '四', '五', '六'];
+const MON = ['一月', '二月', '三月', '四月', '五月', '六月', '七月', '八月', '九月', '十月', '十一月', '十二月'];
+const now = () => new Date();
+const pad = n => String(n).padStart(2, '0');
+const tzFmt = {};
+function cityDate(name) { const f = tzFmt[name] || (tzFmt[name] = new Intl.DateTimeFormat('en-US', { timeZone: TZ[name], hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' })); const p = {}; for (const x of f.formatToParts(now())) p[x.type] = x.value; return new Date(+p.year, p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second); }
+const cityOff = name => Math.round((cityDate(name) - now()) / 1800e3) / 2;
+const offLabel = name => { const v = cityOff(name); return (v >= 0 ? '+' : '−') + Math.abs(v) + ' 小时'; };
+function hm(d) { let h = d.getHours(); if (!S.h24) { h = h % 12 || 12; } return (S.h24 ? pad(h) : h) + ':' + pad(d.getMinutes()); }
+function ampm(d) { return S.h24 ? '' : (d.getHours() < 12 ? '上午' : '下午'); }
+const LD = ['', '初一', '初二', '初三', '初四', '初五', '初六', '初七', '初八', '初九', '初十', '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十', '廿一', '廿二', '廿三', '廿四', '廿五', '廿六', '廿七', '廿八', '廿九', '三十'];
+const lunarFmt = (() => { try { return new Intl.DateTimeFormat('zh-CN-u-ca-chinese', { month: 'long', day: 'numeric' }); } catch (e) { return null; } })();
+function lunar(d) {
+  if (!lunarFmt) return { m: '', d: '', cell: '' };
+  const p = lunarFmt.formatToParts(d); let m = '', dd = 0;
+  for (const x of p) { if (x.type === 'month') m = x.value; if (x.type === 'day') dd = parseInt(x.value, 10); }
+  const fest = festival(d, m, dd);
+  return { m, d: LD[dd] || '', cell: fest || (dd === 1 ? m : LD[dd]), fest };
+}
+function festival(d, lm, ld) {
+  const k = (d.getMonth() + 1) + '-' + d.getDate();
+  const g = { '1-1': '元旦', '5-1': '劳动节', '10-1': '国庆', '12-25': '圣诞' }[k];
+  if (g) return g;
+  const l = { '正月-1': '春节', '正月-15': '元宵', '五月-5': '端午', '八月-15': '中秋', '九月-9': '重阳', '腊月-8': '腊八' }[lm + '-' + ld];
+  return l || '';
+}
+function weekNo(d) { const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())); const day = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - day); const y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1)); return Math.ceil(((t - y0) / 864e5 + 1) / 7); }
+function isDay(d) { const m = d.getHours() * 60 + d.getMinutes(); return m >= 6 * 60 + 25 && m < 16 * 60 + 58; }
+
+/* ================= icons (drawn paths, 24-unit grid) ================= */
+const P = {
+  loc: '<path d="M20.2 3.8 3.9 10.6c-.6.25-.55 1.1.07 1.27l6.6 1.6 1.6 6.6c.16.62 1.02.68 1.27.07L20.2 3.8z" fill="currentColor"/>',
+  play: '<path d="M8 5.6v12.8c0 .8.86 1.28 1.54.86l10.1-6.4a1 1 0 0 0 0-1.72L9.54 4.74C8.86 4.32 8 4.8 8 5.6z" fill="currentColor"/>',
+  pause: '<rect x="6.5" y="5" width="4" height="14" rx="1.3" fill="currentColor"/><rect x="13.5" y="5" width="4" height="14" rx="1.3" fill="currentColor"/>',
+  next: '<path d="M3.5 6.6v10.8c0 .7.78 1.12 1.36.73L13 12.73a.88.88 0 0 0 0-1.46L4.86 5.87c-.58-.39-1.36.03-1.36.73zM12 6.6v10.8c0 .7.78 1.12 1.36.73l8.14-5.4a.88.88 0 0 0 0-1.46l-8.14-5.4c-.58-.39-1.36.03-1.36.73z" fill="currentColor"/>',
+  prev: '<path d="M20.5 6.6v10.8c0 .7-.78 1.12-1.36.73L11 12.73a.88.88 0 0 1 0-1.46l8.14-5.4c.58-.39 1.36.03 1.36.73zM12 6.6v10.8c0 .7-.78 1.12-1.36.73L2.5 12.73a.88.88 0 0 1 0-1.46l8.14-5.4c.58-.39 1.36.03 1.36.73z" fill="currentColor"/>',
+  reset: '<path d="M5 12a7 7 0 1 0 2.1-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M6.2 3.2v4.6h4.6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  laptop: '<rect x="4.5" y="5.5" width="15" height="10" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M2.5 18.5h19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  phones: '<path d="M4.5 15v-3a7.5 7.5 0 0 1 15 0v3" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="3.5" y="13.5" width="4.5" height="6.5" rx="1.6" fill="currentColor"/><rect x="16" y="13.5" width="4.5" height="6.5" rx="1.6" fill="currentColor"/>',
+  mouse: '<rect x="6.5" y="3.5" width="11" height="17" rx="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7v3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  keyboard: '<rect x="2.5" y="6.5" width="19" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6 10h.01M9.3 10h.01M12.6 10h.01M15.9 10h.01M18 10h.01M8 14h8" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>',
+  plug: '<path d="M9 3v4.5M15 3v4.5M6.5 7.5h11v3.5a5.5 5.5 0 0 1-11 0V7.5zM12 16.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  bolt: '<path d="M13.2 2.5 5.4 13.1h5.6l-1.2 8.4 7.8-10.6H12l1.2-8.4z" fill="currentColor"/>',
+  trash: '<path d="M4 6.5h16M9.5 6.5V4.8c0-.7.5-1.3 1.2-1.3h2.6c.7 0 1.2.6 1.2 1.3v1.7M6.2 6.5l.9 12.4c.08 1 .9 1.6 1.9 1.6h6c1 0 1.82-.7 1.9-1.6l.9-12.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 10.5v6M14 10.5v6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  trash0: '<path d="M4 6.5h16M9.5 6.5V4.8c0-.7.5-1.3 1.2-1.3h2.6c.7 0 1.2.6 1.2 1.3v1.7M6.2 6.5l.9 12.4c.08 1 .9 1.6 1.9 1.6h6c1 0 1.82-.7 1.9-1.6l.9-12.4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
+  pc: '<rect x="2.5" y="4" width="19" height="12.5" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9 20.5h6M12 16.5v4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  drive: '<rect x="3" y="7" width="18" height="10" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.5 12h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="17" cy="12" r="1.2" fill="currentColor"/>',
+  down: '<path d="M12 4v11M7 10.5l5 5 5-5M5 20h14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  tray: '<path d="M3.5 13.5 6 5.8c.2-.6.7-.9 1.3-.9h9.4c.6 0 1.1.3 1.3.9l2.5 7.7v4.3c0 .9-.7 1.6-1.6 1.6H5.1c-.9 0-1.6-.7-1.6-1.6v-4.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M3.5 13.5h4.6l1.2 2.2h5.4l1.2-2.2h4.6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  note: '<path d="M9 18V6.5l11-2.3V16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="6.5" cy="18" r="2.6" fill="currentColor"/><circle cx="17.5" cy="16" r="2.6" fill="currentColor"/>',
+  check: '<path d="M6 12.5l4 4 8-9" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  plus: '<path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  chev: '<path d="M9 5.5 15.5 12 9 18.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  chevd: '<path d="M6 9.5l6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  cloud: '<path d="M7.2 19h9.9a4.2 4.2 0 0 0 .75-8.33A5.7 5.7 0 0 0 6.8 9.7 4.65 4.65 0 0 0 7.2 19z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 12.5l4 4M14 12.5l-4 4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  x: '<path d="M7 7l10 10M17 7 7 17" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16v4z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  resize: '<rect x="3.5" y="3.5" width="17" height="17" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 3.5v17M3.5 12h8.5" stroke="currentColor" stroke-width="1.7"/>',
+  stack: '<rect x="5" y="8" width="14" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7.5 5h9M9.5 2.5h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  brush: '<path d="M14.5 4.5l5 5-7.5 7.5-5-5 7.5-7.5zM7 12l-2.5 2.5c-1 1-1 3 0 4s3 1 4 0L11 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  grid: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/>',
+  img: '<rect x="3" y="4.5" width="18" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="8.5" cy="9.5" r="1.7" fill="currentColor"/><path d="M3.5 17l5-5 4 4 2.5-2.5L20.5 19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  folder: '<path d="M3 7.2c0-1 .8-1.7 1.7-1.7h4.4l2 2h8.2c.9 0 1.7.8 1.7 1.7v8.6c0 1-.8 1.7-1.7 1.7H4.7c-.9 0-1.7-.8-1.7-1.7V7.2z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  search: '<circle cx="10.5" cy="10.5" r="6" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 15l5 5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  palette: '<path d="M12 3.5a8.5 8.5 0 1 0 0 17c1.2 0 1.8-.9 1.4-1.9-.5-1.2.3-2.4 1.6-2.4h1.8a3.7 3.7 0 0 0 3.7-3.7C20.5 7.4 16.7 3.5 12 3.5z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="8" cy="11" r="1.3" fill="currentColor"/><circle cx="11" cy="7.5" r="1.3" fill="currentColor"/><circle cx="15.5" cy="8.5" r="1.3" fill="currentColor"/>',
+  list: '<path d="M8.5 6.5h12M8.5 12h12M8.5 17.5h12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="4.5" cy="6.5" r="1.2" fill="currentColor"/><circle cx="4.5" cy="12" r="1.2" fill="currentColor"/><circle cx="4.5" cy="17.5" r="1.2" fill="currentColor"/>',
+  tabs: '<rect x="3" y="6" width="18" height="13" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3 10h18M9 6v4" stroke="currentColor" stroke-width="1.7"/>',
+  rocket: '<path d="M12 3c3.5 2 5 5.5 4.5 10l-2 2.5h-5l-2-2.5C7 8.5 8.5 5 12 3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><circle cx="12" cy="9.5" r="1.6" fill="currentColor"/><path d="M9.5 18.5 12 21l2.5-2.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  copy: '<rect x="8" y="8" width="12" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M16 8V5.8c0-1-.8-1.8-1.8-1.8H5.8C4.8 4 4 4.8 4 5.8v8.4c0 1 .8 1.8 1.8 1.8H8" fill="none" stroke="currentColor" stroke-width="1.7"/>',
+  key: '<rect x="2.5" y="6.5" width="19" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 14.5h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  pkg: '<path d="M12 3 20 7.5v9L12 21l-8-4.5v-9L12 3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 7.5 12 12l8-4.5M12 12v9" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>',
+  info: '<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="7.8" r="1.1" fill="currentColor"/>',
+  sparkle: '<path d="M12 3.5c.6 4.3 2.2 5.9 6.5 6.5-4.3.6-5.9 2.2-6.5 6.5-.6-4.3-2.2-5.9-6.5-6.5 4.3-.6 5.9-2.2 6.5-6.5z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>',
+  dup: '<rect x="4" y="4" width="10" height="13" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/><rect x="10" y="7" width="10" height="13" rx="1.8" fill="none" stroke="currentColor" stroke-width="1.7"/>',
+  menu3: '<path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+};
+const ic = (n, s = 16, extra = '') => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" ${extra}>${P[n]}</svg>`;
+
+/* weather glyphs: filled, multicolour like the system weather symbols */
+const CLOUD = 'M7.2 19.2h9.9a4.3 4.3 0 0 0 .75-8.53A5.8 5.8 0 0 0 6.7 9.75 4.75 4.75 0 0 0 7.2 19.2z';
+function wx(code, day, s = 24) {
+  const cloudFill = 'rgba(255,255,255,.96)';
+  const sun = (cx, cy, r) => { let g = `<circle cx="${cx}" cy="${cy}" r="${r}" fill="#FFD60A"/>`; for (let i = 0; i < 8; i++) { const a = i * Math.PI / 4, r1 = r * 1.55, r2 = r * 2.05; g += `<path d="M${cx + r1 * Math.cos(a)} ${cy + r1 * Math.sin(a)}L${cx + r2 * Math.cos(a)} ${cy + r2 * Math.sin(a)}" stroke="#FFD60A" stroke-width="${r * .42}" stroke-linecap="round"/>`; } return g; };
+  const moon = (tx, ty, k) => `<path transform="translate(${tx} ${ty}) scale(${k})" d="M15.6 3.2a8.6 8.6 0 1 0 5.2 15.3A7.2 7.2 0 0 1 15.6 3.2z" fill="#F2F4FA"/>`;
+  let g = '';
+  if (code === 0) g = day ? sun(12, 12, 4.4) : moon(0, 0, 1);
+  else if (code <= 2) g = (day ? sun(8.6, 8.2, 3.1) : moon(-1.5, -1.8, .62)) + `<path d="${CLOUD}" transform="translate(2.2 1.6) scale(.9)" fill="${cloudFill}"/>`;
+  else if (code === 3) g = `<path d="${CLOUD}" transform="translate(-1 -1.2) scale(1.04)" fill="rgba(255,255,255,.62)"/><path d="${CLOUD}" transform="translate(1.6 1.4) scale(.88)" fill="${cloudFill}"/>`;
+  else if (code === 45) g = `<path d="${CLOUD}" transform="translate(0 -3.5)" fill="${cloudFill}"/><path d="M4 19h16M6 22h12" stroke="${cloudFill}" stroke-width="1.6" stroke-linecap="round"/>`;
+  else if (code >= 61 && code < 70) g = `<path d="${CLOUD}" transform="translate(0 -3.8)" fill="${cloudFill}"/><path d="M8.5 18.2l-1 2.6M12.5 18.2l-1 2.6M16.5 18.2l-1 2.6" stroke="#63C7FF" stroke-width="1.8" stroke-linecap="round"/>`;
+  else if (code >= 71 && code < 80) g = `<path d="${CLOUD}" transform="translate(0 -3.8)" fill="${cloudFill}"/><circle cx="8" cy="19.4" r="1.15" fill="#fff"/><circle cx="12" cy="20.6" r="1.15" fill="#fff"/><circle cx="16" cy="19.4" r="1.15" fill="#fff"/>`;
+  else g = `<path d="${CLOUD}" transform="translate(0 -3.8)" fill="${cloudFill}"/><path d="M12.6 15.2 9.8 19.4h2.6l-1.1 3.4 3.4-4.6h-2.5l.9-3z" fill="#FFD60A"/>`;
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24" style="overflow:visible;filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.12))">${g}</svg>`;
+}
+const COND = c => ({ 0: '晴', 1: '晴间多云', 2: '多云', 3: '阴', 45: '雾', 61: '小雨', 63: '中雨', 71: '小雪', 95: '雷阵雨' }[c] || '多云');
+
+/* file-type icons: page + mid-tone band (avoids Office hues) */
+const FT = { pdf: '#B2416E', exe: '#5A6B80', heic: '#7458C4', zip: '#2B8A8E', mp4: '#9A4F86', xlsx: '#4F7F95', psd: '#6A5BB5', md: '#6F6A60' };
+function fileIc(ext, s = 30) {
+  const c = FT[ext] || '#6F7787';
+  return `<svg class="fileic" width="${s}" height="${s * 1.2}" viewBox="0 0 30 36"><path d="M5 1.5h13.5L27 10v22.5A2.5 2.5 0 0 1 24.5 35h-19A2.5 2.5 0 0 1 3 32.5v-28A3 3 0 0 1 5 1.5z" fill="#fff"/><path d="M18.5 1.5V7.5a2.5 2.5 0 0 0 2.5 2.5h6" fill="#E4E6EA"/><rect x="3" y="21" width="24" height="10" fill="${c}"/><text x="15" y="28.6" text-anchor="middle" font-family="Segoe UI" font-weight="700" font-size="7" fill="#fff">${ext.toUpperCase()}</text><path d="M5 1.5h13.5L27 10v22.5A2.5 2.5 0 0 1 24.5 35h-19A2.5 2.5 0 0 1 3 32.5v-28A3 3 0 0 1 5 1.5z" fill="none" stroke="rgba(0,0,0,.14)"/></svg>`;
+}
+const LOGO = s => `<svg width="${s}" height="${s}" viewBox="10 14 236 236"><defs><path id="lgo" d="M16 60A24 24 0 0 1 40 36H92C108 36 120 44 124 60H216A24 24 0 0 1 240 84V200A28 28 0 0 1 212 228H44A28 28 0 0 1 16 200Z"/><clipPath id="lgc"><use href="#lgo"/></clipPath><linearGradient id="lgb" x1="0" y1="36" x2="0" y2="228" gradientUnits="userSpaceOnUse"><stop stop-color="#2b2f86"/><stop offset="1" stop-color="#120f52"/></linearGradient><linearGradient id="lgf" x1="16" y1="70" x2="210" y2="240" gradientUnits="userSpaceOnUse"><stop stop-color="#c3c0ff"/><stop offset=".48" stop-color="#8079f4"/><stop offset="1" stop-color="#4b3fc6"/></linearGradient><linearGradient id="lgd" x1="120" y1="80" x2="236" y2="226" gradientUnits="userSpaceOnUse"><stop stop-color="#8c84f8"/><stop offset="1" stop-color="#4a3fc4"/></linearGradient></defs><g clip-path="url(#lgc)"><path d="M0 0H256V256H0Z" fill="url(#lgb)"/><path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188H260V256H120Z" fill="url(#lgd)"/><path d="M0 0H92V30C110 30 120 44 124 60C126 68 127 70 129 80L147 169C150 187 154 207 160 228L170 256H0Z" fill="url(#lgf)"/></g></svg>`;
+
+/* ================= drawing primitives ================= */
+function ring(D, pct, sw, color, track, inner = '') {
+  const r = (D - sw) / 2, C = 2 * Math.PI * r, len = Math.max(0, Math.min(1, pct)) * C;
+  return `<div style="position:relative;width:${D}px;height:${D}px;flex:none"><svg width="${D}" height="${D}" style="transform:rotate(-90deg)"><circle cx="${D / 2}" cy="${D / 2}" r="${r}" fill="none" stroke="${track}" stroke-width="${sw}"/>${pct > 0 ? `<circle cx="${D / 2}" cy="${D / 2}" r="${r}" fill="none" stroke="${color}" stroke-width="${sw}" stroke-linecap="round" stroke-dasharray="${len} ${C}"/>` : ''}</svg><div style="position:absolute;inset:0;display:grid;place-items:center">${inner}</div></div>`;
+}
+let gid = 0;
+function spark(vals, w, h, max = 100) {
+  const id = 'sg' + (gid++); const n = vals.length; if (!n) return '';
+  const pts = vals.map((v, i) => [i * (w / (n - 1)), h - 2 - (Math.min(v, max) / max) * (h - 6)]);
+  const d = pts.map((p, i) => (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('');
+  const last = pts[n - 1];
+  return `<svg width="${w}" height="${h}" style="display:block;overflow:visible"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="currentColor" stop-opacity=".22"/><stop offset="1" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs><path d="${d}L${w} ${h}L0 ${h}Z" fill="url(#${id})"/><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/><circle cx="${last[0]}" cy="${last[1]}" r="2.6" fill="currentColor"/></svg>`;
+}
+/* analog dial — proportions of a classic widget clock: ticks .93–.97R, hands .50R/.84R, sweep .90R */
+function dial(D, d, o = {}) {
+  const R = D / 2, night = o.face === 'night', dark = o.face === 'dark';
+  const face = night ? '#3B3B3D' : dark ? 'rgba(0,0,0,.34)' : '#FFFFFF';
+  const ink = (night || dark) ? '#FFFFFF' : '#1D1D1F';
+  let g = `<circle cx="${R}" cy="${R}" r="${R}" fill="${face}"/>`;
+  if (!dark && !night) g += `<circle cx="${R}" cy="${R}" r="${R - .5}" fill="none" stroke="rgba(0,0,0,.06)"/>`;
+  for (let i = 0; i < 60; i++) {
+    const hour = i % 5 === 0; if (o.numbers && hour) continue;
+    const a = i * Math.PI / 30, r1 = R * (hour ? .86 : .925), r2 = R * .965;
+    g += `<line x1="${R + r1 * Math.sin(a)}" y1="${R - r1 * Math.cos(a)}" x2="${R + r2 * Math.sin(a)}" y2="${R - r2 * Math.cos(a)}" stroke="${ink}" stroke-opacity="${hour ? .8 : .32}" stroke-width="${hour ? Math.max(1.4, R * .028) : Math.max(.8, R * .012)}" stroke-linecap="round"/>`;
+  }
+  if (o.numbers) for (let h = 1; h <= 12; h++) { const a = h * Math.PI / 6, rr = R * .76; g += `<text x="${R + rr * Math.sin(a)}" y="${R - rr * Math.cos(a)}" dy=".36em" text-anchor="middle" font-family="Segoe UI Variable Display,Segoe UI" font-weight="600" font-size="${R * .22}" fill="${ink}">${h}</text>`; }
+  if (o.label) g += `<text x="${R}" y="${R + R * .42}" text-anchor="middle" font-family="Segoe UI" font-weight="600" font-size="${R * .16}" fill="${ink}" fill-opacity=".5">${o.label}</text>`;
+  const sec = d.getSeconds() + d.getMilliseconds() / 1000, min = d.getMinutes() + sec / 60, hr = (d.getHours() % 12) + min / 60;
+  const hand = (len, w) => `<rect x="${R - Math.max(.6, R * .014)}" y="${R - R * .14}" width="${Math.max(1.2, R * .028)}" height="${R * .14}" fill="${ink}"/><rect x="${R - w / 2}" y="${R - len}" width="${w}" height="${len - R * .12}" rx="${w / 2}" fill="${ink}"/>`;
+  g += `<g transform="rotate(${hr * 30} ${R} ${R})">${hand(R * .5, R * .075)}</g>`;
+  g += `<g transform="rotate(${min * 6} ${R} ${R})">${hand(R * .84, R * .075)}</g>`;
+  g += `<circle cx="${R}" cy="${R}" r="${R * .06}" fill="${ink}"/>`;
+  if (S.seconds && o.seconds !== false) g += `<g transform="rotate(${Math.floor(sec) * 6} ${R} ${R})"><line x1="${R}" y1="${R + R * .16}" x2="${R}" y2="${R - R * .9}" stroke="#FF9500" stroke-width="${Math.max(1, R * .018)}" stroke-linecap="round"/><circle cx="${R}" cy="${R}" r="${R * .045}" fill="#FF9500"/><circle cx="${R}" cy="${R}" r="${R * .018}" fill="${face === '#FFFFFF' ? '#fff' : '#3B3B3D'}"/></g>`;
+  return `<svg width="${D}" height="${D}" style="display:block;filter:drop-shadow(0 1px 2px rgba(0,0,0,${dark ? 0 : .12}))">${g}</svg>`;
+}
+
+/* ================= imagery (generated, no stock assets) ================= */
+function rnd(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+function wallSVG(kind) {
+  const W = 1600, H = 1000;
+  if (kind === 'day') return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="d1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4f8fd9"/><stop offset=".55" stop-color="#a9cdee"/><stop offset="1" stop-color="#e8f1f2"/></linearGradient><linearGradient id="d2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fb8a8"/><stop offset="1" stop-color="#5f8f7f"/></linearGradient><filter id="db"><feGaussianBlur stdDeviation="18"/></filter></defs><rect width="${W}" height="${H}" fill="url(#d1)"/><g filter="url(#db)" fill="#fff" opacity=".8"><ellipse cx="320" cy="230" rx="220" ry="40"/><ellipse cx="1180" cy="170" rx="260" ry="46"/><ellipse cx="860" cy="330" rx="180" ry="30"/></g><path d="M0 640 C220 540 360 600 520 560 S860 470 1040 540 1380 520 1600 580 V1000H0Z" fill="#9cbfc4" opacity=".75"/><path d="M0 720 C260 640 420 700 640 660 S1000 600 1240 660 1480 640 1600 680V1000H0Z" fill="url(#d2)"/><path d="M0 820 C300 770 600 800 860 780 S1300 760 1600 800V1000H0Z" fill="#46705f"/></svg>`;
+  if (kind === 'night') { const r = rnd(7); let st = ''; for (let i = 0; i < 160; i++) st += `<circle cx="${(r() * W).toFixed(0)}" cy="${(r() * 560).toFixed(0)}" r="${(r() * 1.3 + .3).toFixed(2)}" fill="#fff" opacity="${(r() * .6 + .2).toFixed(2)}"/>`; return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="n1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#050915"/><stop offset=".6" stop-color="#131c3b"/><stop offset="1" stop-color="#2a3563"/></linearGradient><radialGradient id="n2" cx=".72" cy=".2" r=".18"><stop offset="0" stop-color="#9fb2ff" stop-opacity=".25"/><stop offset="1" stop-color="#9fb2ff" stop-opacity="0"/></radialGradient></defs><rect width="${W}" height="${H}" fill="url(#n1)"/><rect width="${W}" height="${H}" fill="url(#n2)"/>${st}<circle cx="1150" cy="200" r="34" fill="#eef1ff"/><path d="M0 700 C240 620 420 660 640 610 S1040 560 1260 620 1500 600 1600 640V1000H0Z" fill="#141a36"/><path d="M0 800 C320 740 640 780 920 750 S1360 740 1600 770V1000H0Z" fill="#0a0e20"/></svg>`; }
+  if (kind === 'vivid') return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice"><defs><filter id="vb"><feGaussianBlur stdDeviation="70"/></filter></defs><rect width="${W}" height="${H}" fill="#f6e7d8"/><g filter="url(#vb)"><circle cx="300" cy="250" r="300" fill="#ff5e7e"/><circle cx="1250" cy="220" r="320" fill="#ffb347"/><circle cx="900" cy="700" r="340" fill="#38d6cf"/><circle cx="1400" cy="760" r="260" fill="#7a5cff"/><circle cx="380" cy="820" r="260" fill="#ffe066"/></g></svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="k1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1c2552"/><stop offset=".38" stop-color="#5a3e74"/><stop offset=".62" stop-color="#cf7569"/><stop offset=".74" stop-color="#f2ae78"/><stop offset=".8" stop-color="#f6cf96"/></linearGradient><radialGradient id="k2" cx=".66" cy=".66" r=".3"><stop offset="0" stop-color="#ffe3b3" stop-opacity=".9"/><stop offset="1" stop-color="#ffb070" stop-opacity="0"/></radialGradient><linearGradient id="k3" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#d98f7a"/><stop offset="1" stop-color="#2a2140"/></linearGradient></defs><rect width="${W}" height="${H}" fill="url(#k1)"/><rect width="${W}" height="${H}" fill="url(#k2)"/><circle cx="1060" cy="650" r="58" fill="#ffe9c4"/><path d="M0 560 L160 470 290 530 470 400 640 520 780 450 960 560 1130 480 1290 560 1450 470 1600 540V800H0Z" fill="#7b4f7c" opacity=".75"/><path d="M0 640 C140 590 260 620 420 570 S700 560 860 610 1140 580 1320 620 1500 600 1600 630V800H0Z" fill="#4a3263"/><rect y="690" width="${W}" height="310" fill="url(#k3)"/><g opacity=".5" fill="#ffe2b8"><rect x="1000" y="720" width="120" height="3" rx="1.5"/><rect x="980" y="748" width="160" height="2" rx="1"/><rect x="1015" y="780" width="90" height="2" rx="1"/></g><path d="M0 690 C200 670 420 700 640 680 S1100 670 1600 690" stroke="#f7c79a" stroke-opacity=".3" fill="none"/></svg>`;
+}
+const PHOTOS = [
+  { cap: '杭州 · 西湖', date: '2026年10月3日', svg: (w, h) => `<svg width="${w}" height="${h}" viewBox="0 0 424 208" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="pa" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3b27a"/><stop offset=".55" stop-color="#f6d3a2"/><stop offset=".56" stop-color="#c98a6d"/><stop offset="1" stop-color="#5b4157"/></linearGradient></defs><rect width="424" height="208" fill="url(#pa)"/><circle cx="300" cy="96" r="18" fill="#fff3d6"/><path d="M0 116 L60 92 110 104 170 80 230 102 300 88 360 104 424 94V116Z" fill="#a46e6e" opacity=".8"/><path d="M50 116h4v-22h-6l5-8 5 8h-6zM48 94h12" fill="#4b3546"/><rect x="40" y="116" width="384" height="1" fill="#fff" opacity=".4"/><g fill="#fff4dc" opacity=".55"><rect x="276" y="128" width="48" height="2" rx="1"/><rect x="284" y="140" width="32" height="2" rx="1"/><rect x="290" y="152" width="20" height="2" rx="1"/></g><path d="M0 180 C80 170 140 186 220 176 S360 170 424 182V208H0Z" fill="#3a2a3e"/></svg>` },
+  { cap: '四姑娘山', date: '2026年8月14日', svg: (w, h) => `<svg width="${w}" height="${h}" viewBox="0 0 424 208" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="pb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2f6fc0"/><stop offset="1" stop-color="#a7cdea"/></linearGradient></defs><rect width="424" height="208" fill="url(#pb)"/><path d="M60 150 150 40 200 96 250 30 340 150Z" fill="#e9f1f8"/><path d="M150 40 172 66 160 70 182 92 200 96 175 150H60Z" fill="#b8c9da"/><path d="M250 30 236 60 262 66 250 90 290 150H340Z" fill="#c9d8e6"/><path d="M0 150 C80 136 160 160 240 146 S380 140 424 150V208H0Z" fill="#2e5a44"/><g fill="#1d3b2d">${Array.from({ length: 22 }, (_, i) => { const x = i * 20 + 4, hh = 22 + (i * 7 % 13); return `<path d="M${x} ${196 - hh}l7 ${hh}h-14z"/>`; }).join('')}</g></svg>` },
+  { cap: '舟山 · 东极岛', date: '2026年7月2日', svg: (w, h) => `<svg width="${w}" height="${h}" viewBox="0 0 424 208" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="pc" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fd3e8"/><stop offset=".5" stop-color="#d9f0f2"/><stop offset=".51" stop-color="#2b97a8"/><stop offset="1" stop-color="#5fc1c4"/></linearGradient></defs><rect width="424" height="208" fill="url(#pc)"/><path d="M290 104c10-14 30-20 50-16 16 3 30 10 40 16z" fill="#4f7d6a"/><g fill="#fff" opacity=".55"><rect x="40" y="128" width="70" height="2" rx="1"/><rect x="150" y="146" width="110" height="2" rx="1"/><rect x="60" y="166" width="60" height="2" rx="1"/></g><path d="M0 176 C120 166 220 184 424 170V208H0Z" fill="#efe1c2"/></svg>` },
+  { cap: '上海 · 外滩', date: '2026年9月20日', svg: (w, h) => { const r = rnd(11); let b = '', x = 0; while (x < 424) { const bw = 14 + r() * 26, bh = 40 + r() * 110; b += `<rect x="${x}" y="${150 - bh}" width="${bw}" height="${bh}" fill="#141a33"/>`; for (let wy = 156 - bh; wy < 146; wy += 7) for (let wx2 = x + 3; wx2 < x + bw - 3; wx2 += 5) if (r() > .55) b += `<rect x="${wx2}" y="${wy}" width="2" height="3" fill="#ffd98a" opacity="${(.5 + r() * .5).toFixed(2)}"/>`; x += bw + 2; } return `<svg width="${w}" height="${h}" viewBox="0 0 424 208" preserveAspectRatio="xMidYMid slice"><defs><linearGradient id="pd" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0c1330"/><stop offset=".7" stop-color="#3b2d63"/><stop offset="1" stop-color="#874e78"/></linearGradient></defs><rect width="424" height="208" fill="url(#pd)"/>${b}<rect y="150" width="424" height="58" fill="#0d1226"/><g opacity=".35" fill="#ffd98a"><rect x="60" y="160" width="50" height="1.5"/><rect x="180" y="170" width="80" height="1.5"/><rect x="300" y="162" width="60" height="1.5"/></g></svg>`; } },
+];
+function coverSVG(s) { return `<svg width="${s}" height="${s}" viewBox="0 0 100 100"><defs><linearGradient id="cv" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#2d5f7a"/><stop offset="1" stop-color="#1b2d4f"/></linearGradient></defs><rect width="100" height="100" fill="url(#cv)"/><circle cx="64" cy="40" r="20" fill="#f2b880"/><path d="M0 70 C20 62 40 74 60 66 S90 60 100 64V100H0Z" fill="#183048"/><path d="M0 80 C30 74 60 86 100 78V100H0Z" fill="#0f1f33"/><text x="8" y="16" font-family="Segoe UI" font-weight="700" font-size="7" fill="#fff" opacity=".85" letter-spacing=".1em">SLOW TIDE</text></svg>`; }
+
+/* ================= sample data ================= */
+function weatherData() {
+  const d = now(), day = isDay(d), t = S.unit === 'C' ? (v => v) : (v => Math.round(v * 9 / 5 + 32));
+  const base = day ? 15 : 11;
+  const hours = []; for (let i = 1; i <= 6; i++) { const hd = new Date(d.getTime() + i * 3600e3); const hr = hd.getHours(); const dd = isDay(hd); hours.push({ label: i === 1 ? '现在' : pad(hr) + '时', code: [0, 0, 1, 1, 2, 3][i - 1], dayH: dd, temp: t(Math.round(base + (dd ? 1 : -1) * (i % 3) - (dd ? 0 : 1))) }); }
+  const days = [[3, 9, 15], [61, 8, 12], [3, 6, 11], [0, 5, 13], [1, 7, 14]].map((v, i) => { const x = new Date(d.getTime() + (i + 1) * 864e5); return { label: i === 0 ? '明天' : WD[x.getDay()], code: v[0], lo: t(v[1]), hi: t(v[2]) }; });
+  return { city: S.city || '上海', temp: t(base - 1), code: 0, day, hi: t(17), lo: t(9), feels: t(base - 3), hum: 62, wind: 11, hours, days, rlo: t(5), rhi: t(17) };
+}
+const SKY = { d0: ['#2966BD', '#5C99E0'], d1: ['#3f73b8', '#7aa4d6'], d3: ['#667D99', '#94A8BF'], d61: ['#4A596E', '#738296'], n0: ['#080F29', '#1F3059'], n3: ['#1F2330', '#3D4554'] };
+function skyOf(code, day) { const k = day ? (code === 0 ? 'd0' : code <= 2 ? 'd1' : code === 3 ? 'd3' : 'd61') : (code <= 2 ? 'n0' : 'n3'); return SKY[k]; }
+
+const SYS = { cpu: [], mem: [], net: [] };
+(function seedSys() { const r = rnd(3); let c = 22, m = 61; for (let i = 0; i < 48; i++) { c = Math.max(4, Math.min(96, c + (r() - .5) * 14)); m = Math.max(58, Math.min(66, m + (r() - .5) * 1.2)); SYS.cpu.push(c); SYS.mem.push(m); SYS.net.push(400 + r() * 2600); } })();
+function sysTick() { const r = Math.random; const c = SYS.cpu[47], m = SYS.mem[47]; SYS.cpu.push(Math.max(4, Math.min(97, c + (r() - .5) * 16))); SYS.mem.push(Math.max(58, Math.min(66, m + (r() - .5) * 1))); SYS.net.push(300 + r() * 2800); for (const k of ['cpu', 'mem', 'net']) SYS[k].shift(); }
+const fmtNet = kb => kb >= 1000 ? (kb / 1024).toFixed(1) + ' MB/s' : Math.round(kb) + ' KB/s';
+const DOWNLOADS = [
+  { n: '季度报告 Q3.pdf', e: 'pdf', m: '2.4 MB · 10 分钟前' }, { n: 'PulseSetup-1.4.2.exe', e: 'exe', m: '38.6 MB · 1 小时前' },
+  { n: 'IMG_2048.heic', e: 'heic', m: '3.1 MB · 昨天' }, { n: '素材包.zip', e: 'zip', m: '812 MB · 昨天' },
+  { n: '发布会录像.mp4', e: 'mp4', m: '1.2 GB · 周一' }, { n: '预算 2027.xlsx', e: 'xlsx', m: '86 KB · 周一' }];
+const RECENT = [
+  { n: '预算 2027.xlsx', e: 'xlsx', m: 'Excel · 刚刚' }, { n: '季度报告 Q3.pdf', e: 'pdf', m: 'Edge · 25 分钟前' },
+  { n: '首页改版.psd', e: 'psd', m: 'Photoshop · 2 小时前' }, { n: '周会纪要.md', e: 'md', m: 'Pulse · 昨天' }];
+const TODOS = [{ t: '交周报', d: true }, { t: '给王老师回邮件', d: false }, { t: '15:00 项目评审', d: false }, { t: '续费域名', d: false }, { t: '整理桌面截图', d: true }, { t: '订周五的会议室', d: false }];
+const BATT = [{ k: 'laptop', n: '这台电脑', p: 76, chg: true }, { k: 'phones', n: '耳机', p: 80 }, { k: 'mouse', n: '鼠标', p: 45 }, { k: 'keyboard', n: '键盘', p: 15 }];
+const APPS = [['终端', '#2b2f3a', 'key'], ['计算器', '#5a5f6b', 'grid'], ['画图', '#c2577a', 'brush'], ['截图工具', '#3a7d8c', 'img'], ['记事本', '#6a6a5e', 'list'], ['相机', '#40444f', 'pc'], ['邮件', '#3967a8', 'tabs'], ['音乐', '#a04a5e', 'note'], ['设置', '#4b5160', 'palette'], ['Pulse', '', 'logo'], ['照片', '#7458c4', 'img'], ['地图', '#3f8f74', 'loc']];
+const NOTE_C = [['#F7E8A4', '#3D3720'], ['#D4EAC9', '#2A3A2A'], ['#CFE1F2', '#22303F'], ['#F4D5DE', '#3E2A31'], ['#E0D6F2', '#30293F'], ['#E6E6E2', '#333331']];
+const POMO = { phase: 'focus', total: 25 * 60, left: 18 * 60 + 42, run: false, done: 2 };
+const MEDIA = { on: true, playing: true, title: '海边的星期三', artist: 'Lumen Quartet', album: 'Slow Tide', app: '网易云音乐' };
+const STACKS = {}; // tile id -> index
+let PHOTO_I = 0;
+const TILE_OPTS = {}; // per-tile overrides (edit sheet)
+
+/* ================= widget renderers =================
+   Each returns {html, cls, bg}. Sizes: 1x1 100, 2x1 208x100, 4x1 424x100, 2x2 208, 4x2 424x208, 2x3 208x316, 4x4 424x424 */
+const U = n => n * 100 + (n - 1) * 8;
+const R = {};
+
+R.clock = (k, w, h, o) => {
+  const d = now(), loc = '北京';
+  const faceOf = (dd) => { const m = mode(o); if (m !== 'light') return 'dark'; return S.nightFace && !isDay(dd) && (dd.getHours() >= 18 || dd.getHours() < 6) ? 'night' : 'light'; };
+  const digital = o.digital;
+  if (k === '1x1') return { html: `<div class="abs" style="inset:7px">${dial(86, d, { face: faceOf(d) })}</div>`, cls: 'flush' };
+  if (k === '2x2' && !digital) return { html: `<div class="abs" style="inset:12px">${dial(184, d, { face: faceOf(d), numbers: true })}</div>` };
+  if (k === '2x1' || (k === '2x2' && digital)) return { html: `<div class="col" style="height:100%;justify-content:center"><div class="t-lab t-red">${WD[d.getDay()]}</div><div class="num" style="font:600 ${k === '2x2' ? 54 : 40}px/1.05 var(--disp);letter-spacing:-.02em">${hm(d)}<span style="font-size:14px;font-weight:600;margin-left:3px;color:var(--ink2)">${ampm(d)}</span></div><div class="t-cap" style="margin-top:3px">${d.getMonth() + 1}月${d.getDate()}日${S.lunar ? ' · ' + lunar(d).m + lunar(d).d : ''}</div></div>` };
+  const cs = (o.cities || S.cities).slice(0, 4);
+  const lab = name => { const cd = cityDate(name); const dd = Math.round((new Date(cd.getFullYear(), cd.getMonth(), cd.getDate()) - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 864e5); return { cd, day: dd === 0 ? '今天' : dd > 0 ? '明天' : '昨天', off: offLabel(name) }; };
+  if (k === '4x1') return { html: `<div class="row" style="height:100%;justify-content:space-between">${cs.map(c => { const l = lab(c); return `<div class="col" style="flex:1;min-width:0"><div class="t-body ellip">${c}</div><div class="num" style="font:500 24px/1.15 var(--disp)">${hm(l.cd)}</div><div class="t-cap">${l.day} ${l.off}</div></div>`; }).join('<div style="width:1px;align-self:stretch;margin:6px 10px;background:var(--hair)"></div>')}</div>` };
+  // 4x2 world clock
+  return { html: `<div class="row" style="height:100%;justify-content:space-between;align-items:center">${cs.map(c => { const l = lab(c); return `<div class="col" style="align-items:center;gap:8px;flex:1"><div>${dial(88, l.cd, { face: faceOf(l.cd), seconds: false })}</div><div class="t-body">${c}</div><div class="t-cap" style="margin-top:-6px">${l.day} ${l.off}</div></div>`; }).join('')}</div>` };
+};
+
+R.weather = (k, w, h, o) => {
+  if (S.data === 'loading') return { html: `<div class="skel anim" style="width:60px;height:13px"></div><div class="skel anim" style="width:${w > 200 ? 90 : 54}px;height:${k === '1x1' ? 28 : 40}px;margin-top:10px"></div>${h > 150 ? `<div class="abs t-cap" style="left:14px;bottom:14px">正在获取天气…</div>` : ''}` };
+  if (S.data === 'error') return { html: `<div class="empty">${ic('cloud', k === '1x1' ? 22 : 28)}<b>${k === '1x1' ? '无法更新' : '找不到“' + (o.city || 'Shangha') + '”'}</b>${k !== '1x1' && h > 150 ? '<span>换个写法再试，例如“上海”或“Shanghai”。右键 → 编辑“天气”。</span>' : ''}</div>` };
+  if (S.data === 'empty') return { html: `<div class="empty">${ic('loc', 22)}<b>${k === '1x1' ? '设置城市' : '还没设置城市'}</b>${h > 150 ? '<span>右键 → 编辑“天气”，输入城市名就行</span>' : ''}</div>` };
+  const W0 = weatherData(); if (o.city) W0.city = o.city;
+  const sky = S.sky ? skyOf(W0.code, W0.day) : null;
+  const bg = sky ? `<div class="bgl" style="background:linear-gradient(180deg,${sky[0]},${sky[1]});opacity:${S.fx === 'solid' ? 1 : .92}"></div>` : '';
+  const cls = sky ? 'sky' : '';
+  const head = (sz = 15) => `<div class="row" style="gap:4px"><span style="font:600 ${sz}px var(--ui)" class="ellip">${W0.city}</span>${ic('loc', sz - 4)}</div>`;
+  const hilo = `最高 ${W0.hi}° 最低 ${W0.lo}°`;
+  if (k === '1x1') return { bg, cls, html: `<div class="col" style="height:100%;justify-content:space-between"><div class="row" style="justify-content:space-between"><span class="t-body ellip" style="font-size:12px">${W0.city}</span></div><div class="row" style="justify-content:space-between;align-items:flex-end"><span class="num" style="font:300 36px/1 var(--disp)">${W0.temp}°</span>${wx(W0.code, W0.day, 20)}</div></div>` };
+  if (k === '2x1') return { bg, cls, html: `<div class="row" style="height:100%;gap:12px"><div>${wx(W0.code, W0.day, 40)}</div><div class="num" style="font:300 44px/1 var(--disp)">${W0.temp}°</div><div class="col" style="margin-left:auto;align-items:flex-end;min-width:0">${head(13)}<span class="t-cap" style="margin-top:3px">${COND(W0.code)}</span><span class="t-cap">${W0.hi}° / ${W0.lo}°</span></div></div>` };
+  const top = `<div class="col">${head()}<div class="num" style="font:300 48px/1.05 var(--disp);letter-spacing:-.02em;margin-top:2px">${W0.temp}°</div></div>`;
+  const cond = `<div class="col" style="gap:1px">${wx(W0.code, W0.day, 22)}<div class="t-body" style="margin-top:4px">${COND(W0.code)}</div><div class="t-body">${hilo}</div></div>`;
+  if (k === '2x2' || k === '2x3') return { bg, cls, html: `<div class="col" style="height:100%;justify-content:space-between">${top}${cond}</div>` };
+  const hours = `<div class="row" style="justify-content:space-between;margin-top:auto">${W0.hours.map(x => `<div class="col" style="align-items:center;gap:5px;width:44px"><span class="t-cap" style="font-weight:600">${x.label}</span>${wx(x.code, x.dayH, 20)}<span class="t-body num">${x.temp}°</span></div>`).join('')}</div>`;
+  const topRow = `<div class="row" style="justify-content:space-between;align-items:flex-start">${top}<div class="col" style="align-items:flex-end;gap:1px;text-align:right">${wx(W0.code, W0.day, 22)}<div class="t-body" style="margin-top:4px">${COND(W0.code)}</div><div class="t-body">${hilo}</div></div></div>`;
+  if (k === '4x2' || k === '4x3') return { bg, cls, html: `<div class="col" style="height:100%">${topRow}<div style="height:1px;background:var(--hair);margin:10px 0 9px"></div>${hours}</div>` };
+  // 4x4
+  const span = W0.rhi - W0.rlo || 1;
+  const days = W0.days.map(x => `<div class="row" style="height:30px;gap:12px"><span class="t-body" style="width:40px">${x.label}</span><span style="width:24px;display:grid;place-items:center">${wx(x.code, true, 20)}</span><span class="t-body num" style="width:30px;text-align:right;color:var(--ink2)">${x.lo}°</span><div style="flex:1;height:5px;border-radius:3px;background:var(--track);position:relative"><i style="position:absolute;top:0;bottom:0;border-radius:3px;left:${(x.lo - W0.rlo) / span * 100}%;right:${(W0.rhi - x.hi) / span * 100}%;background:linear-gradient(90deg,#8fd0ff,#ffd60a ${x.hi > 13 ? '85%' : '140%'})"></i></div><span class="t-body num" style="width:30px">${x.hi}°</span></div>`).join('');
+  return { bg, cls, html: `<div class="col" style="height:100%">${topRow}<div style="height:1px;background:var(--hair);margin:10px 0 9px"></div><div class="row" style="justify-content:space-between">${W0.hours.map(x => `<div class="col" style="align-items:center;gap:5px;width:44px"><span class="t-cap" style="font-weight:600">${x.label}</span>${wx(x.code, x.dayH, 20)}<span class="t-body num">${x.temp}°</span></div>`).join('')}</div><div style="height:1px;background:var(--hair);margin:10px 0 4px"></div>${days}<div class="t-cap" style="margin-top:auto">体感 ${W0.feels}° · 湿度 ${W0.hum}% · 风 ${W0.wind} km/h</div></div>` };
+};
+
+function monthGrid(d, cell, withLunar, fs = 12) {
+  const y = d.getFullYear(), m = d.getMonth(), first = new Date(y, m, 1), days = new Date(y, m + 1, 0).getDate();
+  const lead = (first.getDay() - S.weekStart + 7) % 7;
+  const hdr = Array.from({ length: 7 }, (_, i) => { const wd = (i + S.weekStart) % 7; return `<div style="text-align:center;font:700 10px var(--ui);color:${wd === 0 || wd === 6 ? 'var(--ink3)' : 'var(--ink2)'}">${WD1[wd]}</div>`; }).join('');
+  let cells = '';
+  for (let i = 0; i < lead; i++) cells += '<div></div>';
+  for (let dd = 1; dd <= days; dd++) {
+    const x = new Date(y, m, dd), today = dd === d.getDate(), wd = x.getDay(), we = wd === 0 || wd === 6;
+    const L = withLunar ? lunar(x) : null;
+    cells += `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:${cell}px"><span class="num" style="width:${fs * 1.9}px;height:${fs * 1.9}px;border-radius:50%;display:grid;place-items:center;font:600 ${fs}px var(--ui);${today ? 'background:var(--red);color:#fff' : we ? 'color:var(--ink2)' : ''}">${dd}</span>${L ? `<span style="font:500 9px/1 var(--ui);margin-top:1px;color:${L.fest ? 'var(--red)' : 'var(--ink3)'}">${L.cell}</span>` : ''}</div>`;
+  }
+  return `<div style="display:grid;grid-template-columns:repeat(7,1fr);row-gap:0">${hdr}${cells}</div>`;
+}
+R.calendar = (k, w, h, o) => {
+  const d = now(), L = lunar(d), wk = S.weekNo ? ` · 第 ${weekNo(d)} 周` : '';
+  const sub = (S.lunar ? `农历${L.m}${L.d}` : `${d.getFullYear()}年`) + wk;
+  if (k === '1x1') return { html: `<div class="col" style="height:100%;align-items:center;justify-content:center"><div class="t-lab t-red" style="font-weight:700">${WD[d.getDay()]}</div><div class="num" style="font:300 44px/1 var(--disp);margin-top:2px">${d.getDate()}</div></div>` };
+  if (k === '2x1') return { html: `<div class="row" style="height:100%;gap:14px"><div class="col" style="align-items:center;width:58px"><div class="t-lab t-red" style="font-weight:700">${WD[d.getDay()]}</div><div class="num" style="font:300 44px/1 var(--disp)">${d.getDate()}</div></div><div class="col" style="gap:2px;min-width:0"><div class="t-body">${MON[d.getMonth()]}</div><div class="t-cap">${sub}</div></div></div>` };
+  const style = (o.calStyle) || (k === '2x3' || k === '4x4' ? 'month' : 'date');
+  if ((k === '2x2' && style === 'date')) return { html: `<div class="col" style="height:100%"><div class="t-red" style="font:700 13px var(--ui)">${WD[d.getDay()]}</div><div class="num" style="font:300 84px/.95 var(--disp);letter-spacing:-.03em;margin-top:4px">${d.getDate()}</div><div class="t-body" style="margin-top:auto">${MON[d.getMonth()]}</div><div class="t-cap">${sub}</div></div>` };
+  if (k === '2x2') return { html: `<div class="row" style="justify-content:space-between;margin-bottom:4px"><span class="t-red" style="font:700 12px var(--ui)">${MON[d.getMonth()]}</span></div>${monthGrid(d, 24, false, 11)}` };
+  if (k === '2x3') return { html: `<div class="row" style="justify-content:space-between;margin-bottom:6px"><span class="t-red" style="font:700 13px var(--ui)">${MON[d.getMonth()]}</span><span class="t-cap">${d.getFullYear()}</span></div>${monthGrid(d, S.lunar ? 40 : 38, S.lunar, 12)}` };
+  if (k === '4x2' || k === '4x3') return { html: `<div class="row" style="height:100%;gap:16px;align-items:stretch"><div class="col" style="width:132px"><div class="t-red" style="font:700 13px var(--ui)">${WD[d.getDay()]}</div><div class="num" style="font:300 76px/.95 var(--disp);letter-spacing:-.03em;margin-top:4px">${d.getDate()}</div><div class="t-body" style="margin-top:auto">${MON[d.getMonth()]}</div><div class="t-cap">${sub}</div></div><div style="flex:1">${monthGrid(d, 25, false, 11)}</div></div>` };
+  // 4x4
+  return { html: `<div class="row" style="justify-content:space-between;margin-bottom:8px"><span class="t-red" style="font:700 15px var(--ui)">${MON[d.getMonth()]}</span><span class="t-cap">${d.getFullYear()}</span></div>${monthGrid(d, 50, S.lunar, 14)}<div class="t-cap" style="position:absolute;left:14px;right:14px;bottom:12px">今天 ${sub}</div>` };
+};
+
+function sysColor(p) { if (!S.sysWarn) return 'var(--ink)'; return p >= 90 ? '#FF453A' : p >= 80 ? '#FF9F0A' : 'var(--ink)'; }
+R.system = (k, w, h) => {
+  if (S.data === 'loading') return { html: Array.from({ length: k === '1x1' ? 2 : 4 }, () => `<div class="skel anim" style="height:12px;margin:6px 0 12px;width:${50 + Math.random() * 40}%"></div>`).join('') };
+  const cpu = Math.round(SYS.cpu[47]), mem = SYS.mem[47], memU = (31.8 * mem / 100).toFixed(1);
+  const rows = [];
+  if (S.sys.cpu) rows.push({ l: 'CPU', v: cpu + '%', p: cpu });
+  if (S.sys.mem) rows.push({ l: '内存', v: `${memU} / 31.8 GB`, p: mem });
+  if (S.sys.vram) rows.push({ l: '显存', v: '4.1 / 12 GB', p: 34 });
+  if (S.sys.disk) rows.push({ l: 'C 盘', v: '剩 128 GB', p: 75 });
+  if (S.sys.net) rows.push({ l: '网络', v: `↓ ${fmtNet(SYS.net[47])}`, net: true });
+  const rowHtml = (r, lh = 'normal') => `<div style="margin-bottom:9px"><div class="row" style="justify-content:space-between"><span class="t-lab">${r.l}</span><span class="t-body num" style="font-size:12.5px;color:${r.p ? sysColor(r.p) : 'var(--ink)'}">${r.v}</span></div>${r.net ? `<div style="height:14px;margin-top:3px;color:var(--ink2)">${spark(SYS.net.slice(-24), w - 28, 14, 3200)}</div>` : `<div class="bar-t" style="margin-top:5px"><i style="width:${r.p}%;background:${sysColor(r.p)}"></i></div>`}</div>`;
+  if (k === '1x1') return { html: `<div class="col" style="height:100%"><span class="t-lab">CPU</span><span class="num" style="font:300 34px/1.05 var(--disp);color:${sysColor(cpu)}">${cpu}<small style="font-size:16px">%</small></span><div style="margin-top:auto;color:var(--ink2)">${spark(SYS.cpu.slice(-20), 78, 22)}</div></div>` };
+  if (k === '2x1') return { html: `<div class="row" style="height:100%;gap:16px">${[['CPU', cpu, cpu + '%'], ['内存', mem, Math.round(mem) + '%']].map(x => `<div class="col" style="flex:1"><span class="t-lab">${x[0]}</span><span class="num" style="font:300 30px/1.1 var(--disp);color:${sysColor(x[1])}">${x[2]}</span><div class="bar-t" style="margin-top:6px"><i style="width:${x[1]}%;background:${sysColor(x[1])}"></i></div></div>`).join('')}</div>` };
+  if (k === '2x2' || k === '2x3') return { html: rows.slice(0, k === '2x2' ? 4 : 5).map(r => rowHtml(r)).join('') };
+  // 4x2
+  return { html: `<div class="row" style="height:100%;gap:18px;align-items:stretch"><div class="col" style="width:176px"><span class="t-lab">CPU</span><span class="num" style="font:300 44px/1.05 var(--disp);color:${sysColor(cpu)}">${cpu}<small style="font-size:20px">%</small></span><span class="t-cap">16 核 · 24 线程</span><div style="margin-top:auto;color:var(--ink)">${spark(SYS.cpu, 176, 64)}</div></div><div style="width:1px;background:var(--hair)"></div><div style="flex:1;min-width:0">${rows.filter(r => r.l !== 'CPU').slice(0, 4).map(r => rowHtml(r)).join('')}</div></div>` };
+};
+
+R.battery = (k, w, h) => {
+  const list = S.bt ? BATT : BATT.slice(0, 1);
+  const ac = S.data === 'empty';
+  const col = b => b.chg ? '#30D158' : b.p <= S.lowBatt ? '#FF453A' : 'var(--ink)';
+  const glyph = (b, s) => `<span style="color:var(--ink)">${ic(b.k, s)}</span>`;
+  if (ac && k === '1x1') return { html: `<div class="col" style="height:100%;justify-content:space-between">${ic('plug', 26)}<div><div class="t-body">交流电源</div><div class="t-cap">平衡</div></div></div>` };
+  if (k === '1x1') { const b = list[0]; return { html: `<div class="col" style="height:100%;align-items:center;justify-content:center;gap:4px">${ring(62, b.p / 100, 5.5, col(b), 'var(--track)', glyph(b, 22))}<span class="t-body num">${b.chg ? `<span style="color:#30D158;vertical-align:-2px">${ic('bolt', 12)}</span>` : ''}${b.p}%</span></div>` }; }
+  if (k === '2x2' || k === '2x3') {
+    const items = ac ? [{ k: 'plug', p: 100, ac: true }, ...BATT.slice(1)] : list;
+    const slots = items.slice(0, 4);
+    return { html: `<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px 0;height:100%;align-content:center">${slots.map(b => `<div class="col" style="align-items:center;gap:5px">${ring(64, b.ac ? 0 : b.p / 100, 5.5, col(b), 'var(--track)', glyph(b, 22))}<span class="t-cap num" style="font-weight:600;color:var(--ink)">${b.ac ? '电源' : (b.chg ? '⚡' : '') + b.p + '%'}</span></div>`).join('')}${Array.from({ length: Math.max(0, 4 - slots.length) }, () => `<div class="col" style="align-items:center;gap:5px">${ring(64, 0, 5.5, '', 'var(--track)')}<span class="t-cap"> </span></div>`).join('')}</div>` };
+  }
+  if (k === '2x1') { const b = list[0]; return { html: `<div class="row" style="height:100%;gap:14px">${ring(64, b.p / 100, 5.5, col(b), 'var(--track)', glyph(b, 22))}<div class="col"><span class="num" style="font:300 32px/1 var(--disp)">${b.p}%</span><span class="t-cap">${b.chg ? '正在充电' : '剩余 3 小时 10 分'}</span></div></div>` }; }
+  // 4x2 list
+  const items = ac ? [{ k: 'plug', n: '交流电源', ac: true }, ...BATT.slice(1)] : list;
+  return { html: `<div class="col" style="height:100%">${items.map(b => `<div class="row" style="height:36px;gap:12px"><span style="width:24px;display:grid;place-items:center">${glyph(b, 20)}</span><span class="t-body" style="width:84px">${b.n}</span>${b.ac ? '<span class="t-cap" style="flex:1">平衡</span>' : `<div class="bar-t" style="flex:1;height:6px;border-radius:3px"><i style="width:${b.p}%;background:${col(b)}"></i></div><span class="t-body num" style="width:44px;text-align:right">${b.p}%</span>`}</div>`).join('')}<div class="t-cap" style="margin-top:auto">${ac ? '' : '正在充电 · '}电源计划 平衡 · 已开机 3 天 4 小时</div></div>` };
+};
+
+R.media = (k, w, h) => {
+  if (S.data === 'empty' || !MEDIA.on) return { html: `<div class="empty">${ic('note', k === '1x1' ? 22 : 28)}${k !== '1x1' ? '<b>没有在播放</b>' : ''}${h > 150 ? '<span>用任意播放器放音乐或视频，这里就能看到并控制</span>' : ''}</div>` };
+  const play = MEDIA.playing ? 'pause' : 'play';
+  const ctr = (s = 30) => `<div class="row" style="gap:${s > 30 ? 18 : 8}px"><button class="ibtn plain" data-act="media-prev">${ic('prev', s * .6)}</button><button class="ibtn" data-act="media-toggle" style="width:${s + 6}px;height:${s + 6}px">${ic(play, s * .58)}</button><button class="ibtn plain" data-act="media-next">${ic('next', s * .6)}</button></div>`;
+  const bg = S.coverBg ? `<div class="bgl" style="overflow:hidden"><div style="position:absolute;inset:-30%;filter:blur(36px) saturate(1.4);opacity:.6">${coverSVG(w * 1.6)}</div></div>` : '';
+  const src = S.showSource ? `<span class="t-cap ellip">${MEDIA.app}</span>` : '';
+  const cv = (s, r) => `<div style="width:${s}px;height:${s}px;border-radius:${r}px;overflow:hidden;flex:none;box-shadow:0 4px 14px rgba(0,0,0,.25)">${coverSVG(s)}</div>`;
+  if (k === '1x1') return { bg, html: `<div class="abs" style="inset:0;display:grid;place-items:center">${cv(64, 10)}</div><button class="ibtn abs" data-act="media-toggle" style="right:8px;bottom:8px;width:28px;height:28px;background:rgba(0,0,0,.45);color:#fff">${ic(play, 14)}</button>` };
+  if (k === '2x1') return { bg, html: `<div class="row" style="height:100%;gap:11px">${cv(72, 10)}<div class="col" style="min-width:0;flex:1"><span class="t-body ellip">${MEDIA.title}</span><span class="t-cap ellip">${MEDIA.artist}</span><div style="margin-top:6px;margin-left:-6px">${ctr(24)}</div></div></div>` };
+  if (k === '2x2' || k === '2x3') return { bg, html: `<div class="col" style="height:100%"><div class="row" style="justify-content:space-between;align-items:flex-start">${cv(76, 10)}${MEDIA.playing ? `<div class="row" style="gap:2px;height:14px;align-items:flex-end;margin-top:4px">${[8, 13, 6, 11].map((x, i) => `<i style="width:3px;border-radius:2px;background:var(--ink2);height:${x}px;animation:eq ${0.8 + i * .15}s ease-in-out ${i * .1}s infinite alternate"></i>`).join('')}</div>` : ''}</div><div style="margin-top:auto"><div class="t-body ellip">${MEDIA.title}</div><div class="t-cap ellip">${MEDIA.artist}</div></div><div class="row" style="justify-content:space-between;margin-top:6px">${src}${ctr(26)}</div></div>` };
+  return { bg, html: `<div class="row" style="height:100%;gap:16px;align-items:stretch">${cv(180, 12)}<div class="col" style="flex:1;min-width:0">${src}<div style="font:600 17px/1.3 var(--ui);margin-top:6px" class="ellip">${MEDIA.title}</div><div class="t-body" style="color:var(--ink2);font-weight:500">${MEDIA.artist}</div><div class="t-cap">${MEDIA.album}</div><div style="margin-top:auto">${ctr(34)}</div></div></div>` };
+};
+
+R.pomodoro = (k, w, h) => {
+  const t = `${pad(Math.floor(POMO.left / 60))}:${pad(POMO.left % 60)}`, pct = 1 - POMO.left / POMO.total;
+  const phase = POMO.phase === 'focus' ? '专注' : '休息', pc = POMO.phase === 'focus' ? '#FF6A5C' : '#30D158';
+  const btn = s => `<button class="ibtn" data-act="pomo" style="width:${s}px;height:${s}px">${ic(POMO.run ? 'pause' : 'play', s * .5)}</button>`;
+  if (k === '1x1') return { html: `<div class="abs" data-act="pomo" style="inset:0;display:grid;place-items:center;cursor:pointer">${ring(78, pct, 5, pc, 'var(--track)', `<div class="col" style="align-items:center"><span class="num" style="font:600 16px var(--disp)">${t}</span><span class="t-cap" style="font-size:10px">${POMO.run ? phase : '已暂停'}</span></div>`)}</div>` };
+  if (k === '2x1') return { html: `<div class="row" style="height:100%;gap:12px">${ring(64, pct, 5, pc, 'var(--track)', `<span style="width:8px;height:8px;border-radius:50%;background:${pc}"></span>`)}<div class="col" style="flex:1"><span class="num" style="font:300 32px/1 var(--disp)">${t}</span><span class="t-cap">${POMO.run ? phase + '中' : '已暂停'}</span></div>${btn(34)}</div>` };
+  return { html: `<div class="col" style="height:100%"><div class="row" style="justify-content:space-between"><span class="row" style="gap:6px"><i style="width:8px;height:8px;border-radius:50%;background:${pc}"></i><span class="t-body">${phase}</span></span><span class="t-cap">今天 ${POMO.done} 个</span></div><div class="num" style="font:300 ${k === '4x2' ? 64 : 52}px/1 var(--disp);letter-spacing:-.02em;margin-top:auto">${t}</div><div class="bar-t" style="margin:12px 0 12px;height:4px"><i style="width:${pct * 100}%;background:${pc}"></i></div><div class="row" style="gap:8px"><button class="pill" data-act="pomo">${ic(POMO.run ? 'pause' : 'play', 13)}${POMO.run ? '暂停' : (POMO.left === POMO.total ? '开始' : '继续')}</button><button class="ibtn" data-act="pomo-reset" title="重来">${ic('reset', 15)}</button><span class="t-cap" style="margin-left:auto">${POMO.phase === 'focus' ? S.focus : S.shortB} 分钟</span></div></div>` };
+};
+
+function countdownCalc(o) {
+  const d = now(); const target = o.cdDate ? new Date(o.cdDate + 'T00:00') : new Date(d.getFullYear() + 1, 0, 1);
+  const t0 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.round((target - t0) / 864e5);
+  const dayP = (d - t0) / 864e5, wd = (d.getDay() + 6) % 7, weekP = (wd + dayP) / 7;
+  const mdays = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(), monP = (d.getDate() - 1 + dayP) / mdays;
+  const y0 = new Date(d.getFullYear(), 0, 1), y1 = new Date(d.getFullYear() + 1, 0, 1), yearP = (d - y0) / (y1 - y0);
+  return { title: o.cdTitle || '元旦', target, days, dayP, weekP, monP, yearP };
+}
+R.countdown = (k, w, h, o) => {
+  const c = countdownCalc(o), ds = `${c.target.getFullYear()}年${c.target.getMonth() + 1}月${c.target.getDate()}日 ${WD[c.target.getDay()]}`;
+  const big = (fs) => `<div class="row" style="align-items:baseline;gap:4px"><span class="num" style="font:300 ${fs}px/1 var(--disp);letter-spacing:-.03em">${Math.abs(c.days)}</span><span class="t-body">天</span></div>`;
+  if (k === '1x1') return { html: `<div class="col" style="height:100%"><span class="t-lab ellip">${c.title}</span><div style="margin-top:auto">${big(38)}</div></div>` };
+  if (k === '2x1') return { html: `<div class="row" style="height:100%;justify-content:space-between"><div class="col"><span class="t-body">${c.title}</span><span class="t-cap">${c.target.getMonth() + 1}月${c.target.getDate()}日 · ${c.days >= 0 ? '还有' : '已过'}</span></div>${big(44)}</div>` };
+  const left = `<div class="col" style="height:100%"><span class="t-lab">距离</span><span style="font:600 17px var(--ui)" class="ellip">${c.title}</span><div style="margin-top:auto">${big(64)}</div><span class="t-cap" style="margin-top:4px">${ds}</span></div>`;
+  if (k === '2x2' || k === '2x3') return { html: left };
+  const bars = [['今天', c.dayP], ['本周', c.weekP], ['本月', c.monP], ['今年', c.yearP]].map(x => `<div style="margin-bottom:11px"><div class="row" style="justify-content:space-between"><span class="t-lab">${x[0]}</span><span class="t-body num" style="font-size:12.5px">${Math.floor(x[1] * 100)}%</span></div><div class="bar-t" style="margin-top:5px"><i style="width:${x[1] * 100}%"></i></div></div>`).join('');
+  return { html: `<div class="row" style="height:100%;gap:18px;align-items:stretch"><div style="width:170px">${left}</div><div style="width:1px;background:var(--hair)"></div><div style="flex:1;padding-top:2px">${bars}</div></div>` };
+};
+
+R.todo = (k, w, h) => {
+  const list = S.data === 'empty' ? [] : TODOS;
+  const left = list.filter(x => !x.d).length;
+  if (k === '1x1') return { html: `<div class="col" style="height:100%"><span class="t-lab">待办</span><span class="num" style="font:300 40px/1.05 var(--disp);margin-top:auto">${left}</span><span class="t-cap">项没做完</span></div>` };
+  if (!list.length) return { html: `<div class="t-lab">待办</div><div class="empty">${ic('check', 22)}<b>都做完了</b><span>点这里写下一件事</span></div>` };
+  const cap = Math.floor((h - 28 - 20 - 26) / 26);
+  const items = [...list.filter(x => !x.d), ...list.filter(x => x.d)].slice(0, Math.max(1, cap));
+  const one = x => `<div class="todo-i ${x.d ? 'done' : ''}" data-act="todo" data-t="${x.t}"><span class="c">${x.d ? `<span style="color:#fff">${ic('check', 11)}</span>` : ''}</span><span class="ellip">${x.t}</span></div>`;
+  const body = k === '4x2' || k === '4x3' || k === '4x4'
+    ? `<div style="display:grid;grid-template-columns:1fr 1fr;column-gap:18px">${[...list.filter(x => !x.d), ...list.filter(x => x.d)].slice(0, 10).map(one).join('')}</div>`
+    : items.map(one).join('');
+  return { html: `<div class="row" style="justify-content:space-between;margin-bottom:6px"><span class="t-body">待办</span><span class="t-cap num">${list.length - left}/${list.length}</span></div>${body}<div class="todo-i" style="color:var(--ink3);position:absolute;bottom:10px;left:14px"><span style="width:17px;display:grid;place-items:center">${ic('plus', 14)}</span><span style="color:var(--ink3)">添加待办</span></div>` };
+};
+
+R.note = (k, w, h, o) => {
+  const ci = o.noteColor ?? 0, dk = mode(o) !== 'light';
+  const c = NOTE_C[ci];
+  const bg = `<div class="bgl" style="background:${c[0]};opacity:${S.fx === 'solid' ? 1 : .95};${dk ? 'filter:brightness(.9)' : ''}"></div>`;
+  return { bg, cls: 'paper', html: `<div contenteditable="true" spellcheck="false" style="outline:none;font:500 14px/1.6 var(--ui);height:100%;overflow:hidden;cursor:text"><div style="font-weight:700">周五前寄发票</div>顺丰到付，单号写在快递单背面。<br>记得把<b style="font-weight:600">季度报告 Q3</b>一起打印两份。</div>` };
+};
+
+R.photos = (k, w, h, o) => {
+  if (S.data === 'empty') return { html: `<div class="empty">${ic('img', 26)}<b>文件夹里还没有照片</b>${h > 150 ? `<span>右键 → 编辑“照片”，换一个文件夹</span>` : ''}</div>` };
+  if (S.data === 'loading') return { html: `<div class="skel anim abs" style="inset:0;border-radius:0"></div>` };
+  const p = PHOTOS[(PHOTO_I + (o.photoOffset || 0)) % PHOTOS.length];
+  const cap = S.caption && k !== '1x1' ? `<div class="abs" style="left:0;right:0;bottom:0;padding:28px 14px 12px;background:linear-gradient(180deg,transparent,rgba(0,0,0,.42))"><div class="t-body ellip" style="color:#fff">${k === '2x1' ? p.date : p.cap}</div>${w > 300 && h > 150 ? `<div class="t-cap" style="color:rgba(255,255,255,.8)">${p.date}</div>` : ''}</div>` : '';
+  return { cls: 'photo', bg: `<div class="bgl ph" style="animation:fadein .6s ease">${p.svg(w, h)}</div>`, html: `<div class="abs" style="inset:0">${cap}</div>`, nopad: true };
+};
+
+function fileRows(list, n, w) { return list.slice(0, n).map(f => `<div class="row" style="height:40px;gap:10px">${fileIc(f.e, 24)}<div class="col" style="min-width:0;flex:1"><span class="t-body ellip" style="font-size:12.5px">${f.n}</span><span class="t-cap ellip">${f.m}</span></div></div>`).join(''); }
+R.downloads = (k, w, h) => {
+  if (S.data === 'empty') return { html: `<div class="t-body">下载</div><div class="empty">${ic('down', 22)}<b>下载文件夹是空的</b></div>` };
+  if (k === '1x1') return { html: `<div class="col" style="height:100%">${ic('down', 24)}<div style="margin-top:auto" class="t-body">下载</div><div class="t-cap">今天 2 个新文件</div></div>` };
+  if (k === '4x2') return { html: `<div class="row" style="justify-content:space-between;margin-bottom:4px"><span class="t-body">下载</span><span class="t-cap">今天 2 个新文件</span></div><div style="display:grid;grid-template-columns:1fr 1fr;column-gap:16px">${fileRows(DOWNLOADS, 6)}</div>` };
+  return { html: `<div class="row" style="justify-content:space-between;margin-bottom:2px"><span class="t-body">下载</span><span class="t-cap">${DOWNLOADS.length} 项</span></div>${fileRows(DOWNLOADS, Math.floor((h - 44) / 40))}` };
+};
+R.recent = (k, w, h) => {
+  if (k === '4x2') return { html: `<div class="t-body" style="margin-bottom:4px">最近使用</div><div style="display:grid;grid-template-columns:1fr 1fr;column-gap:16px">${fileRows(RECENT, 4)}</div>` };
+  return { html: `<div class="t-body" style="margin-bottom:2px">最近使用</div>${fileRows(RECENT, Math.floor((h - 44) / 40))}` };
+};
+R.recycle = (k, w, h) => {
+  const empty = S.data === 'empty';
+  if (k === '2x1') return { html: `<div class="row" style="height:100%;gap:14px">${ic(empty ? 'trash0' : 'trash', 34)}<div class="col"><span class="t-body">回收站</span><span class="t-cap">${empty ? '空的' : '12 项 · 22.4 MB'}</span></div>${empty ? '' : '<button class="pill" style="margin-left:auto;height:28px;padding:0 12px">清空</button>'}</div>` };
+  return { html: `<div class="col" style="height:100%">${ic(empty ? 'trash0' : 'trash', 26)}<div style="margin-top:auto" class="t-body">回收站</div><div class="t-cap">${empty ? '空的' : '12 项'}</div></div>` };
+};
+R.thispc = (k, w, h) => {
+  if (k === '2x1' || k === '2x2') return { html: `<div class="col" style="height:100%;justify-content:center;gap:10px">${[['C:', 75, '剩 128 GB'], ['D:', 41, '剩 1.1 TB']].map(x => `<div><div class="row" style="justify-content:space-between"><span class="t-body">${x[0]}</span><span class="t-cap">${x[2]}</span></div><div class="bar-t" style="margin-top:5px"><i style="width:${x[1]}%;background:${sysColor(x[1])}"></i></div></div>`).join('')}</div>` };
+  return { html: `<div class="col" style="height:100%">${ic('pc', 26)}<div style="margin-top:auto" class="t-body">此电脑</div><div class="t-cap">3 个驱动器</div></div>` };
+};
+R.disk = (k, w, h) => {
+  if (k === '2x1') return { html: `<div class="row" style="height:100%;gap:14px">${ring(66, .75, 6, 'var(--ink)', 'var(--track)', '<span class="t-body num" style="font-size:12px">75%</span>')}<div class="col"><span class="t-body">本地磁盘 (C:)</span><span class="t-cap">已用 384 GB，共 512 GB</span></div></div>` };
+  return { html: `<div class="col" style="height:100%;align-items:center;justify-content:center;gap:5px">${ring(58, .75, 5.5, sysColor(75) === 'var(--ink)' ? 'var(--ink)' : sysColor(75), 'var(--track)', '<span class="t-body">C:</span>')}<span class="t-cap">剩 128 GB</span></div>` };
+};
+R.launcher = (k) => ({ html: `<div class="col" style="height:100%;align-items:center;justify-content:center;gap:6px">${LOGO(k === '1x1' ? 44 : 50)}<span class="t-body" style="font-size:12px">Pulse</span></div>` });
+R.staging = (k, w, h) => {
+  if (S.data === 'empty' || k === '4x1') return { html: `<div class="abs" style="inset:10px;border:1.5px dashed var(--ink3);border-radius:13px;display:flex;align-items:center;justify-content:center;gap:10px;color:var(--ink2)">${ic('tray', 22)}<div class="col"><span class="t-body" style="color:var(--ink)">暂存区</span><span class="t-cap">拖到这里，或选中后按 <span class="chipkey">Ctrl+Shift+S</span></span></div></div>` };
+  return { html: `<div class="row" style="height:100%;gap:12px"><div style="position:relative;width:56px;height:56px;flex:none">${['zip', 'pdf', 'heic'].map((e, i) => `<div style="position:absolute;left:${i * 9}px;top:${(2 - i) * 4}px;transform:rotate(${(i - 1) * 6}deg)">${fileIc(e, 32)}</div>`).join('')}</div><div class="col" style="min-width:0"><span class="t-body">暂存区</span><span class="t-cap">3 个文件 · 818 MB</span><span class="t-cap" style="color:var(--ink3)">和 Pulse 里是同一份</span></div></div>` };
+};
+R.apps = (k, w, h) => {
+  const cols = k === '4x2' ? 6 : 4, n = k === '4x2' ? 12 : 8;
+  return { html: `<div style="display:grid;grid-template-columns:repeat(${cols},1fr);row-gap:10px;padding-top:4px">${APPS.slice(0, n).map(a => `<div class="col" style="align-items:center;gap:5px">${a[2] === 'logo' ? LOGO(44) : `<div style="width:44px;height:44px;border-radius:11px;background:linear-gradient(180deg,color-mix(in srgb,${a[1]} 82%,#fff),${a[1]});display:grid;place-items:center;color:#fff;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.25),0 2px 6px rgba(0,0,0,.18)">${ic(a[2], 22)}</div>`}<span class="t-cap ellip" style="color:var(--ink);font-weight:500;max-width:62px">${a[0]}</span></div>`).join('')}</div>` };
+};
+
+const NAMES = { clock: '时钟', weather: '天气', calendar: '日历', system: '系统', battery: '电池', media: '正在播放', pomodoro: '番茄钟', countdown: '倒数日', todo: '待办', note: '便笺', photos: '照片', downloads: '下载', recent: '最近使用', recycle: '回收站', thispc: '此电脑', disk: '本地磁盘', launcher: 'Pulse', staging: '暂存区', apps: '应用' };
+
+/* ================= tile wrapper ================= */
+function mode(o = {}) { const s = o.scheme || S.scheme; if (s === 'auto') return S.theme === 'light' ? 'light' : 'dark'; return s; }
+const REG = {};
+let TID = 0;
+function tile(kind, c, r, o = {}) {
+  const id = o.id || ('t' + (TID++)); REG[id] = { kind, c, r, o: { ...o, id } };
+  return tileHTML(id);
+}
+function tileHTML(id) {
+  const { c, r, o } = REG[id]; let kind = REG[id].kind;
+  const ov = TILE_OPTS[id] || {}; const oo = { ...o, ...ov };
+  if (o.stack) kind = o.stack[STACKS[id] || 0];
+  const w = U(c), h = U(r), k = c + 'x' + r;
+  let body;
+  try { body = R[kind](k, w, h, oo) || {}; } catch (e) { body = { html: '<div class="t-cap">' + e.message + '</div>' }; console.error(e); }
+  const m = mode(oo);
+  const dots = o.stack ? `<div class="dots">${o.stack.map((_, i) => `<i class="${i === (STACKS[id] || 0) ? 'on' : ''}"></i>`).join('')}</div>` : '';
+  const pos = o.x != null ? `left:${o.x}px;top:${o.y}px;` : '';
+  return `<div class="w m-${m} fx-${S.fx} ${body.cls || ''}" id="${id}" data-kind="${kind}" data-size="${k}" style="${pos}width:${w}px;height:${h}px;--tint:${tintColor()}">${body.bg || ''}<div class="wc" ${body.nopad ? 'style="padding:0"' : ''}>${body.html}</div>${dots}</div>`;
+}
+function refresh(filter) {
+  document.querySelectorAll('.w[id]').forEach(el => { const reg = REG[el.id]; if (!reg) return; const kind = reg.o.stack ? reg.o.stack[STACKS[el.id] || 0] : reg.kind; if (filter && !filter(kind, el)) return; if (el.contains(document.activeElement) && document.activeElement.isContentEditable) return; el.outerHTML = tileHTML(el.id); });
+}
+
+/* ================= desktop view ================= */
+function buildDesktop() {
+  const X = 1600 - 24 - 532, Y = 24, g = (c, r) => ({ x: X + c * 108, y: Y + r * 108 });
+  let t = '';
+  t += tile('photos', 4, 2, { id: 'd-photos', ...g(0, 0) });
+  t += tile('thispc', 1, 1, { id: 'd-pc', ...g(4, 0) });
+  t += tile('clock', 1, 1, { id: 'd-clock', ...g(4, 1), stack: ['clock', 'recycle'] });
+  t += tile('weather', 2, 2, { id: 'd-weather', ...g(0, 2) });
+  t += tile('calendar', 2, 2, { id: 'd-cal', ...g(2, 2), stack: ['calendar', 'recent', 'countdown'] });
+  t += tile('disk', 1, 1, { id: 'd-disk', ...g(4, 2) });
+  t += tile('launcher', 1, 1, { id: 'd-pulse', ...g(4, 3) });
+  t += tile('system', 4, 2, { id: 'd-sys', ...g(0, 4) });
+  t += tile('pomodoro', 1, 1, { id: 'd-pomo', ...g(4, 4) });
+  t += tile('battery', 1, 1, { id: 'd-batt', ...g(4, 5) });
+  t += tile('staging', 2, 1, { id: 'd-stage', ...g(0, 6) });
+  t += tile('media', 2, 1, { id: 'd-media', ...g(2, 6) });
+  t += tile('recycle', 1, 1, { id: 'd-bin', ...g(4, 6) });
+  // free-placed column left of the board
+  const FX = X - 24 - 208;
+  t += tile('todo', 2, 2, { id: 'd-todo', x: FX, y: 24 });
+  t += tile('note', 2, 2, { id: 'd-note', x: FX, y: 24 + 216 });
+  t += tile('clock', 4, 2, { id: 'd-world', x: FX + 208 - 424, y: 24 + 432 });
+  document.getElementById('desk').innerHTML = `<div class="wall">${wallSVG(S.wall)}</div><div class="hint"><h2>桌面整理 · 小组件</h2><p>没有标题条，内容就是标题；一个组件只放一个主数字。</p><p>颜色只表达意思：今天是红色，秒针是橙色，天气用天空的颜色，占用高了才变橙变红。</p><p>右键任意小组件 → <b>编辑</b>；在叠放上滚动滚轮切换（右侧小圆点）。</p><p style="opacity:.7">番茄钟、待办、播放按钮都能点；便笺可以直接打字。</p></div>${t}<div class="taskbar"><i class="win"><s></s><s></s><s></s><s></s></i><i></i><i></i><i></i><i></i><div class="tray">${hm(now())}<br>${now().getFullYear()}/${now().getMonth() + 1}/${now().getDate()}</div></div>`;
+  fit();
+}
+function fit() { const f = document.getElementById('fit'), m = document.querySelector('main'); const s = Math.min((m.clientWidth - 40) / 1600, (m.clientHeight - 40) / 960); f.style.transform = `scale(${s}) translate(-50%,-50%)`; f.style.transformOrigin = '0 0'; f.style.left = '50%'; f.style.top = '50%'; f.style.transform = `translate(-50%,-50%) scale(${s})`; f.style.transformOrigin = 'center'; }
+
+/* ================= gallery view ================= */
+const GALLERY = [
+  ['clock', '1x1 表盘铺满整块；夜里表盘变深（可关）；4×2 是世界时钟，城市在设置里改', ['1x1', '2x1', ['2x2', {}], ['2x2', { digital: true }, '2×2 数字'], '4x1', '4x2']],
+  ['weather', '整块用当下天空的颜色：晴天蓝、阴天灰、夜里深蓝（设置里可改回和其他小组件同色）', ['1x1', '2x1', '2x2', '4x2', '4x4']],
+  ['calendar', '只有“今天”是红色；农历和周数可开关；2×2 可在编辑里换成月历', ['1x1', '2x1', '2x2', ['2x2', { calStyle: 'month' }, '2×2 月历'], '2x3', '4x2']],
+  ['system', '默认单色，占用超过 80% 变橙、90% 变红；显示哪些项目可选', ['1x1', '2x1', '2x2', '4x2']],
+  ['battery', '充电时绿色，低于提醒线变红；台式机显示交流电源，蓝牙设备照常列出', ['1x1', '2x1', '2x2', '4x2']],
+  ['media', '封面颜色做背景（可关）；没有播放时安静地提示', ['1x1', '2x1', '2x2', '4x2']],
+  ['pomodoro', '点一下开始/暂停；专注红、休息绿', ['1x1', '2x1', '2x2']],
+  ['countdown', '默认数到下一个元旦；名称和日期在编辑里改', ['1x1', '2x1', '2x2', '4x2']],
+  ['todo', '点圆圈勾掉；做完的沉到底下', ['1x1', '2x2', '2x3', '4x2']],
+  ['note', '六种纸色，深色模式下纸色稍暗一点，字始终是深色', [['2x2', { noteColor: 0 }, '黄'], ['2x2', { noteColor: 1 }, '绿'], ['2x2', { noteColor: 2 }, '蓝'], ['2x2', { noteColor: 3 }, '粉'], ['4x2', { noteColor: 4 }, '4×2 紫']]],
+  ['photos', '照片铺满，左下角只留地点和日期（可关）', ['2x1', '2x2', '4x2']],
+  ['downloads', '', ['1x1', '2x2', '4x2']],
+  ['recent', '', ['2x2', '4x2']],
+  ['recycle', '', ['1x1', '2x1']],
+  ['thispc', '', ['1x1', '2x1']],
+  ['disk', '', ['1x1', '2x1']],
+  ['launcher', '', ['1x1']],
+  ['staging', '', ['2x1', '4x1']],
+  ['apps', '', ['2x2', '4x2']],
+];
+function buildGallery() {
+  document.getElementById('gwall').innerHTML = wallSVG(S.wall);
+  let h = `<div class="gintro"><h2>全部小组件</h2><ol><li>去掉彩色标题条和图标徽章：内容自己说明是什么。</li><li>每块只有一个主角：大号细体数字，其余信息退到次要色。</li><li>一个材质配方，三种墨色（浅/深/着色），实色模式同样成立。</li><li>颜色有含义才出现：今天、秒针、天空、电量、高占用。</li><li>不再用发光、光晕、渐变描边；阴影只有一层柔和投影。</li><li>统一网格：100 + 8，圆角 22（1×1 为 20），内边距 14。</li></ol></div>`;
+  for (const [kind, desc, sizes] of GALLERY) {
+    h += `<div class="gsec"><div class="gh"><h3>${NAMES[kind]}</h3>${desc ? `<div class="gd">${desc}</div>` : ''}</div><div class="gl">`;
+    sizes.forEach((sz, i) => { const [k, o, lab] = Array.isArray(sz) ? sz : [sz, {}, null]; const [c, r] = k.split('x').map(Number); h += `<div class="gitem"><div class="wbox" style="width:${U(c)}px;height:${U(r)}px">${tile(kind, c, r, { id: `g-${kind}-${i}`, ...o })}</div><label>${lab || k.replace('x', '×')}</label></div>`; });
+    h += `</div></div>`;
+  }
+  document.getElementById('gallery').innerHTML = h;
+}
+
+/* ================= settings view (Pulse 设置 › 扩展商店 › 插件设置 › 桌面整理) ================= */
+const sw = (key, on) => `<button class="psw ${on ? 'on' : ''}" data-sw="${key}" aria-label="${key}"></button>`;
+const pseg = (key, opts, cur) => `<div class="pseg">${opts.map(([v, l]) => `<button class="${String(v) === String(cur) ? 'on' : ''}" data-seg="${key}" data-v="${v}">${l}</button>`).join('')}</div>`;
+const prow = (t, d, ctrl, extra = '') => `<div class="prow ${extra}"><div class="tx"><div class="tt">${t}</div>${d ? `<div class="dd">${d}</div>` : ''}</div>${ctrl}</div>`;
+function pslider(key, stops, cur, fmt) { const i = Math.max(0, stops.indexOf(cur)); return `<div class="pslider"><div class="cur">${fmt(cur)}</div><input type="range" min="0" max="${stops.length - 1}" step="1" value="${i}" data-slider="${key}" data-stops="${stops.join(',')}"><div class="st"><span>${fmt(stops[0])}</span><span>${fmt(stops[stops.length - 1])}</span></div></div>`; }
+const STABS = [['weather', '天气'], ['clock', '时钟'], ['calendar', '日历'], ['system', '系统'], ['photos', '照片'], ['pomodoro', '番茄钟'], ['battery', '电池'], ['media', '正在播放']];
+function tabBody(t) {
+  if (t === 'weather') return [
+    prow('城市', '天气小组件默认显示这里；单个天气小组件可以右键另设城市', `<input class="pin" data-in="city" value="${S.city}" placeholder="例如 北京、上海、Hangzhou">`),
+    prow('温度单位', '', pseg('unit', [['C', '摄氏 °C'], ['F', '华氏 °F']], S.unit)),
+    prow('更新间隔', '数据来自 Open-Meteo，不需要账号；全屏或节能时暂停更新', pseg('wEvery', [[15, '15 分钟'], [30, '30 分钟'], [60, '1 小时']], S.wEvery))].join('');
+  if (t === 'clock') return [
+    prow('24 小时制', '关掉后显示“下午 3:05”', sw('h24', S.h24)),
+    prow('显示秒针', '表盘上的橙色秒针；全屏或节能时自动停走', sw('seconds', S.seconds)),
+    prow('夜里表盘变深', '当地 18:00 到 6:00 表盘换成深色，看世界时钟时一眼知道那边是晚上', sw('nightFace', S.nightFace)),
+    `<div class="prow stack"><div class="tx"><div class="tt">世界时钟城市</div><div class="dd">4×1 和 4×2 的时钟显示这几个城市，最多 4 个，按这个顺序排</div></div><div class="chips">${S.cities.map((c, i) => `<span class="chip">${c}<small>${offLabel(c)}</small><button data-act="city-del" data-i="${i}" aria-label="移除">${ic('x', 12)}</button></span>`).join('')}${S.cities.length < 4 ? `<span class="chip add" data-act="city-add">${ic('plus', 12)} 添加城市</span>` : ''}</div></div>`].join('');
+  if (t === 'calendar') return [
+    prow('显示农历', '日期下面显示农历和节日', sw('lunar', S.lunar)),
+    prow('每周第一天', '', pseg('weekStart', [[1, '周一'], [0, '周日']], S.weekStart)),
+    prow('显示周数', '在日期旁边显示“第 48 周”', sw('weekNo', S.weekNo))].join('');
+  if (t === 'system') return [
+    `<div class="prow stack"><div class="tx"><div class="tt">显示哪些项目</div><div class="dd">2×2 最多放 4 项，按这个顺序取</div></div><div>${[['cpu', 'CPU'], ['mem', '内存'], ['vram', '显存'], ['disk', 'C 盘'], ['net', '网络']].map(([k, l]) => `<span class="pcheck ${S.sys[k] ? 'on' : ''}" data-act="sys" data-k="${k}"><i>${S.sys[k] ? ic('check', 12) : ''}</i>${l}</span>`).join('')}</div></div>`,
+    prow('刷新间隔', '间隔越长越省电', pseg('sysEvery', [[1, '1 秒'], [2, '2 秒'], [5, '5 秒']], S.sysEvery)),
+    prow('占用高时变色', '超过 80% 变橙，超过 90% 变红；关掉后一直是单色', sw('sysWarn', S.sysWarn))].join('');
+  if (t === 'photos') return [
+    prow('照片文件夹', `<span style="font-family:Consolas,monospace;font-size:11.5px">${S.photoDir}</span><br>新放进去的照片会自动出现；单个照片小组件可以右键另选文件夹`, `<button class="pbtn">${ic('folder', 14)}更改…</button>`),
+    `<div class="prow"><div class="tx"><div class="tt">换图间隔</div><div class="dd">选“不自动”时，右键“换一张照片”才换</div></div>${pslider('photoEvery', [0, 5, 10, 30, 60, 300], S.photoEvery, v => v === 0 ? '不自动' : v < 60 ? v + ' 秒' : (v / 60) + ' 分钟')}</div>`,
+    prow('随机顺序', '关掉时从最新的照片往前放', sw('shuffle', S.shuffle)),
+    prow('显示地点和日期', '从照片的拍摄信息读取，没有就不显示', sw('caption', S.caption))].join('');
+  if (t === 'pomodoro') return [
+    `<div class="prow"><div class="tx"><div class="tt">专注时长</div></div>${pslider('focus', [15, 20, 25, 30, 45, 60], S.focus, v => v + ' 分钟')}</div>`,
+    prow('短休息', '', pseg('shortB', [[5, '5 分钟'], [10, '10 分钟']], S.shortB)),
+    prow('长休息', '每完成 4 个专注后', pseg('longB', [[15, '15 分钟'], [20, '20 分钟'], [30, '30 分钟']], S.longB)),
+    prow('结束时提示音', '用系统通知声音', sw('chime', S.chime))].join('');
+  if (t === 'battery') return [
+    prow('显示蓝牙设备', '耳机、鼠标、键盘等会报告电量的设备', sw('bt', S.bt)),
+    `<div class="prow"><div class="tx"><div class="tt">低电量提醒线</div><div class="dd">低于这个电量时圆环变红</div></div>${pslider('lowBatt', [10, 15, 20, 30], S.lowBatt, v => v + '%')}</div>`].join('');
+  return [
+    prow('用封面颜色做背景', '把专辑封面模糊后铺在底下；关掉后和其他小组件同色', sw('coverBg', S.coverBg)),
+    prow('显示播放来源', '例如“网易云音乐”“Edge”', sw('showSource', S.showSource))].join('');
+}
+function previewFor(t) {
+  const map = { weather: [['weather', 2, 2], ['weather', 4, 2]], clock: [['clock', 1, 1], ['clock', 2, 1], ['clock', 4, 2]], calendar: [['calendar', 2, 2], ['calendar', 2, 3]], system: [['system', 2, 2], ['system', 4, 2]], photos: [['photos', 4, 2]], pomodoro: [['pomodoro', 2, 2], ['pomodoro', 1, 1]], battery: [['battery', 2, 2], ['battery', 4, 2]], media: [['media', 2, 2], ['media', 4, 2]] };
+  return map[t].map(([k, c, r], i) => tile(k, c, r, { id: `pv-${k}-${i}` })).join('');
+}
+function optPreview(scheme) {
+  const m = scheme === 'auto' ? (S.theme === 'light' ? 'light' : 'dark') : scheme;
+  const ink = m === 'light' ? '#1d1d1f' : '#fff', bg = m === 'light' ? 'rgba(250,250,248,.7)' : m === 'dark' ? 'rgba(28,28,30,.55)' : `color-mix(in srgb,${tintColor()} 64%,rgba(16,16,18,.35))`;
+  return `<div class="pv"><div style="position:absolute;inset:0">${wallSVG(S.wall)}</div><div style="position:absolute;left:10px;top:10px;width:54px;height:54px;border-radius:12px;background:${bg};backdrop-filter:blur(8px);color:${ink};padding:7px"><div style="font:700 8px var(--ui);color:#FF3B30">${WD[now().getDay()]}</div><div style="font:300 24px/1 var(--disp)">${now().getDate()}</div></div><div style="position:absolute;left:70px;top:10px;width:54px;height:54px;border-radius:12px;background:${bg};backdrop-filter:blur(8px);color:${ink};padding:7px"><div style="font:600 8px var(--ui);opacity:.6">CPU</div><div style="font:300 20px/1.1 var(--disp)">23%</div><div style="height:3px;border-radius:2px;background:currentColor;opacity:.25;margin-top:5px"></div></div>${scheme === 'auto' ? `<div style="position:absolute;right:6px;bottom:6px;font:600 9px var(--ui);color:#fff;background:rgba(0,0,0,.35);padding:1px 5px;border-radius:4px">${S.theme === 'light' ? '浅' : '深'}</div>` : ''}</div>`;
+}
+function buildSettings() {
+  const nav = (g, items) => `<div class="gh">${g}</div>` + items.map(([i, l, on]) => `<div class="ni ${on ? 'on' : ''}">${ic(i, 16)}${l}</div>`).join('');
+  const page = `
+  <div class="crumb"><span>扩展商店</span>${ic('chev', 16, 'style="opacity:.5"')}插件设置</div>
+  <div class="pintro">管理已安装增强包提供的设置。</div>
+  <div class="psel"><span>选择增强包</span><div class="pselect">桌面整理${ic('chevd', 14)}</div><div class="pseg"><button class="on">扩展设置</button><button>右键菜单</button></div></div>
+  <div class="pcard"><div class="prow"><div class="tx"><div class="tt" style="font-weight:600">启用桌面整理</div><div class="dd">散落的文件按规则收进分组，常用位置变成磁贴。只改显示位置，文件都还在桌面文件夹里；关掉就回到 Windows 桌面。</div><div class="dd" style="margin-top:4px">正在运行 · 更改会立即应用到桌面</div></div>${sw('x-en', true)}</div></div>
+  <div class="psec">整理</div>
+  <div class="pcard">${prow('桌面体检', '找出已装好的安装包、空文件夹和很久没碰的文件；只给建议，不自动删除', '<button class="pbtn" style="width:112px;justify-content:center">开始体检</button>')}${prow('按规则重新整理', '把散落的文件重新收进分组；手动拖进分组的不会被移走', '<button class="pbtn" style="width:112px;justify-content:center">重新整理</button>')}</div>
+  <div class="psec">外观与场景</div>
+  <div class="pcard">${prow('窗口效果', '分组、磁贴和菜单一起变；系统关闭透明效果时用纯色', pseg('fx-mirror', [['f', '跟随 Pulse'], ['a', '亚克力'], ['m', 'Mica'], ['ma', 'Mica Alt'], ['n', '无'], ['l', '液态玻璃']], S.fx === 'solid' ? 'n' : S.fx === 'liquid' ? 'l' : 'a'))}${prow('不透明度', '0% 时分组和磁贴只剩内容，壁纸完全露出来；菜单始终保留足够的对比度', '<div class="pslider"><input type="range" min="0" max="5" value="3"><div class="st"><span>0%</span><span>100%</span></div></div>')}</div>
+  <div class="psec" id="sec-widgets">小组件<span class="pnew">新</span></div>
+  <div class="pcard">
+    <div class="prow stack"><div class="tx"><div class="tt">小组件配色</div><div class="dd">所有小组件一起变；材质跟着上面的“窗口效果”</div></div>
+      <div class="optcards">${[['auto', '跟随主题'], ['light', '浅色'], ['dark', '深色'], ['tint', '着色']].map(([v, l]) => `<div class="optc ${S.scheme === v ? 'on' : ''}" data-seg="scheme" data-v="${v}">${optPreview(v)}<span>${l}</span></div>`).join('')}</div></div>
+    <div class="prow ${S.scheme === 'tint' ? '' : 'pmuted'}"><div class="tx"><div class="tt">着色颜色</div><div class="dd">“取自壁纸”会在换壁纸后跟着变</div></div><div class="swatches"><button class="auto ${S.tintAuto ? 'on' : ''}" data-act="tint-auto">取自壁纸</button>${SWATCH.map(c => `<button style="background:${c}" class="${!S.tintAuto && S.tint === c ? 'on' : ''}" data-act="tint" data-c="${c}" aria-label="${c}"></button>`).join('')}</div></div>
+    ${prow('天气用天空的颜色', '晴天蓝、阴天灰、夜里深蓝；关掉后和其他小组件同色', sw('sky', S.sky))}
+    ${prow('叠放自动轮换', '没人看的时候，叠放里的小组件隔一会儿换到下一个；鼠标停在上面时不换', sw('rotate', S.rotate))}
+  </div>
+  <div class="psec">各小组件</div>
+  <div class="pcard"><div class="ptabs">${STABS.map(([v, l]) => `<button class="${S.setTab === v ? 'on' : ''}" data-seg="setTab" data-v="${v}">${l}</button>`).join('')}</div>${tabBody(S.setTab)}</div>
+  <div class="psec">分组与磁贴</div>
+  <div class="pcard">${prow('磁贴', '照片、下载、最近使用、回收站、磁盘和 Pulse', sw('x-t', true))}${prow('动态磁贴', '照片轮播，下载和最近使用实时更新', sw('x-l', true))}${prow('全屏或节能时暂停', '玩游戏、看视频或电池节能时，动态磁贴与动态折射自动暂停', sw('x-s', true))}</div>
+  <div class="psec">与 Pulse 打通</div>
+  <div class="pcard">${prow('桌面上的暂存区', '和 Pulse 的暂存区是同一份，桌面和 Pulse 窗口之间拖进拖出', sw('x-tr', true))}</div>`;
+  const side = `<div class="psec" style="margin-top:0">预览</div><div class="pcard" style="padding:10px"><div class="preview"><div class="wall">${wallSVG(S.wall)}</div><div class="pvin">${previewFor(S.setTab)}</div></div><div class="pvcap">改这里的设置，桌面上的“${STABS.find(x => x[0] === S.setTab)[1]}”会立刻跟着变。单个小组件的城市、文件夹、样式在桌面上右键 → 编辑。</div></div>`;
+  const el = document.getElementById('v-settings');
+  const keepScroll = el.querySelector('.pcontent')?.scrollTop;
+  el.innerHTML = `<div class="pwin"><div class="ptitle"><span class="lg">${LOGO(22)}</span><span class="nm">Pulse</span><div class="tab">${ic('pc', 14)}此电脑</div><div class="tab on">${ic('palette', 14)}设置</div><div class="wc"><span>—</span><span>☐</span><span>✕</span></div></div>
+   <div class="pbody"><div class="pnav"><div class="srch">${ic('search', 14)}搜索设置</div>
+   ${nav('个性化', [['palette', '外观'], ['grid', '界面布局']])}
+   ${nav('浏览', [['folder', '文件列表'], ['tabs', '标签页与窗口'], ['img', '快速预览']])}
+   ${nav('系统', [['rocket', '启动与集成'], ['copy', '文件操作'], ['menu3', '右键菜单'], ['key', '快捷键']])}
+   ${nav('功能', [['search', '搜索与索引'], ['dup', '重复文件'], ['sparkle', 'AI 助手']])}
+   ${nav('工具', [['pkg', '扩展商店', true], ['info', '关于与诊断']])}
+   <div class="ver">Pulse 1.4.2</div></div>
+   <div class="pcontent"><div class="pgrid"><div class="pmain">${page}</div><div class="pside">${side}</div></div></div></div></div>`;
+  const pc = el.querySelector('.pcontent');
+  if (keepScroll != null) pc.scrollTop = keepScroll; else if (Q.get('scroll') !== '0') requestAnimationFrame(() => { const s = el.querySelector('#sec-widgets'); if (s) pc.scrollTop = s.offsetTop - 20; });
+}
+
+/* ================= context menu & edit sheet ================= */
+const menu = document.getElementById('menu'), sheet = document.getElementById('sheet');
+const SIZES_OF = { clock: ['1x1', '2x1', '4x1', '2x2', '4x2', '2x3', '4x4'], weather: ['1x1', '2x1', '4x1', '2x2', '4x2', '2x3', '4x3', '4x4'], calendar: ['1x1', '2x1', '4x1', '2x2', '4x2', '2x3', '4x3', '4x4'] };
+function openMenu(el, x, y) {
+  const reg = REG[el.id]; if (!reg) return; const kind = el.dataset.kind, name = NAMES[kind];
+  const sizes = SIZES_OF[kind] || ['1x1', '2x1', '4x1', '2x2', '4x2', '2x3', '4x3', '4x4'];
+  const editable = ['clock', 'weather', 'calendar', 'photos', 'countdown', 'note', 'pomodoro', 'system'].includes(kind);
+  menu.innerHTML = `${editable ? `<div class="mi" data-act="edit">${ic('edit', 16)}编辑“${name}”…</div>` : ''}${kind === 'photos' ? `<div class="mi" data-act="next-photo">${ic('img', 16)}换一张照片</div>` : ''}
+   <div class="mi" style="height:26px;opacity:.6;font-size:12px">${ic('resize', 16)}调整磁贴大小</div>
+   <div class="sizes">${sizes.map(s => { const [c, r] = s.split('x').map(Number); return `<button class="${el.dataset.size === s ? 'on' : ''}"><i style="width:${c * 6 + 2}px;height:${r * 6 + 2}px"></i>${s.replace('x', '×')}</button>`; }).join('')}</div>
+   <div class="ms"></div>
+   ${reg.o.stack ? `<div class="mi">${ic('stack', 16)}移出叠放</div>` : `<div class="mi">${ic('stack', 16)}叠放<span class="k">${ic('chev', 12)}</span></div>`}
+   <div class="mi">${ic('brush', 16)}自定义磁贴</div>
+   <div class="ms"></div>
+   <div class="mi">${ic('plus', 16)}添加小组件</div>
+   <div class="mi">${ic('grid', 16)}编辑磁贴区</div>
+   <div class="ms"></div>
+   <div class="mi danger" data-act="remove">${ic('trash0', 16)}移除磁贴</div>`;
+  menu.style.display = 'block'; menu.dataset.for = el.id;
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  menu.style.left = Math.min(x, innerWidth - mw - 8) + 'px'; menu.style.top = Math.min(y, innerHeight - mh - 8) + 'px';
+}
+function closeMenu() { menu.style.display = 'none'; }
+function closeSheet() { sheet.style.display = 'none'; document.querySelectorAll('.w.editing').forEach(e => e.classList.remove('editing')); }
+function openSheet(id) {
+  const el = document.getElementById(id); if (!el) return;
+  const kind = el.dataset.kind, o = TILE_OPTS[id] = TILE_OPTS[id] || {};
+  const f = (label, ctrl) => `<div class="f"><div>${label}</div>${ctrl}</div>`;
+  const seg = (key, opts, cur) => `<div class="pseg">${opts.map(([v, l]) => `<button class="${String(v) === String(cur) ? 'on' : ''}" data-tseg="${key}" data-v="${v}">${l}</button>`).join('')}</div>`;
+  let body = '';
+  if (kind === 'weather') body = f('城市', `<input class="pin" style="width:100%" data-tin="city" value="${o.city || ''}" placeholder="留空：用设置里的“${S.city}”">`);
+  if (kind === 'clock') body = f('样式', seg('digital', [['', '表盘'], ['1', '数字']], o.digital ? '1' : '')) + f('城市', `<div class="dd" style="font-size:12px;opacity:.7">大尺寸显示：${S.cities.join('、')}。在插件设置 › 小组件 › 时钟里改。</div>`);
+  if (kind === 'calendar') body = f('2×2 样式', seg('calStyle', [['date', '日期'], ['month', '月历']], o.calStyle || 'date'));
+  if (kind === 'photos') body = f('文件夹', `<div class="row" style="gap:8px"><span style="font:11.5px Consolas,monospace;opacity:.8;flex:1" class="ellip">${o.dir || S.photoDir}</span><button class="pbtn">更改…</button></div>`) + f('换图间隔', seg('every', [[0, '不自动'], [10, '10 秒'], [60, '1 分钟'], [300, '5 分钟']], o.every ?? S.photoEvery)) + f('顺序', seg('shuffle', [['', '最新在前'], ['1', '随机']], o.shuffle ? '1' : ''));
+  if (kind === 'countdown') body = f('名称', `<input class="pin" style="width:100%" data-tin="cdTitle" value="${o.cdTitle || ''}" placeholder="元旦">`) + f('日期', `<input class="pin" style="width:100%" type="date" data-tin="cdDate" value="${o.cdDate || ''}">`);
+  if (kind === 'note') body = f('纸色', `<div class="swatches">${NOTE_C.map((c, i) => `<button style="background:${c[0]}" class="${(o.noteColor ?? 0) === i ? 'on' : ''}" data-tseg="noteColor" data-v="${i}"></button>`).join('')}</div>`);
+  if (kind === 'pomodoro') body = f('专注时长', seg('focus', [[15, '15'], [25, '25'], [45, '45'], [60, '60 分钟']], S.focus));
+  if (kind === 'system') body = f('显示', `<div class="dd" style="font-size:12px;opacity:.7">显示哪些项目、刷新间隔在插件设置 › 小组件 › 系统里改，对所有系统小组件生效。</div>`);
+  sheet.innerHTML = `<h4>${NAMES[kind]}</h4><div class="sd">只改这一个小组件</div>${body}<div class="foot"><button class="pbtn pri" data-act="sheet-done">完成</button></div>`;
+  sheet.style.display = 'block';
+  const r = el.getBoundingClientRect(); const sw2 = sheet.offsetWidth, sh = sheet.offsetHeight;
+  let x = r.left - sw2 - 12; if (x < 8) x = r.right + 12; let y = Math.max(56, Math.min(r.top, innerHeight - sh - 8));
+  sheet.style.left = x + 'px'; sheet.style.top = y + 'px'; sheet.dataset.for = id;
+}
+
+/* ================= events ================= */
+function setSeg(id, v) { document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle('on', b.dataset.v === v)); }
+function syncBar() { setSeg('c-view', S.view); setSeg('c-theme', S.theme); setSeg('c-scheme', S.scheme); setSeg('c-fx', S.fx); setSeg('c-wall', S.wall); setSeg('c-state', S.data); document.getElementById('g-state').style.opacity = S.view === 'settings' ? .35 : 1; setSeg('c-dpos', D.pos); document.getElementById('g-dpos').style.display = S.view === 'dock' ? '' : 'none'; document.getElementById('g-state').style.display = S.view === 'dock' ? 'none' : ''; }
+function render() {
+  document.body.className = 'pt-' + S.theme;
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + S.view));
+  for (const k in REG) delete REG[k];
+  if (S.view === 'desktop') buildDesktop(); else if (S.view === 'gallery') buildGallery(); else if (S.view === 'dock') buildDockView(); else buildSettings();
+  syncBar();
+}
+document.querySelector('.bar').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return; const id = b.parentElement.id;
+  if (id === 'c-dpos') { D.pos = b.dataset.v; D.panel = ''; render(); return; }
+  const key = { 'c-view': 'view', 'c-theme': 'theme', 'c-scheme': 'scheme', 'c-fx': 'fx', 'c-wall': 'wall', 'c-state': 'data' }[id]; if (!key) return;
+  S[key] = b.dataset.v; closeMenu(); closeSheet(); render();
+});
+document.addEventListener('contextmenu', e => { const w = e.target.closest('.w'); if (!w || w.closest('#v-settings')) return; e.preventDefault(); closeSheet(); openMenu(w, e.clientX, e.clientY); });
+document.addEventListener('mousedown', e => { if (!menu.contains(e.target)) closeMenu(); if (!sheet.contains(e.target) && !e.target.closest('.w.editing') && !e.target.closest('.menu')) closeSheet(); });
+document.addEventListener('wheel', e => { const w = e.target.closest('.w'); if (!w || !REG[w.id] || !REG[w.id].o.stack) return; e.preventDefault(); const n = REG[w.id].o.stack.length; STACKS[w.id] = ((STACKS[w.id] || 0) + (e.deltaY > 0 ? 1 : n - 1)) % n; w.outerHTML = tileHTML(w.id); }, { passive: false });
+document.addEventListener('click', e => {
+  const a = e.target.closest('[data-act]'); const sg = e.target.closest('[data-seg]'); const s = e.target.closest('[data-sw]'); const ts = e.target.closest('[data-tseg]');
+  if (a) {
+    const act = a.dataset.act;
+    if (act === 'edit') { const id = menu.dataset.for; closeMenu(); document.getElementById(id)?.classList.add('editing'); openSheet(id); return; }
+    if (act === 'next-photo') { PHOTO_I++; closeMenu(); refresh(k => k === 'photos'); return; }
+    if (act === 'remove') { const el = document.getElementById(menu.dataset.for); closeMenu(); if (el) { el.style.transition = 'opacity .2s, transform .2s'; el.style.opacity = 0; el.style.transform = 'scale(.9)'; setTimeout(() => el.remove(), 220); } return; }
+    if (act === 'sheet-done') { closeSheet(); return; }
+    if (act === 'pomo') { POMO.run = !POMO.run; refresh(k => k === 'pomodoro'); return; }
+    if (act === 'pomo-reset') { POMO.run = false; POMO.left = POMO.total; refresh(k => k === 'pomodoro'); return; }
+    if (act === 'media-toggle') { MEDIA.playing = !MEDIA.playing; refresh(k => k === 'media'); return; }
+    if (act === 'media-next' || act === 'media-prev') { return; }
+    if (act === 'todo') { const t = TODOS.find(x => x.t === a.dataset.t); if (t) t.d = !t.d; refresh(k => k === 'todo'); return; }
+    if (act === 'city-del') { S.cities.splice(+a.dataset.i, 1); buildSettings(); return; }
+    if (act === 'city-add') { const pool = Object.keys(TZ).filter(c => !S.cities.includes(c) && c !== '上海'); if (pool.length) S.cities.push(pool[0]); buildSettings(); return; }
+    if (act === 'sys') { S.sys[a.dataset.k] = !S.sys[a.dataset.k]; buildSettings(); return; }
+    if (act === 'tint-auto') { S.tintAuto = true; buildSettings(); return; }
+    if (act === 'tint') { S.tintAuto = false; S.tint = a.dataset.c; buildSettings(); return; }
+  }
+  if (sg) { const k = sg.dataset.seg, v = sg.dataset.v; if (k === 'fx-mirror') { S.fx = v === 'n' ? 'solid' : v === 'l' ? 'liquid' : 'glass'; } else S[k] = isNaN(+v) || v === '' ? v : +v; if (k === 'scheme') syncBar(); buildSettings(); syncBar(); return; }
+  if (s) { const k = s.dataset.sw; if (k in S) { S[k] = !S[k]; buildSettings(); } else s.classList.toggle('on'); return; }
+  if (ts) { const id = sheet.dataset.for, o = TILE_OPTS[id] = TILE_OPTS[id] || {}; const k = ts.dataset.tseg, v = ts.dataset.v; if (k === 'focus') { S.focus = +v; POMO.total = POMO.left = S.focus * 60; } else if (k === 'noteColor' || k === 'every') o[k] = +v; else o[k] = v; const el = document.getElementById(id); if (el) { el.outerHTML = tileHTML(id); document.getElementById(id).classList.add('editing'); } openSheet(id); return; }
+});
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (t.dataset.in) { S[t.dataset.in] = t.value; refresh(k => k === 'weather'); return; }
+  if (t.dataset.slider) { const stops = t.dataset.stops.split(',').map(Number); S[t.dataset.slider] = stops[+t.value]; const pos = t.selectionStart; buildSettings(); const n = document.querySelector(`[data-slider="${t.dataset.slider}"]`); n && n.focus(); return; }
+  if (t.dataset.tin) { const id = sheet.dataset.for; (TILE_OPTS[id] = TILE_OPTS[id] || {})[t.dataset.tin] = t.value; const el = document.getElementById(id); if (el) { el.outerHTML = tileHTML(id); document.getElementById(id).classList.add('editing'); } }
+});
+addEventListener('resize', () => { if (S.view === 'desktop') fit(); if (S.view === 'dock') { fitBox('dfit'); renderDockPanel(); } });
+
+/* ================= live clocks ================= */
+let tick = 0;
+setInterval(() => {
+  tick++;
+  refresh(k => k === 'clock');
+  if (tick % S.sysEvery === 0) { sysTick(); refresh(k => k === 'system'); }
+  if (POMO.run) { POMO.left = Math.max(0, POMO.left - 1); if (!POMO.left) { POMO.run = false; POMO.done++; POMO.phase = POMO.phase === 'focus' ? 'break' : 'focus'; POMO.total = POMO.left = (POMO.phase === 'focus' ? S.focus : S.shortB) * 60; } refresh(k => k === 'pomodoro'); }
+  if (S.photoEvery && tick % S.photoEvery === 0 && Q.get('still') !== '1') { PHOTO_I++; refresh(k => k === 'photos'); }
+  if (S.rotate && tick % 9 === 0 && S.view === 'desktop' && Q.get('still') !== '1') { for (const id of ['d-clock']) { const el = document.getElementById(id); if (el && !el.matches(':hover')) { const n = REG[id].o.stack.length; STACKS[id] = ((STACKS[id] || 0) + 1) % n; el.outerHTML = tileHTML(id); } } }
+}, 1000);
+
+const st = document.createElement('style'); st.textContent = '@keyframes eq{from{transform:scaleY(.4)}to{transform:scaleY(1)}}@keyframes fadein{from{opacity:.2}to{opacity:1}}.w.editing{outline:2px solid #4cc2ff;outline-offset:3px}.w .dots i{transition:background .2s}.w.m-light .dots i.on{background:#1d1d1f}.w.m-light .ibtn{color:#1d1d1f}.w .wc .row i[style*="eq"]{transform-origin:bottom}'; document.head.appendChild(st);
+
+/* ================= Dock view: the tray and the system status, inside the Dock ================= */
+Object.assign(P, {
+  wifi: '<path d="M2.6 9.2a13.8 13.8 0 0 1 18.8 0" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" class="w3"/><path d="M5.6 12.4a9.4 9.4 0 0 1 12.8 0" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" class="w2"/><path d="M8.7 15.5a4.9 4.9 0 0 1 6.6 0" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="18.7" r="1.6" fill="currentColor"/>',
+  wifioff: '<path d="M2.6 9.2a13.8 13.8 0 0 1 18.8 0M5.6 12.4a9.4 9.4 0 0 1 12.8 0M8.7 15.5a4.9 4.9 0 0 1 6.6 0" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" opacity=".35"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/>',
+  vol: '<path d="M4 9.4h3.2L12 5.6v12.8l-4.8-3.8H4z" fill="currentColor"/><path d="M15.4 9.2a4.2 4.2 0 0 1 0 5.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M17.9 6.6a8 8 0 0 1 0 10.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="v2"/>',
+  mute: '<path d="M4 9.4h3.2L12 5.6v12.8l-4.8-3.8H4z" fill="currentColor"/><path d="M15.5 9.5l5 5M20.5 9.5l-5 5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+  bt: '<path d="M7 7.5l10 9-5 4.5V3l5 4.5-10 9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  chevup: '<path d="M6 14.5l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  lock: '<rect x="6.5" y="11" width="11" height="8.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 11V8.5a3 3 0 0 1 6 0V11" fill="none" stroke="currentColor" stroke-width="1.7"/>',
+  chat: '<path d="M5.5 5h13A1.5 1.5 0 0 1 20 6.5v8A1.5 1.5 0 0 1 18.5 16H11l-4.5 3.5V16h-1A1.5 1.5 0 0 1 4 14.5v-8A1.5 1.5 0 0 1 5.5 5z" fill="currentColor"/>',
+  cloud2: '<path d="M7.2 18.5h9.9a4.2 4.2 0 0 0 .75-8.33A5.7 5.7 0 0 0 6.8 9.2a4.65 4.65 0 0 0 .4 9.3z" fill="currentColor"/>',
+  shield: '<path d="M12 3.2l7 2.8v5.6c0 4.4-3 7.9-7 9.2-4-1.3-7-4.8-7-9.2V6z" fill="currentColor"/>',
+  globe: '<circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M3.5 12h17M12 3.5c2.6 2.6 2.6 14.4 0 17M12 3.5c-2.6 2.6-2.6 14.4 0 17" fill="none" stroke="currentColor" stroke-width="1.5"/>',
+  calc: '<rect x="5.5" y="3.5" width="13" height="17" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M8.5 7.5h7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><path d="M9 12h.01M12 12h.01M15 12h.01M9 15.5h.01M12 15.5h.01M15 15.5h.01" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>',
+  gear: '<circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 3.5v2.2M12 18.3v2.2M3.5 12h2.2M18.3 12h2.2M6 6l1.6 1.6M16.4 16.4 18 18M6 18l1.6-1.6M16.4 7.6 18 6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>',
+  cmd: '<rect x="3" y="4.5" width="18" height="15" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M7 9.5l3 2.5-3 2.5M12.5 15h4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>',
+  cad: '<path d="M12 4 20 19H4z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 19l4-7 4 7" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/>',
+  bell: '<path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2H5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M10 20.5a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.7"/>',
+  speaker: '<rect x="6" y="3.5" width="12" height="17" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="14" r="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="12" cy="7.5" r="1.1" fill="currentColor"/>',
+});
+const D = {
+  pos: Q.get('dpos') || 'bottom', panel: Q.get('panel') || '', ime: '中', wifi: true, net: 'SS-Home-5G', joining: '',
+  vol: 64, muted: false, out: 'spk', bt: true, power: 1, osd: 0,
+  trayPinned: ['微信', '网易云音乐'],
+};
+const DOCK_APPS = [
+  { n: 'Pulse', logo: true, pin: true, run: true },
+  { n: '文件资源管理器', c: '#E0A030', g: 'folder', pin: true, run: true },
+  { n: '浏览器', c: '#2F7FD3', g: 'globe', pin: true, run: true },
+  { n: '终端', c: '#2B2F3A', g: 'cmd', pin: true },
+  { n: '计算器', c: '#5A5F6B', g: 'calc', pin: true },
+  { n: '设置', c: '#4B5160', g: 'gear', pin: true },
+  { n: '记事本', c: '#6A6A5E', g: 'list', pin: true },
+  { n: '结构设计 2026', c: '#B4473B', g: 'cad', run: true },
+  { n: 'PDF 阅读器', c: '#B2416E', g: 'tabs', run: true, badge: 0 },
+];
+const TRAY = [
+  { n: '微信', c: '#2AAE67', g: 'chat', badge: 3 },
+  { n: '网易云音乐', c: '#D8383F', g: 'note' },
+  { n: 'QQ', c: '#3A8EE6', g: 'chat', badge: 1 },
+  { n: '百度网盘', c: '#3F7CF0', g: 'cloud2' },
+  { n: 'OneDrive', c: '#2F6FD6', g: 'cloud2' },
+  { n: '安全中心', c: '#3BA272', g: 'shield' },
+  { n: '代理工具', c: '#6B5BD6', g: 'globe' },
+  { n: '截图工具', c: '#3A7D8C', g: 'img' },
+];
+const NETS = [{ n: 'SS-Home-5G', s: 3, lock: true }, { n: 'SS-Home', s: 3, lock: true }, { n: 'Office-5G', s: 2, lock: true }, { n: 'CMCC-8A2F', s: 1, lock: true }, { n: '访客网络', s: 2, lock: false }];
+const BTDEV = [{ k: 'phones', n: 'WH-1000XM5 耳机', on: true, p: 80 }, { k: 'mouse', n: 'MX Master 3S', on: true, p: 45 }, { k: 'keyboard', n: '蓝牙键盘', on: false }];
+const OUTS = [{ k: 'spk', n: '扬声器', d: 'Realtek(R) Audio' }, { k: 'hp', n: 'WH-1000XM5 耳机', d: '蓝牙' }];
+
+function dockInk() { return S.theme === 'light' ? 'gl-light' : 'gl-dark'; }
+function appIcon(a, s = 48) {
+  if (a.logo) return `<div class="ico" style="background:none;box-shadow:none">${LOGO(s)}</div>`;
+  return `<div class="ico" style="background:linear-gradient(180deg,color-mix(in srgb,${a.c} 78%,#fff),${a.c})">${ic(a.g, s * .5)}</div>`;
+}
+function wifiGlyph(level, s = 18) {
+  if (!D.wifi) return ic('wifioff', s);
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24">${P.wifi.replace('class="w3"', level < 3 ? 'class="w3" opacity=".3"' : '').replace('class="w2"', level < 2 ? 'class="w2" opacity=".3"' : '')}</svg>`;
+}
+function volGlyph(s = 18) {
+  if (D.muted || D.vol === 0) return ic('mute', s);
+  return `<svg width="${s}" height="${s}" viewBox="0 0 24 24">${P.vol.replace('class="v2"', D.vol < 50 ? 'opacity=".3"' : '')}</svg>`;
+}
+function battGlyph(p, chg) {
+  const w = Math.max(1.5, 13 * p / 100);
+  return `<svg width="24" height="18" viewBox="0 0 24 18"><rect x="1.5" y="4" width="18" height="10" rx="3" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".55"/><rect x="20.5" y="7.2" width="2" height="3.6" rx="1" fill="currentColor" opacity=".55"/><rect x="3.5" y="6" width="${w}" height="6" rx="1.6" fill="${chg ? '#30D158' : p <= 20 ? '#FF453A' : 'currentColor'}"/>${chg ? '<path d="M11.6 4.6 8.4 9.4h2.6l-.8 4 3.4-5H11z" fill="currentColor" stroke="rgba(0,0,0,.35)" stroke-width=".6"/>' : ''}</svg>`;
+}
+
+function buildDockView() {
+  const X = 1600 - 24 - 532, Y = 24, g = (c, r) => ({ x: X + c * 108, y: Y + r * 108 });
+  let t = '';
+  t += tile('weather', 2, 2, { id: 'k-weather', ...g(0, 0) });
+  t += tile('calendar', 2, 2, { id: 'k-cal', ...g(2, 0) });
+  t += tile('clock', 1, 1, { id: 'k-clock', ...g(4, 0) });
+  t += tile('disk', 1, 1, { id: 'k-disk', ...g(4, 1) });
+  t += tile('system', 4, 2, { id: 'k-sys', ...g(0, 2) });
+  t += tile('battery', 1, 1, { id: 'k-batt', ...g(4, 2) });
+  const note = `<div class="dnote"><h2>Dock 接管托盘</h2>任务栏设成自动隐藏后，托盘里的东西都收进 Dock 右端，一处就够：<ol>
+    <li><b>托盘应用</b>：常用的固定显示（带未读数），其余点 <span class="k">⌃</span> 展开；左键打开，右键是那个应用自己的托盘菜单，拖进 Dock 就常驻。</li>
+    <li><b>输入法</b>：点一下切 中/英，右键换输入法；和任务栏上那个是同一个状态。</li>
+    <li><b>Wi-Fi · 音量 · 蓝牙 · 电池</b>：点开就是快捷面板；在音量上滚动滚轮直接调。台式机没有电池就不显示。</li>
+    <li><b>时间</b>：点开是日历和通知，农历和“今天”的写法与日历小组件一致。</li></ol>
+    <div style="opacity:.7;margin-top:6px">点 Dock 右端试试；滚轮放在音量上；右键输入法。</div></div>`;
+  const desk = document.getElementById('ddesk');
+  desk.innerHTML = `<div class="wall">${wallSVG(S.wall)}</div>${note}${t}<div id="dockwrap"></div><div id="dpanel"></div>`;
+  renderDock();
+  fitBox('dfit');
+}
+
+function renderDock() {
+  const pos = D.pos, ink = dockInk(), vertical = pos !== 'bottom';
+  const pinned = DOCK_APPS.filter(a => a.pin), running = DOCK_APPS.filter(a => !a.pin && a.run);
+  const app = (a, i) => `<div class="dk-app" data-i="${i}">${appIcon(a)}${a.run ? '<span class="run"></span>' : ''}${a.badge ? `<span class="dk-badge">${a.badge}</span>` : ''}<span class="dk-tip">${a.n}</span></div>`;
+  const trayPinned = TRAY.filter(t => D.trayPinned.includes(t.n));
+  const hidden = TRAY.length - trayPinned.length;
+  const trayHtml = trayPinned.map(t => `<div class="dk-tray ${D.panel === 'tray:' + t.n ? 'open' : ''}" data-tray="${t.n}"><div class="tico" style="background:${t.c}">${ic(t.g, 14)}</div>${t.badge ? `<span class="mini" style="position:absolute;top:2px;right:0;min-width:14px;height:14px;padding:0 3px;border-radius:7px;background:#FF3B30;color:#fff;font:600 9px/14px var(--ui)">${t.badge}</span>` : ''}<span class="dk-tip">${t.n}${t.badge ? ` · ${t.badge} 条未读` : ''}</span></div>`).join('');
+  const d = now();
+  const st = (key, inner, tip, extra = '') => `<div class="dk-st ${D.panel === key ? 'open' : ''}" data-st="${key}" ${extra}>${inner}<span class="dk-tip">${tip}</span></div>`;
+  const net = NETS.find(n => n.n === D.net) || NETS[0];
+  const sys = `<div class="dk-sys">
+    ${trayHtml}
+    ${st('tray', `${ic('chevup', 16)}`, `另外 ${hidden} 个托盘图标`, '')}
+    ${st('ime', `<span class="ime">${D.ime}</span>`, D.ime === '中' ? '微软拼音 · 中文（点按切换，右键选输入法）' : '微软拼音 · 英文（点按切换，右键选输入法）')}
+    ${st('wifi', wifiGlyph(D.wifi ? net.s : 0), D.wifi ? `${D.net} · 已连接` : 'Wi-Fi 已关闭')}
+    ${st('vol', volGlyph(), D.muted ? '已静音' : `音量 ${D.vol}%（滚轮调节）`)}
+    ${st('bt', `<span style="opacity:${D.bt ? 1 : .4}">${ic('bt', 18)}</span>`, D.bt ? `蓝牙 · 已连接 ${BTDEV.filter(b => b.on).length} 个设备` : '蓝牙已关闭')}
+    ${st('batt', battGlyph(76, true), '电池 76% · 正在充电')}
+    ${st('time', `<div class="dk-time"><b>${hm(d)}</b><span>${d.getMonth() + 1}/${d.getDate()}</span></div><span class="mini">2</span>`, `${d.getMonth() + 1}月${d.getDate()}日 ${WD[d.getDay()]} · 2 条通知`)}
+  </div>`;
+  const apps = pinned.map(a => app(a, DOCK_APPS.indexOf(a))).join('') + '<div class="dk-sep"></div>' + running.map(a => app(a, DOCK_APPS.indexOf(a))).join('')
+    + '<div class="dk-sep"></div>' + app({ n: '下载', c: '#3D8DD8', g: 'down' }, -1) + app({ n: '回收站', c: '#6B7280', g: 'trash' }, -2) + '<div class="dk-sep"></div>';
+  document.getElementById('dockwrap').innerHTML = `<div class="dock ${pos} ${ink}" id="dock">${apps}${sys}</div>`;
+  renderDockPanel();
+}
+
+function panelHtml(key) {
+  const ink = dockInk();
+  const row = (iconHtml, title, sub, end, on, act) => `<div class="dk-row ${on ? 'on' : ''}" ${act ? `data-dact="${act}"` : ''}><span class="r-ic">${iconHtml}</span><span class="r-tx">${title}${sub ? `<small>${sub}</small>` : ''}</span>${end ? `<span class="r-end">${end}</span>` : ''}</div>`;
+  const toggle = (on, act) => `<span class="tg ${on ? 'on' : ''}" data-dact="${act}"></span>`;
+  if (key === 'tray' || key.startsWith('tray:')) {
+    if (key.startsWith('tray:')) {
+      const t = TRAY.find(x => 'tray:' + x.n === key);
+      return `<h5>${t.n}<span style="font:500 12px var(--ui);color:var(--ink2)">右键菜单</span></h5><div class="sub">这里是 ${t.n} 自己的托盘菜单，Dock 原样转给它</div>
+        ${['打开' + t.n, t.badge ? `查看 ${t.badge} 条未读` : '设置', '退出'].map(x => `<div class="dk-row" style="min-height:34px">${x}</div>`).join('')}
+        <div class="dk-hr"></div><div class="dk-link" data-dact="unpin:${t.n}">不在 Dock 上显示</div>`;
+    }
+    return `<h5>托盘图标</h5><div class="sub">左键打开，右键是它自己的菜单；点右上角的圆点或拖进 Dock，就常驻显示</div>
+      <div class="tray-grid">${TRAY.map(t => `<div class="tg-i" data-dact="open:${t.n}"><div class="tico" style="background:${t.c}">${ic(t.g, 18)}</div>${t.badge ? `<span class="dk-badge" style="top:2px;right:10px">${t.badge}</span>` : ''}<span class="ellip" style="max-width:66px">${t.n}</span><span class="pinmark ${D.trayPinned.includes(t.n) ? 'on' : ''}" data-dact="pin:${t.n}" title="${D.trayPinned.includes(t.n) ? '不在 Dock 上常驻' : '在 Dock 上常驻'}"></span></div>`).join('')}</div>
+      <div class="dk-hr"></div><div class="dk-link">任务栏和托盘设置…</div>`;
+  }
+  if (key === 'ime') return `<h5>输入法<span style="font:600 12px var(--ui);color:var(--ink2)">${D.ime === '中' ? '中文' : '英文'}</span></h5><div class="sub">点 Dock 上的“${D.ime}”切换中英；Shift 也可以</div>
+    ${row(`<b style="font:700 12px var(--ui)">拼</b>`, '微软拼音', `${D.ime === '中' ? '中文' : '英文'} · 半角`, '✓', true, 'ime-toggle')}
+    ${row(`<b style="font:700 11px var(--ui)">EN</b>`, '英语（美国）', '美式键盘', '', false)}
+    <div class="dk-hr"></div><div class="dk-link">Win+空格 换输入法 · 语言设置…</div>`;
+  if (key === 'wifi') {
+    const list = D.wifi ? NETS.map(n => row(wifiGlyph(n.s, 16), n.n, n.n === D.net ? (D.joining === n.n ? '正在连接…' : '已连接，安全') : n.lock ? '安全' : '开放', n.lock ? ic('lock', 14) : '', n.n === D.net, 'net:' + n.n)).join('') : `<div class="sub" style="padding:10px 8px">Wi-Fi 已关闭</div>`;
+    return `<h5>Wi-Fi${toggle(D.wifi, 'wifi-toggle')}</h5><div class="sub">${D.wifi ? D.net + ' · 已连接' : '打开后自动连上已保存的网络'}</div>${list}<div class="dk-hr"></div><div class="dk-link">网络和 Internet 设置…</div>`;
+  }
+  if (key === 'vol') return `<h5>声音<span class="r-end" style="font:500 12px var(--ui);color:var(--ink2)">${D.muted ? '已静音' : D.vol + '%'}</span></h5><div class="sub">在 Dock 的音量图标上滚动滚轮也能调</div>
+    <div class="sl"><span data-dact="mute" style="cursor:pointer">${volGlyph(20)}</span><div class="bar" data-dact="vol-bar"><i style="width:${D.muted ? 0 : D.vol}%"></i></div></div>
+    <div style="font:600 12px var(--ui);color:var(--ink2);margin:4px 8px">输出到</div>
+    ${OUTS.map(o => row(ic(o.k === 'hp' ? 'phones' : 'speaker', 16), o.n, o.d, D.out === o.k ? '✓' : '', D.out === o.k, 'out:' + o.k)).join('')}
+    <div class="dk-hr"></div><div class="dk-link">音量合成器（每个应用的音量）…</div>`;
+  if (key === 'bt') return `<h5>蓝牙${toggle(D.bt, 'bt-toggle')}</h5><div class="sub">${D.bt ? '电量和“电池”小组件读的是同一份' : '已关闭'}</div>
+    ${D.bt ? BTDEV.map(b => row(ic(b.k, 16), b.n, b.on ? '已连接' : '已配对，未连接', b.on ? `${b.p}%` : '连接', b.on, '')).join('') : ''}
+    <div class="dk-hr"></div><div class="dk-link">添加设备…</div>`;
+  if (key === 'batt') return `<h5>电池<span style="font:600 13px var(--ui)">76%</span></h5><div class="sub">正在充电 · 大约 48 分钟充满</div>
+    <div style="margin:4px 8px 8px;font:600 12px var(--ui);color:var(--ink2)">电源模式</div>
+    <div style="display:flex;gap:6px;padding:0 8px">${['节能', '平衡', '性能'].map((x, i) => `<div data-dact="power:${i}" style="flex:1;text-align:center;padding:8px 0;border-radius:10px;cursor:pointer;font:600 12.5px var(--ui);background:${D.power === i ? 'var(--on)' : 'var(--fill)'};color:${D.power === i ? 'var(--on-ink)' : 'var(--ink)'}">${x}</div>`).join('')}</div>
+    <div class="dk-hr"></div><div class="dk-link">电源和电池设置…</div>`;
+  if (key === 'time') {
+    const d = now(), L = lunar(d), y = d.getFullYear(), m = d.getMonth(), first = new Date(y, m, 1), days = new Date(y, m + 1, 0).getDate(), lead = (first.getDay() + 6) % 7;
+    let cells = '一二三四五六日'.split('').map(x => `<span class="h">${x}</span>`).join('');
+    for (let i = 0; i < lead; i++) cells += '<span></span>';
+    for (let k = 1; k <= days; k++) cells += `<span>${k === d.getDate() ? `<span class="t">${k}</span>` : k}</span>`;
+    return `<h5>${d.getMonth() + 1}月${d.getDate()}日 ${WD[d.getDay()]}<span style="font:500 12px var(--ui);color:var(--ink2)">${hm(d)}</span></h5><div class="sub">农历${L.m}${L.d}</div>
+      <div class="cal7">${cells}</div><div class="dk-hr"></div>
+      ${row(ic('bell', 16), '2 条通知', '微信：王老师 “评审改到 3 点” · 下载完成：季度报告 Q3.pdf', '', false)}
+      <div class="dk-link">打开通知中心…</div>`;
+  }
+  return '';
+}
+function renderDockPanel() {
+  const host = document.getElementById('dpanel');
+  if (!host) return;
+  if (!D.panel) { host.innerHTML = ''; return; }
+  const key = D.panel.startsWith('tray:') ? `[data-tray="${D.panel.slice(5)}"]` : `[data-st="${D.panel}"]`;
+  const anchor = document.querySelector('#dock ' + key);
+  if (!anchor) { host.innerHTML = ''; return; }
+  host.innerHTML = `<div class="dk-panel ${dockInk()}" id="dkp">${panelHtml(D.panel)}</div>`;
+  const desk = document.getElementById('ddesk'), dr = desk.getBoundingClientRect(), ar = anchor.getBoundingClientRect(), dockR = document.getElementById('dock').getBoundingClientRect();
+  const k = dr.width / 1600, p = document.getElementById('dkp'), pw = 312, ph = p.offsetHeight;
+  let x, y;
+  if (D.pos === 'bottom') { x = (ar.left + ar.width / 2 - dr.left) / k - pw / 2; y = (dockR.top - dr.top) / k - ph - 12; }
+  else if (D.pos === 'left') { x = (dockR.right - dr.left) / k + 12; y = (ar.top + ar.height / 2 - dr.top) / k - ph / 2; }
+  else { x = (dockR.left - dr.left) / k - pw - 12; y = (ar.top + ar.height / 2 - dr.top) / k - ph / 2; }
+  p.style.left = Math.max(12, Math.min(1600 - pw - 12, x)) + 'px'; p.style.top = Math.max(12, Math.min(960 - ph - 12, y)) + 'px';
+}
+function showOsd() {
+  const host = document.getElementById('dpanel'), dock = document.getElementById('dock');
+  if (!host || !dock) return;
+  let o = document.getElementById('osd');
+  if (!o) { o = document.createElement('div'); o.id = 'osd'; o.className = 'osd ' + dockInk() + ' dk-panel'; o.style.width = 'auto'; host.appendChild(o); }
+  o.innerHTML = `${volGlyph(18)}<div class="bar"><i style="width:${D.muted ? 0 : D.vol}%"></i></div><span>${D.muted ? '静音' : D.vol}</span>`;
+  const desk = document.getElementById('ddesk').getBoundingClientRect(), dr = dock.getBoundingClientRect(), k = desk.width / 1600;
+  o.style.left = ((dr.left + dr.width / 2 - desk.left) / k) + 'px'; o.style.top = ((dr.top - desk.top) / k - 56) + 'px';
+  clearTimeout(D.osd); D.osd = setTimeout(() => o.remove(), 1200);
+}
+function fitBox(id) { const f = document.getElementById(id), m = document.querySelector('main'); if (!f) return; const s = Math.min((m.clientWidth - 40) / 1600, (m.clientHeight - 40) / 960); f.style.left = '50%'; f.style.top = '50%'; f.style.transformOrigin = 'center'; f.style.transform = `translate(-50%,-50%) scale(${s})`; }
+
+// interactions
+document.addEventListener('click', e => {
+  if (S.view !== 'dock') return;
+  const st = e.target.closest('[data-st]'), tr = e.target.closest('[data-tray]'), act = e.target.closest('[data-dact]');
+  if (act) {
+    const a = act.dataset.dact;
+    if (a === 'wifi-toggle') D.wifi = !D.wifi;
+    else if (a === 'bt-toggle') D.bt = !D.bt;
+    else if (a === 'mute') D.muted = !D.muted;
+    else if (a === 'ime-toggle') D.ime = D.ime === '中' ? '英' : '中';
+    else if (a === 'vol-bar') { const r = act.getBoundingClientRect(); D.vol = Math.round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * 100); D.muted = false; }
+    else if (a.startsWith('net:')) { const n = a.slice(4); if (n !== D.net) { D.net = n; D.joining = n; setTimeout(() => { D.joining = ''; renderDock(); }, 1200); } }
+    else if (a.startsWith('out:')) D.out = a.slice(4);
+    else if (a.startsWith('power:')) D.power = +a.slice(6);
+    else if (a.startsWith('pin:')) { const n = a.slice(4); D.trayPinned = D.trayPinned.includes(n) ? D.trayPinned.filter(x => x !== n) : [...D.trayPinned, n]; }
+    else if (a.startsWith('open:')) D.panel = '';
+    else if (a.startsWith('unpin:')) { D.trayPinned = D.trayPinned.filter(x => x !== a.slice(6)); D.panel = ''; }
+    renderDock(); return;
+  }
+  if (st) {
+    const k = st.dataset.st;
+    if (k === 'ime') { D.ime = D.ime === '中' ? '英' : '中'; D.panel = D.panel === 'ime' ? 'ime' : ''; renderDock(); return; }
+    D.panel = D.panel === k ? '' : k; renderDock(); return;
+  }
+  if (tr) { D.panel = ''; renderDock(); return; }   // left click opens the app itself
+  if (!e.target.closest('#dkp')) { if (D.panel) { D.panel = ''; renderDock(); } }
+});
+document.addEventListener('contextmenu', e => {
+  if (S.view !== 'dock') return;
+  const st = e.target.closest('[data-st="ime"]'), tr = e.target.closest('[data-tray]');
+  if (st) { e.preventDefault(); D.panel = 'ime'; renderDock(); }
+  else if (tr) { e.preventDefault(); D.panel = 'tray:' + tr.dataset.tray; renderDock(); }
+}, true);
+document.addEventListener('wheel', e => {
+  if (S.view !== 'dock') return;
+  const st = e.target.closest('[data-st="vol"]');
+  if (!st) return;
+  e.preventDefault();
+  D.vol = Math.max(0, Math.min(100, D.vol + (e.deltaY < 0 ? 2 : -2))); D.muted = false;
+  const keep = D.panel; renderDock(); D.panel = keep; showOsd();
+}, { passive: false });
+document.addEventListener('mousemove', e => {
+  if (S.view !== 'dock') return;
+  const dock = document.getElementById('dock');
+  if (!dock) return;
+  const vertical = D.pos !== 'bottom', r = dock.getBoundingClientRect();
+  const inside = e.clientX >= r.left - 20 && e.clientX <= r.right + 20 && e.clientY >= r.top - 40 && e.clientY <= r.bottom + 10;
+  dock.querySelectorAll('.dk-app').forEach(a => {
+    if (!inside) { a.style.transform = ''; return; }
+    const ar = a.getBoundingClientRect(), c = vertical ? ar.top + ar.height / 2 : ar.left + ar.width / 2;
+    const dist = Math.abs((vertical ? e.clientY : e.clientX) - c) / ar.width;
+    const s = 1 + 0.42 * Math.max(0, Math.cos(Math.min(dist, 2.6) / 2.6 * Math.PI / 2)) ** 2;
+    a.style.transform = `scale(${s.toFixed(3)})`;
+  });
+});
+setInterval(() => { if (S.view === 'dock') { const t = document.querySelector('#dock [data-st="time"] b'); if (t) t.textContent = hm(now()); } }, 1000);
+
+addEventListener('error', e => { document.body.dataset.err = (document.body.dataset.err || '') + e.message + ' | '; });
+render();
+// ?demo=menu|edit shows the right-click menu / edit sheet (for screenshots and reviews)
+if (S.view === 'desktop' && Q.get('demo')) setTimeout(() => {
+  const target = document.getElementById(Q.get('demo') === 'menu' ? 'd-cal' : (Q.get('tile') || 'd-photos'));
+  if (!target) return; const r = target.getBoundingClientRect();
+  if (Q.get('demo') === 'menu') openMenu(target, r.left + r.width * .55, r.top + r.height * .4);
+  else { target.classList.add('editing'); openSheet(target.id); }
+}, 50);
+</script>
+</body>
+</html>

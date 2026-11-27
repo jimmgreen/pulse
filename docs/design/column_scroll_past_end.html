@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pulse · 多栏：滚动到最后一项之后</title>
+<style>
+/* Tokens copied from src/ui/FluentTokens.h MakeTheme(dark/light), accent = default 0x0078D4.
+   Pane card / header geometry follows pane_layout_mockup.html (.pane radius 8, .ph 38, focus bar 3 dip,
+   「目标栏」badge); row 34 (标准), cell inset 6, selection = accent @ .26 + accent bar,
+   scrollbar 2 dip silent / 6 dip hover. Menus follow the Fluent flyout (radius 8, row 32). */
+:root{--accent:#0078D4;--ui:'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI',sans-serif}
+.dark{--text:#fff;--text2:rgba(255,255,255,.6063);--hover:rgba(255,255,255,.08);--divider:rgba(255,255,255,.06);
+  --title:#1A1A1A;--sheet:#202020;--card:#272727;--strokecard:rgba(255,255,255,.07);--flyout:#2B2B2B;
+  --thumb:rgba(255,255,255,.35);--sel:rgba(0,120,212,.26);--folder:#E8B84A;--folder2:#C9952B;--page:#141414;--accentsoft:rgba(64,154,223,.18);--accentfg:#5AAAE6}
+.light{--text:#303B50;--text2:#66748A;--hover:rgba(82,125,112,.07);--divider:#E5EAE3;
+  --title:#F1F3EE;--sheet:#F7F8F4;--card:#fff;--strokecard:#DCE3D9;--flyout:#fff;
+  --thumb:rgba(155,175,158,.48);--sel:rgba(0,120,212,.26);--folder:#F2C75C;--folder2:#D9A63A;--page:#E7EAE3;--accentsoft:rgba(0,120,212,.10);--accentfg:#0067C0}
+*{box-sizing:border-box}
+body{margin:0;background:#dfe3dc;font:13px/1.45 var(--ui);color:#26303f}
+body.pagedark{background:#111;color:#ddd}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 28px 60px}
+h1{font-size:22px;margin:0 0 4px;font-weight:600}
+h2{font-size:16px;margin:36px 0 6px;font-weight:600}
+h3{font-size:14px;margin:18px 0 6px;font-weight:600}
+.lead{margin:0 0 14px;opacity:.75;max-width:900px}
+.bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 14px}
+.bar button{font:inherit;border:1px solid #0002;background:#fff;border-radius:6px;padding:5px 12px;cursor:pointer}
+body.pagedark .bar button{background:#2b2b2b;color:#eee;border-color:#fff2}
+.bar button[aria-pressed=true],body.pagedark .bar button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+.bar .gap{width:12px}
+.note{font-size:12px;opacity:.7}
+kbd{font:11px var(--ui);border:1px solid #0003;border-bottom-width:2px;border-radius:4px;padding:0 4px;background:#fff8}
+body.pagedark kbd{border-color:#fff3;background:#fff1}
+code{font-size:12px}
+
+/* ---------- Pulse window ---------- */
+.win{background:var(--sheet);color:var(--text);border-radius:10px;overflow:hidden;
+  box-shadow:0 18px 50px #0003,0 0 0 1px var(--strokecard);user-select:none}
+.win .titlebar{height:40px;background:var(--title);display:flex;align-items:center;gap:8px;padding:0 12px;font-size:12px;color:var(--text2)}
+.win .tab{background:var(--sheet);color:var(--text);height:32px;margin-top:8px;border-radius:8px 8px 0 0;padding:0 14px;display:flex;align-items:center;gap:8px;max-width:260px;white-space:nowrap;overflow:hidden}
+.win .crumbs{height:38px;white-space:nowrap;overflow:hidden;display:flex;align-items:center;gap:4px;padding:0 14px;font-size:13px}
+.win .crumbs span.sep svg{display:block}
+.win .crumbs span.c{padding:3px 6px;border-radius:6px}
+.win .crumbs span.c:last-child{font-weight:600}
+.panes{position:relative;overflow:hidden}
+.pane{position:absolute;background:var(--card);border:1px solid var(--strokecard);border-radius:8px;overflow:hidden}
+.ph{height:38px;display:flex;align-items:center;gap:6px;padding:0 6px 0 8px;position:relative;white-space:nowrap}
+.ph .pbar{position:absolute;left:0;top:11px;bottom:11px;width:3px;border-radius:0 2px 2px 0;background:var(--accent);opacity:0}
+.pane.focused .ph .pbar{opacity:1}
+.ph .up{flex:0 0 auto;width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--text2)}
+.ph .up:hover{background:var(--hover)}
+.ph .pt{font-weight:600;font-size:13px;color:var(--text2);overflow:hidden;text-overflow:ellipsis;flex:0 1 auto;min-width:30px}
+.pane.focused .ph .pt{color:var(--text)}
+.ph .pp{font-size:11.5px;color:var(--text2);opacity:.75;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:0 1 auto}
+.ph .badge{font-size:11px;line-height:18px;padding:0 7px;border-radius:9px;background:var(--accentsoft);color:var(--accentfg);flex:0 0 auto}
+.ph .sp{flex:1;min-width:4px}
+.ph .ib{flex:0 0 auto;width:26px;height:24px;display:grid;place-items:center;color:var(--text2);border-radius:6px}
+.ch{height:28px;display:flex;align-items:center;gap:8px;padding:0 14px 0 16px;font-size:12px;color:var(--text2);border-bottom:1px solid var(--divider);white-space:nowrap}
+.ch .c-n{flex:1;min-width:0}
+.ch .c-d{width:128px;flex:0 0 auto}
+.ch .c-s{width:70px;flex:0 0 auto;text-align:right}
+.pane .view{position:absolute;left:0;right:0;top:66px;bottom:4px;overflow:hidden}
+.pane .rows{position:absolute;left:0;right:0;top:0;will-change:transform}
+.row{position:absolute;left:6px;right:6px;height:32px;border-radius:6px;display:flex;align-items:center;gap:8px;padding:0 8px 0 10px;white-space:nowrap}
+.row svg{flex:0 0 auto}
+.row .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.row .dt{width:128px;flex:0 0 auto;color:var(--text2);font-size:12px}
+.row .sz{width:70px;flex:0 0 auto;color:var(--text2);font-size:12px;text-align:right;font-variant-numeric:tabular-nums}
+.row.hot{background:var(--hover)}
+.row.sel{background:var(--sel)}
+.pane.focused .row.sel::before{content:'';position:absolute;left:2px;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--accent)}
+.pane:not(.focused) .row.sel{background:var(--hover)}
+.row.dragsrc{opacity:.45}
+.row.droprow{background:var(--sel);box-shadow:inset 0 0 0 1.5px var(--accent)}
+.pane .empty{padding:8px 18px;color:var(--text2);font-size:12px}
+.sb{position:absolute;right:2px;width:2px;border-radius:3px;background:var(--thumb);transition:width .12s}
+.pane:hover .sb{width:6px}
+.pane.dropcol .view::after{content:"";position:absolute;inset:0 4px;border-radius:8px;box-shadow:inset 0 0 0 1.5px var(--accent);background:rgba(0,120,212,.07);pointer-events:none}
+.hint{position:absolute;pointer-events:none;background:var(--flyout);color:var(--text);border:1px solid var(--strokecard);
+  box-shadow:0 6px 18px #0004;border-radius:6px;padding:4px 9px;font-size:12px;white-space:nowrap;z-index:6;display:flex;gap:6px;align-items:center}
+.hint .mod{color:var(--text2)}
+.ghost{position:absolute;pointer-events:none;z-index:5;width:44px;height:44px;border-radius:6px;background:var(--card);
+  box-shadow:0 4px 14px #0005;display:grid;place-items:center;opacity:.92}
+.ghost .cnt{position:absolute;right:-7px;top:-7px;min-width:18px;height:18px;border-radius:9px;background:var(--accent);color:#fff;font-size:11px;display:grid;place-items:center;padding:0 5px}
+/* annotations (not part of the product UI) */
+.ann{position:absolute;left:8px;right:8px;border:1.5px dashed #E8731A;border-radius:6px;pointer-events:none;
+  color:#E8731A;font-size:11px;display:flex;align-items:flex-start;justify-content:center;padding-top:5px;background:rgba(232,115,26,.05);overflow:hidden;white-space:nowrap}
+.annlast{position:absolute;left:3px;right:3px;height:34px;border:1.5px solid #E8731A;border-radius:8px;pointer-events:none}
+.toast{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);background:var(--flyout);color:var(--text);z-index:9;
+  border:1px solid var(--strokecard);border-radius:8px;padding:7px 14px;box-shadow:0 8px 20px #0004;font-size:12px;opacity:0;pointer-events:none;white-space:nowrap}
+.toast.on{opacity:1}
+
+/* ---------- Fluent menu ---------- */
+.menu{position:absolute;z-index:8;background:var(--flyout);color:var(--text);border:1px solid var(--strokecard);border-radius:8px;
+  box-shadow:0 10px 28px #0005;padding:4px;font-size:13px}
+.mi{height:32px;display:flex;align-items:center;gap:10px;padding:0 10px;border-radius:5px;white-space:nowrap;position:relative}
+.mi > svg{flex:0 0 auto;color:var(--text2)}
+.mi .lb{flex:0 0 auto;max-width:170px;overflow:hidden;text-overflow:ellipsis}
+.mi .pa{color:var(--text2);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1 1 auto}
+.mi .gr{flex:1 1 auto}
+.mi .k{color:var(--text2);font-size:12px;padding-left:14px;flex:0 0 auto}
+.mi .ar{color:var(--text2);flex:0 0 auto;display:flex}
+.menu.live .mi:not(.dis):hover,.mi.open{background:var(--hover)}
+.mi.dis{opacity:.42}
+.msep{height:1px;background:var(--strokecard);margin:4px 6px}
+.mgrp{height:22px;font-size:11px;color:var(--text2);padding:4px 10px 0}
+.mstrip{height:40px;display:flex;gap:2px;padding:2px 2px 6px}
+.mstrip span{width:40px;height:32px;border-radius:5px;display:grid;place-items:center;color:var(--text)}
+.menu.live .mstrip span:hover{background:var(--hover)}
+.tag{font-size:10px;line-height:15px;border-radius:7px;padding:0 5px;color:#fff;flex:0 0 auto}
+.tag.new{background:#E8731A}.tag.chg{background:#2E8B57}.tag.del{background:#C4314B}
+.mi.del{box-shadow:inset 0 0 0 1.5px #C4314B}
+.mi.del .lb{text-decoration:line-through;text-decoration-color:#C4314B;opacity:.7}
+.mi.del .k{text-decoration:line-through;opacity:.7}
+.stage{position:relative;border-radius:10px;box-shadow:0 0 0 1px var(--strokecard);background:var(--sheet);overflow:hidden}
+.stage .cap{position:absolute;left:16px;top:12px;font-size:13px;font-weight:600;color:var(--text)}
+.stage .sub{position:absolute;left:16px;top:32px;font-size:12px;color:var(--text2)}
+
+/* ---------- galleries ---------- */
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.film{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.frame figcaption{font-size:12px;margin:8px 2px 0;opacity:.8}
+.frame figcaption b{opacity:1}
+figure{margin:0;min-width:0}
+
+/* ---------- settings (ui_settings_core.cpp toggle()) ---------- */
+.set{background:var(--sheet);color:var(--text);border-radius:10px;padding:22px 26px 26px;box-shadow:0 0 0 1px var(--strokecard)}
+.set .pt{font-size:24px;font-weight:600;margin:0 0 14px}
+.set .sec{font-size:14px;font-weight:600;margin:18px 0 8px}
+.card{position:relative;background:var(--card);border:1px solid var(--strokecard);border-radius:8px;height:64px;margin-bottom:4px}
+.card .ic{position:absolute;left:18px;top:23px;width:18px;height:18px;color:var(--text2)}
+.card .t{position:absolute;left:54px;top:12px;right:80px;font-size:14px}
+.card .d{position:absolute;left:54px;top:35px;right:80px;font-size:12px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card.new{box-shadow:0 0 0 2px #E8731A}
+.card .badge{position:absolute;right:-8px;top:-9px;background:#E8731A;color:#fff;font-size:10px;padding:1px 6px;border-radius:8px}
+.sw{position:absolute;right:20px;top:22px;width:40px;height:20px;border-radius:10px;border:1px solid var(--text2);cursor:pointer}
+.sw::after{content:'';position:absolute;left:4px;top:3px;width:12px;height:12px;border-radius:50%;background:var(--text2);transition:left .15s}
+.sw.on{background:var(--accent);border-color:var(--accent)}
+.sw.on::after{left:23px;background:#fff}
+.sets{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+.cmp{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:18px}
+table{border-collapse:collapse;width:100%;font-size:12.5px;background:#fff8}
+body.pagedark table{background:#fff1}
+td,th{border:1px solid #0001;padding:6px 9px;text-align:left;vertical-align:top}
+body.pagedark td,body.pagedark th{border-color:#fff1}
+ul.rules{margin:6px 0 0;padding-left:20px;max-width:960px}
+ul.rules li{margin:4px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>多栏：滚动到最后一项之后</h1>
+  <p class="lead">场景是<b>多栏（左右分屏、上下分屏、三栏、四宫格）之间互相拖文件</b>，不是分栏视图。文件多、窗口矮、或者上下分屏让每栏只剩一半高度时，一栏很容易被排满：文件夹排在前面，看得见的往往全是子文件夹，松手落在哪一行就进了哪个子文件夹；想放进这一栏本身，或者对这一栏右键「新建 / 粘贴」，都找不到空白处。开启后，每一栏的列表滚到底还能再往下滚一段，最后一项下面留出空白：拖到这里就是放进这一栏的文件夹，右键就是这一栏的空白处菜单。</p>
+  <p class="lead">顺带整理多栏相关的右键命令：使用很少的「复制到目标栏 / 移动到目标栏」从菜单里拿掉，换成「在另一栏打开」，并把「复制到窗口 / 移动到窗口」扩成直接列出其他栏文件夹的「复制到 / 移动到」（第 4 节）。</p>
+
+  <h2>1 · 交互演示</h2>
+  <p class="lead">滚轮在任意一栏上滚动。单击选中，<kbd>Ctrl</kbd> / <kbd>Shift</kbd> 多选，双击文件夹进入，栏头的 ↑ 回到上级。把文件拖到另一栏：先停在底边，它会滚到最后一项；再往下移，最后一项下面的空白会跟着鼠标长出来。没放下就离开，这一栏弹回原位；放下后保留位置，新项淡入。同一个盘默认移动、跨盘默认复制，拖动时按住 <kbd>Ctrl</kbd> 复制、<kbd>Shift</kbd> 移动。右键文件或空白处可以试第 4 节的新菜单。</p>
+  <div class="bar">
+    <span>设置：</span><button id="bOn" aria-pressed="true">开启</button><button id="bOff" aria-pressed="false">关闭（现状）</button>
+    <span class="gap"></span><span>布局：</span><button data-layout="v" aria-pressed="true">左右</button><button data-layout="h" aria-pressed="false">上下</button><button data-layout="3" aria-pressed="false">三栏</button>
+    <span class="gap"></span><span>窗口：</span><button id="bLow" aria-pressed="true">矮</button><button id="bTall" aria-pressed="false">高</button>
+    <span class="gap"></span><span>主题：</span><button id="bDark" aria-pressed="true">深色</button><button id="bLight" aria-pressed="false">浅色</button>
+    <span class="gap"></span><button id="bAnn" aria-pressed="true">标注</button>
+  </div>
+  <p class="note" style="margin:-6px 0 12px">橙色虚线框和菜单里的「新 / 改」角标只是标注，产品里不画。拖放和菜单只改演示数据。</p>
+  <div id="live"></div>
+
+  <h2>2 · 动画：空白跟着拖动长出</h2>
+  <p class="lead">一栏（2025，已滚到最后一项）在一次拖动里的四个时刻，上排深色，下排浅色。鼠标从列表一半往下移到底边，空白从 0 长到最多半个列表高，最后一项往上让；鼠标往回移空白不缩，免得行又滑回鼠标底下、放错地方。</p>
+  <div class="film" id="film"></div>
+
+  <h2>3 · 状态</h2>
+  <p class="lead">每张图用同一套绘制代码按固定滚动位置生成，窗口都是「矮」。左列深色，右列浅色。</p>
+  <div class="grid" id="gallery"></div>
+
+  <h2>4 · 右键菜单：换掉「复制 / 移动到目标栏」</h2>
+  <p class="lead">「复制到目标栏 / 移动到目标栏」只认一个目标栏：两栏时是另一栏，三栏、四宫格要先「设为目标栏」（<code>ResolveTransferTarget</code>，否则不可用）；菜单上也看不出目标到底是哪个文件夹，所以很少有人点。多栏里真正常做的是：把某个文件夹放到另一栏打开、再往里拖；或者明确地把选中项送到某一栏的文件夹。建议菜单里删掉这两行，改成下面右边的样子，快捷键不动。</p>
+  <div class="cmp" id="cmp"></div>
+  <h3>逐项处理</h3>
+  <table>
+    <tr><th style="width:24%">菜单行</th><th style="width:36%">处理</th><th>理由</th></tr>
+    <tr><td>复制到目标栏 <kbd>Ctrl+Alt+C</kbd><br>移动到目标栏 <kbd>Ctrl+Alt+X</kbd></td><td><b>从右键菜单删除</b>。命令本身、快捷键、「设为目标栏」<kbd>Ctrl+Alt+D</kbd> 和栏头「目标栏」标记都保留，快捷键页和帮助照旧。它们的快捷键改显示在「复制到 / 移动到」子菜单里默认目标那一行。</td><td>菜单里用得少，又占两行；键盘用户靠快捷键，不受影响。</td></tr>
+    <tr><td>复制到窗口 ▸<br>移动到窗口 ▸</td><td><b>改名「复制到 ▸ / 移动到 ▸」并扩充</b>：先列「这个窗口的其他栏」（栏位小图 + 文件夹名 + 路径），再列「其他窗口」（现有内容），最后「选择文件夹…」。</td><td>去处直接写出来，三栏、四宫格也不用先设目标；一个入口覆盖本窗口、其他窗口和任意文件夹。</td></tr>
+    <tr><td>（新增）在另一栏打开</td><td>文件夹右键：在另一栏打开这个文件夹；空白处右键：在另一栏打开当前文件夹。两栏时直接执行，三栏以上是子菜单，选哪一栏。</td><td>多栏里最常用的准备动作：先让另一栏转到目标位置，再拖过去，或者两栏看同一处的不同子文件夹。</td></tr>
+  </table>
+
+  <h2>5 · 设置放在哪</h2>
+  <p class="lead">设置 › 文件列表 › 列表外观，紧接着现有的「滚动时固定上级文件夹」，两者都管列表怎么滚。普通开关行，图标、标题、说明、开关的位置和现有行一致。下图深色里新开关是关、浅色里是开；点开关会同步上面的演示。</p>
+  <div class="sets" id="sets"></div>
+
+  <h2>6 · 行为规则</h2>
+  <ul class="rules">
+    <li><b>对象：</b>每一栏的文件列表（详细信息、列表、图标视图都一样，图标视图按整行瓦片计算）。单栏也生效，但收益主要在多栏，尤其是上下分屏和矮窗口。分栏视图的各列沿用同一规则。</li>
+    <li><b>多留多少：</b>最多半个列表高（至少 2 行），由滚轮往下滚或拖动往下推放出来，往回滚就收回。最后一项始终留在可见区（列表很矮时上限再减到只剩最后一项可见），不会出现整栏空白、像是文件夹空了的情况。</li>
+    <li><b>只给放不下的栏：</b>内容没有填满一栏时，下面本来就有空白，不增加滚动、不出现滚动条（图 3c 的 备份）。</li>
+    <li><b>每栏独立：</b>每一栏有自己的滚动位置和空白；切换布局、调整分隔条或窗口变矮时，空白按新的列表高重新限定，已经滚进空白的位置收到新上限以内。进入别的文件夹从顶部开始。</li>
+    <li><b>键盘不进空白：</b>End / ↓ 走到最后一项时，只滚到让它露出来为止（和现在一样）；只有滚轮和拖滚动条能滚进空白。</li>
+    <li><b>动画：</b>所有滚动（滚轮、拖动时自动滚、弹回）都走 Smooth 弹簧（ui_motion.h，k 380 / c 36，不回弹），跳几屏以上直接落位。</li>
+    <li><b>拖动时空白跟着长：</b>拖进一栏后先停在底边，自动滚到最后一项；到了末尾，鼠标在列表下半部分往下移多少，空白就长多少（平滑曲线，最多到上限）。只长不缩：鼠标往回移时行不跟着往下滑，免得目标行在鼠标下变来变去。顶边照常往上自动滚。</li>
+    <li><b>弹回与保留：</b>拖动经过一栏又离开、或在别处取消（<kbd>Esc</kbd>），这一栏弹回拖进来之前的位置；在这一栏放下，就停在当前位置，放进来的项按排序出现，淡入并从左滑入 8 dip，再有一下很淡的强调色。</li>
+    <li><b>放到哪：</b>空白处、文件行、栏头 = 放进这一栏的文件夹（整栏描边）；文件夹行 = 放进那个子文件夹（只描这一行）。提示沿用现有拖放规则：同盘「移动到 …」、跨盘「复制到 …」，<kbd>Ctrl</kbd> / <kbd>Shift</kbd> 改变；拖回来源栏本身提示「已在 … 中」，松手不做任何事。</li>
+    <li><b>空白处的其他操作：</b>右键 = 这一栏的空白处菜单（新建、粘贴、排序、在另一栏打开）；单击不改变选择、不画悬停底色；双击按现有「双击空白处」设置（返回 / 上一级，<code>blank_pane_click.h</code>）。</li>
+    <li><b>关闭时：</b>和现在完全一样，滚动范围到最后一项为止。</li>
+    <li><b>右键菜单：</b>「在另一栏打开」只在本标签页显示两栏以上、且对象是本地或可浏览的文件夹时出现；「复制到 / 移动到」在有其他栏或其他窗口时出现（和现在的「复制到窗口」一样，单栏单窗口的用户菜单不变长）；「移动到」在来源只读时禁用。子菜单里默认目标（两栏时的另一栏，或设了「目标栏」的那一栏）显示 <kbd>Ctrl+Alt+C</kbd> / <kbd>Ctrl+Alt+X</kbd>。</li>
+  </ul>
+
+  <h3>实现时涉及</h3>
+  <ul class="rules">
+    <li><code>src/app/builtin_menu_items.h/.cpp</code>：kItems / kItemRows 去掉 CopyToTarget、MoveToTarget 两行；新增 OpenInOtherPane（key <code>open_in_other_pane</code>，放在「在新标签页中打开」后面，背景菜单也加一行）。CopyToWindow / MoveToWindow 保留原 key（<code>copy_to_window</code> / <code>move_to_window</code>），用户在「右键菜单」设置里隐藏过的状态照常生效，只换显示文字。</li>
+    <li><code>src/app/context_menu.cpp</code>：AppendWindowTransferCommands 扩成同时接收本标签页其他栏的文件夹和 ResolveTransferTarget 的结果，前面加分组标题，末尾加「选择文件夹…」（复用 folder_picker_dialog）。</li>
+    <li><code>src/app/keymap.cpp</code>：MarkTarget / CopyToTarget / MoveToTarget 不动。</li>
+    <li>待确认：已保存的菜单设置里 <code>copy_to_target</code> / <code>move_to_target</code> 两个 key 在读取时被忽略而不是报错（context_menu_prefs）。</li>
+  </ul>
+
+  <h2>7 · 新增文字（实现时写进 tools/l10n/catalog.tsv）</h2>
+  <table>
+    <tr><th>name（拟）</th><th>zh</th><th>en</th></tr>
+    <tr><td>SettingsScrollPastEnd</td><td>滚动到最后一项之后</td><td>Scroll past the last item</td></tr>
+    <tr><td>SettingsScrollPastEndDesc</td><td>列表到底后还能再往下滚一段，留出空白处，方便多栏之间拖放或右键</td><td>Keep scrolling a little past the end, leaving empty space to drop files between panes or right-click</td></tr>
+    <tr><td>OpenInOtherPane</td><td>在另一栏打开</td><td>Open in the other pane</td></tr>
+    <tr><td>TransferCopyTo</td><td>复制到</td><td>Copy to</td></tr>
+    <tr><td>TransferMoveTo</td><td>移动到</td><td>Move to</td></tr>
+    <tr><td>TransferOtherPanes</td><td>这个窗口的其他栏</td><td>Other panes in this window</td></tr>
+    <tr><td>TransferOtherWindows</td><td>其他窗口</td><td>Other windows</td></tr>
+    <tr><td colspan="3">其余文字都用现有条目：移动到 / 复制到（DropMove / DropCopy，拖动提示）、选择文件夹…（QuickAccessChooseFolder 同文）、此文件夹为空（FolderEmpty）、列表外观（SettingsSecListLook）、文件列表（SettingsFileList）、目标栏（PaneTargetBadge）。CopyToTarget / MoveToTarget / CopyToWindow / MoveToWindow 仍被快捷键页或旧代码引用，不删、不改号。</td></tr>
+  </table>
+</div>
+
+<script>
+/* ---------- icons: vector paths, no font glyphs ---------- */
+const S16=(d,extra='')=>`<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"${extra}>${d}</svg>`;
+const IC={
+ folder:`<svg width="18" height="18" viewBox="0 0 18 18"><path d="M1.5 4.2c0-.8.6-1.4 1.4-1.4h3.6l1.6 1.6h7c.8 0 1.4.6 1.4 1.4v7.8c0 .8-.6 1.4-1.4 1.4H2.9c-.8 0-1.4-.6-1.4-1.4z" fill="var(--folder2)"/><path d="M1.5 6.6c0-.6.5-1.1 1.1-1.1h12.8c.6 0 1.1.5 1.1 1.1v6.6c0 .8-.6 1.4-1.4 1.4H2.9c-.8 0-1.4-.6-1.4-1.4z" fill="var(--folder)"/></svg>`,
+ file:`<svg width="18" height="18" viewBox="0 0 18 18"><path d="M4 1.8h6.4L14.5 6v9.2c0 .6-.5 1-1 1H4c-.6 0-1-.4-1-1V2.8c0-.6.4-1 1-1z" fill="var(--card)" stroke="var(--text2)" stroke-width="1"/><path d="M10.2 1.9V5.3c0 .4.3.7.7.7h3.4" fill="none" stroke="var(--text2)" stroke-width="1"/></svg>`,
+ doc:`<svg width="18" height="18" viewBox="0 0 18 18"><path d="M4 1.8h6.4L14.5 6v9.2c0 .6-.5 1-1 1H4c-.6 0-1-.4-1-1V2.8c0-.6.4-1 1-1z" fill="var(--card)" stroke="var(--text2)" stroke-width="1"/><path d="M5.6 8.6h6.2M5.6 10.8h6.2M5.6 13h4" stroke="var(--accent)" stroke-width="1.1" stroke-linecap="round"/></svg>`,
+ img:`<svg width="18" height="18" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="12" rx="2" fill="var(--card)" stroke="var(--text2)"/><path d="M3 13.5 7 9l3 3 2-2 3 3.5" fill="none" stroke="#3FA66B" stroke-width="1.2" stroke-linejoin="round"/><circle cx="12" cy="6.6" r="1.3" fill="#E8B84A"/></svg>`,
+ media:`<svg width="18" height="18" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="12" rx="2" fill="var(--card)" stroke="var(--text2)"/><path d="M7.4 6.4v5.2L11.6 9z" fill="#C25BD6"/></svg>`,
+ zip:`<svg width="18" height="18" viewBox="0 0 18 18"><path d="M4 1.8h10c.6 0 1 .4 1 1v12.4c0 .6-.4 1-1 1H4c-.6 0-1-.4-1-1V2.8c0-.6.4-1 1-1z" fill="var(--card)" stroke="var(--text2)"/><path d="M9 2v1.6M9 4.6v1.6M9 7.2v1.6" stroke="#B9822C" stroke-width="1.6"/><rect x="7.6" y="9.4" width="2.8" height="3" rx=".6" fill="#B9822C"/></svg>`,
+ app:`<svg width="18" height="18" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="12" rx="2" fill="var(--card)" stroke="var(--text2)"/><path d="M2.5 6.5h13" stroke="var(--text2)"/><rect x="4.5" y="8.5" width="5" height="4" rx="1" fill="var(--accent)"/></svg>`,
+ chev:`<svg width="10" height="10" viewBox="0 0 10 10"><path d="M3.5 1.8 6.7 5 3.5 8.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+ sep:`<svg width="10" height="10" viewBox="0 0 10 10"><path d="M3.5 1.8 6.7 5 3.5 8.2" fill="none" stroke="var(--text2)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+ drive:`<svg width="16" height="16" viewBox="0 0 16 16"><rect x="1.5" y="4.5" width="13" height="7" rx="1.5" fill="none" stroke="currentColor"/><circle cx="11.5" cy="8" r=".9" fill="var(--accent)"/></svg>`,
+ up:S16('<path d="M8 13V3.5M4 7.2 8 3.2l4 4"/>'),
+ more:S16('<circle cx="3.5" cy="8" r=".9" fill="currentColor"/><circle cx="8" cy="8" r=".9" fill="currentColor"/><circle cx="12.5" cy="8" r=".9" fill="currentColor"/>'),
+ details:S16('<path d="M2.5 4h11M2.5 8h11M2.5 12h11"/>'),
+ hmove:`<svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 6h7.5M6.5 3 9.5 6l-3 3" fill="none" stroke="var(--accent)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+ hcopy:`<svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 2v8M2 6h8" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/></svg>`,
+ hnone:`<svg width="12" height="12" viewBox="0 0 12 12"><circle cx="6" cy="6" r="4.2" fill="none" stroke="var(--text2)" stroke-width="1.3"/><path d="M3.2 8.8 8.8 3.2" stroke="var(--text2)" stroke-width="1.3"/></svg>`,
+ /* menu glyphs */
+ mOpen:S16('<path d="M2.5 5.5c0-.8.6-1.5 1.5-1.5h2.6l1.3 1.3h4.1c.8 0 1.5.7 1.5 1.5v4.7c0 .8-.7 1.5-1.5 1.5H4c-.9 0-1.5-.7-1.5-1.5z"/>'),
+ mTab:S16('<rect x="2" y="4.5" width="12" height="8.5" rx="1.6"/><path d="M2.4 7h4.6V4.6"/>'),
+ mPane:S16('<rect x="1.8" y="3" width="12.4" height="10" rx="1.6"/><path d="M8 3.2v9.6"/><path d="M4 8h2.6M5.6 6.6 7 8 5.6 9.4" stroke-width="1.1"/>'),
+ mPath:S16('<rect x="5" y="2.5" width="8.5" height="10" rx="1.4"/><path d="M3 5v7.5c0 .8.6 1.5 1.5 1.5H10"/>'),
+ mTray:S16('<path d="M2 9.5h3.2l1 1.6h3.6l1-1.6H14"/><path d="M3.6 4h8.8L14 9.5V12c0 .6-.4 1-1 1H3c-.6 0-1-.4-1-1V9.5z"/>'),
+ mCopy:S16('<rect x="5" y="5" width="8.5" height="8.5" rx="1.4"/><path d="M3.5 10.5h-.2c-.5 0-.8-.4-.8-.8V3.3c0-.5.4-.8.8-.8h6.4c.5 0 .8.4.8.8v.2"/>'),
+ mMove:S16('<path d="M2.5 8h9M8.5 4.5 12 8l-3.5 3.5"/><path d="M13.5 3v10"/>'),
+ mProps:S16('<circle cx="8" cy="8" r="5.6"/><path d="M8 7.3v4M8 4.9v.2"/>'),
+ mView:S16('<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>'),
+ mSort:S16('<path d="M4.5 3v10M2.5 11l2 2 2-2M9 4.5h4.5M9 8h3.5M9 11.5h2.5"/>'),
+ mRefresh:S16('<path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8v2.6h-2.6"/>'),
+ mNewFolder:S16('<path d="M2.5 5.5c0-.8.6-1.5 1.5-1.5h2.6l1.3 1.3h4.1c.8 0 1.5.7 1.5 1.5v4.7c0 .8-.7 1.5-1.5 1.5H4c-.9 0-1.5-.7-1.5-1.5z"/><path d="M8 7.4v3.6M6.2 9.2h3.6"/>'),
+ mPaste:S16('<rect x="3" y="3.5" width="10" height="10.5" rx="1.5"/><rect x="5.6" y="2" width="4.8" height="2.6" rx=".8"/>'),
+ mPick:S16('<path d="M2.5 5.5c0-.8.6-1.5 1.5-1.5h2.6l1.3 1.3h4.1c.8 0 1.5.7 1.5 1.5v4.7c0 .8-.7 1.5-1.5 1.5H4c-.9 0-1.5-.7-1.5-1.5z"/><circle cx="5.8" cy="9.4" r=".7" fill="currentColor"/><circle cx="8" cy="9.4" r=".7" fill="currentColor"/><circle cx="10.2" cy="9.4" r=".7" fill="currentColor"/>'),
+ mWin:S16('<rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.2 5.8h11.6"/>'),
+ mFolderSm:`<svg width="16" height="16" viewBox="0 0 18 18"><path d="M1.5 4.2c0-.8.6-1.4 1.4-1.4h3.6l1.6 1.6h7c.8 0 1.4.6 1.4 1.4v7.8c0 .8-.6 1.4-1.4 1.4H2.9c-.8 0-1.4-.6-1.4-1.4z" fill="var(--folder2)"/><path d="M1.5 6.6c0-.6.5-1.1 1.1-1.1h12.8c.6 0 1.1.5 1.1 1.1v6.6c0 .8-.6 1.4-1.4 1.4H2.9c-.8 0-1.4-.6-1.4-1.4z" fill="var(--folder)"/></svg>`,
+ sCut:S16('<circle cx="4.5" cy="11.5" r="2"/><circle cx="11.5" cy="11.5" r="2"/><path d="M5.8 10 11 2.5M10.2 10 5 2.5"/>'),
+ sCopy:S16('<rect x="5" y="5" width="8.5" height="8.5" rx="1.4"/><path d="M3.5 10.5h-.2c-.5 0-.8-.4-.8-.8V3.3c0-.5.4-.8.8-.8h6.4c.5 0 .8.4.8.8v.2"/>'),
+ sRename:S16('<path d="M2.5 13.5h3l7-7-3-3-7 7z"/><path d="M9 4.5l3 3"/>'),
+ sDelete:S16('<path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.4c0 .6.5 1.1 1.1 1.1h3.6c.6 0 1.1-.5 1.1-1.1l.6-8.4"/>'),
+ /* settings row icons */
+ tag:`<svg viewBox="0 0 18 18" width="18" height="18"><path d="M2.5 9.4V3.2c0-.4.3-.7.7-.7h6.2l6.1 6.1-6.9 6.9z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><circle cx="6" cy="6" r="1.2" fill="currentColor"/></svg>`,
+ pin:`<svg viewBox="0 0 18 18" width="18" height="18"><path d="M3 3.5h12M5 7h9M5 10h9M5 13h9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M3 6.2v8.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+ past:`<svg viewBox="0 0 18 18" width="18" height="18"><path d="M4 2.5h10M4 5.5h10M4 8.5h10" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><rect x="3.2" y="10.8" width="11.6" height="4.8" rx="1.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="2 1.6"/></svg>`
+};
+function iconFor(it){ if(it.d) return IC.folder; const n=it.n.toLowerCase(), ext=n.slice(n.lastIndexOf('.')+1);
+  if(ext==='exe') return IC.app;
+  if(['jpg','jpeg','png','heic','arw','svg','psd','gif','webp'].includes(ext)) return IC.img;
+  if(['mp4','mov','m4a','flac','wav','mp3','mkv'].includes(ext)) return IC.media;
+  if(['zip','7z','rar'].includes(ext)) return IC.zip;
+  if(['pdf','docx','pptx','xlsx','md','txt','csv','epub','vcf'].includes(ext)) return IC.doc;
+  return IC.file; }
+/* the layout mini-map of the pane layout strip: the pane a row points at is filled */
+function miniIcon(layout,cell){ const R=(x,y,w,h,i)=>`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="1.2" fill="${i===cell?'var(--accent)':'none'}" stroke="${i===cell?'var(--accent)':'var(--text2)'}" stroke-width="1"/>`;
+  let r=''; if(layout==='h') r=R(1.5,2.5,15,5,0)+R(1.5,8.5,15,5,1);
+  else if(layout==='3') r=R(1.5,2.5,4.3,11,0)+R(6.85,2.5,4.3,11,1)+R(12.2,2.5,4.3,11,2);
+  else r=R(1.5,2.5,7,11,0)+R(9.5,2.5,7,11,1);
+  return `<svg width="18" height="16" viewBox="0 0 18 16">${r}</svg>`; }
+
+/* ---------- sample folders ---------- */
+const D=s=>s.split('|').map(n=>({n,d:true})), F=s=>s.split('|').map(n=>({n,d:false}));
+const DL='C:\\Users\\SS\\Downloads', PIC='C:\\Users\\SS\\Pictures\\2025', BAK='D:\\备份';
+const TREE={
+ 'C:':[...D('PerfLogs|Program Files|Users|Windows'),...F('pagefile.sys')],
+ 'C:\\Users':[...D('Public|SS')],
+ 'C:\\Users\\SS':[...D('Desktop|Documents|Downloads|Music|Pictures|Videos')],
+ 'C:\\Users\\SS\\Pictures':[...D('2023|2024|2025|Screenshots|壁纸')],
+ [DL]:[...D('安装包|论文资料'),...F('Pulse-Setup-2.8.exe|发票_2025-10.pdf|季度汇报.pptx|IMG_0431.jpg|IMG_0432.jpg|IMG_0433.jpg|IMG_0436.jpg|IMG_0437.HEIC|DSC01022.ARW|DSC01023.ARW|screen-2025-11-02.png|合同扫描件.pdf|旅行行程.xlsx|phone-backup.zip|字体包.7z|meeting-notes.md|录音 11-20.m4a|demo.mp4|vacation.mov|wallpaper-4k.jpg|readme.txt|报销单.docx|模板.psd|export.csv|logo.svg|drivers.zip|book.epub|music.flac')],
+ [PIC]:[...D('01 一月|02 二月|03 三月|04 四月|05 五月|06 六月|07 七月|08 八月|09 九月|10 十月|11 十一月|12 十二月|旅行 · 京都|旅行 · 大理|证件照|截图整理|家庭聚会|演唱会|宠物|美食|手机导入|待整理|精选|打印'),...F('IMG_0412.jpg|IMG_0413.jpg|IMG_0418.HEIC|IMG_0420.jpg|封面.png|合影.jpg')],
+ 'D:':[...D('备份|项目|软件')],
+ [BAK]:[...D('手机 2024|照片归档'),...F('通讯录.vcf|微信聊天记录.zip|系统映像说明.txt')],
+};
+function hs(s){ let h=2166136261>>>0; for(const c of s){ h^=c.charCodeAt(0); h=Math.imul(h,16777619)>>>0; } return h; }
+const p2=n=>String(n).padStart(2,'0');
+function meta(path,it){ const h=hs(path+'|'+it.n);
+  it.date=`2025/${p2(1+h%11)}/${p2(1+(h>>>4)%28)} ${p2((h>>>9)%24)}:${p2((h>>>14)%60)}`;
+  if(it.d) it.size=''; else { const kb=6+(h>>>3)%60000; it.size=kb>=1024?(kb/1024).toFixed(1)+' MB':kb+' KB'; } }
+const cmpItems=(a,b)=>(a.d===b.d?0:a.d?-1:1)||a.n.toLowerCase().localeCompare(b.n.toLowerCase(),'zh-CN',{numeric:true});
+const PREP=new Set();
+function listOf(path){ let l=TREE[path];
+  if(!l){ // other folders: deterministic made-up content, some short, some long
+    const h=hs(path), n=3+h%34; l=[]; const tail=path.split('\\').pop();
+    for(let i=0;i<n;i++){ const d=i<(h>>>3)%5; l.push({n:d?`子文件夹 ${i+1}`:`${tail}_${p2(i+1)}.${['log','jpg','pdf','zip'][(h>>>i)%4]}`,d}); }
+    TREE[path]=l; }
+  if(!PREP.has(path)){ l.sort(cmpItems); l.forEach(it=>{ if(!it.date) meta(path,it); }); PREP.add(path); }
+  return l; }
+function join(a,b){ return a.endsWith('\\')?a+b:a+'\\'+b; }
+function parentOf(p){ const i=p.lastIndexOf('\\'); return i<0?null:p.slice(0,i); }
+function titleOf(p){ return p==='C:'?'本地磁盘 (C:)':p==='D:'?'数据 (D:)':p.split('\\').pop(); }
+function driveOf(p){ return p.slice(0,2).toUpperCase(); }
+function esc(s){ return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function crumbs(p){ const parts=p.split('\\'); return parts.map((s,i)=>`${i?`<span class="sep">${IC.sep}</span>`:`<span style="display:flex;color:var(--text2)">${IC.drive}</span>`}<span class="c">${esc(i?s:titleOf(s))}</span>`).join(''); }
+
+/* ---------- geometry (DIPs) ---------- */
+const PH=38, CH=28, ROW=34, PADB=4, GAP=6, PAD=6;
+const VISIBLE={single:1,v:2,h:2,'3':3};
+function viewH(paneH){ return paneH-PH-CH-PADB; }
+// up to half the list (at least 2 rows), but the last item always stays in view
+function extraPx(v){ return Math.max(0,Math.min(v-ROW-10,Math.max(2*ROW,Math.round(v*0.5)))); }
+function paneRects(layout,W,H){ const iw=W-2*PAD, ih=H-2*PAD, R=(x,y,w,h)=>({x:Math.round(x),y:Math.round(y),w:Math.round(w),h:Math.round(h)});
+  if(layout==='single') return [R(PAD,PAD,iw,ih)];
+  if(layout==='h'){ const h=(ih-GAP)/2; return [R(PAD,PAD,iw,h),R(PAD,PAD+h+GAP,iw,h)]; }
+  if(layout==='3'){ const w=(iw-2*GAP)/3; return [0,1,2].map(i=>R(PAD+i*(w+GAP),PAD,w,ih)); }
+  const w=(iw-GAP)/2; return [R(PAD,PAD,w,ih),R(PAD+w+GAP,PAD,w,ih)]; }
+function scrollFor(spec,n,v,on){ if(typeof spec==='number') return spec; const content=n*ROW, end=Math.max(0,content-v), over=content>v;
+  if(spec==='end') return end; if(spec==='max') return over?end+(on?extraPx(v):0):0; return 0; }
+
+/* ---------- Fluent menu ---------- */
+const MW=256, SW=300;
+function rowH(r){ return r.strip?40:r.grp?22:32; }
+function menuHeight(rows){ return 8+rows.reduce((a,r)=>a+rowH(r)+(r.sep?9:0),0); }
+function rowTop(rows,i){ let y=4; for(let k=0;k<i;k++) y+=rowH(rows[k])+(rows[k].sep?9:0); return y; }
+function tagHTML(r,ann){ return ann&&r.tag?`<span class="tag ${r.tag}">${{new:'新',chg:'改',del:'删'}[r.tag]}</span>`:''; }
+function menuRowsHTML(rows,prefix,openSub,ann){ return rows.map((r,i)=>{ let h='';
+  if(r.strip) h=`<div class="mstrip">${[['cut',IC.sCut,'剪切'],['copy',IC.sCopy,'复制'],['rename',IC.sRename,'重命名'],['delete',IC.sDelete,'删除']].map(([k,g,t])=>`<span data-strip="${k}" title="${t}">${g}</span>`).join('')}</div>`;
+  else if(r.grp) h=`<div class="mgrp">${esc(r.grp)}</div>`;
+  else { const cls=['mi']; if(r.dis) cls.push('dis'); if(openSub===i) cls.push('open'); if(ann&&r.tag==='del') cls.push('del');
+    const lead=r.mini?r.mini:(r.icon||'<span style="width:16px"></span>');
+    h=`<div class="${cls.join(' ')}" data-mi="${prefix}${i}">${lead}<span class="lb">${esc(r.label)}</span>${r.path?`<span class="pa">${esc(r.path)}</span>`:'<span class="gr"></span>'}${tagHTML(r,ann)}${r.key?`<span class="k">${esc(r.key)}</span>`:''}${r.sub?`<span class="ar">${IC.chev}</span>`:''}</div>`; }
+  return h+(r.sep?'<div class="msep"></div>':''); }).join(''); }
+// the menu and its open flyout, placed inside a W x H area
+function menuHTML(m,W,H,ann,live){ const rows=m.rows, mh=menuHeight(rows);
+  const x=Math.max(4,Math.min(m.x,W-MW-6)), y=Math.max(4,Math.min(m.y,H-mh-6));
+  let h=`<div class="menu${live?' live':''}" style="left:${x}px;top:${y}px;width:${MW}px">${menuRowsHTML(rows,'',m.sub,ann)}</div>`;
+  const s=m.sub>=0&&rows[m.sub]&&rows[m.sub].sub;
+  if(s){ const sh=menuHeight(s); let sx=x+MW-4; if(sx+SW>W-4) sx=x-SW+4>=4?x-SW+4:Math.max(4,W-SW-4);
+    const sy=Math.max(4,Math.min(y+rowTop(rows,m.sub)-4,H-sh-6));
+    h+=`<div class="menu${live?' live':''}" style="left:${sx}px;top:${sy}px;width:${SW}px">${menuRowsHTML(s,m.sub+'.',-1,ann)}</div>`; }
+  return h; }
+// menu models. ctx: {layout, pane, items, others:[{pi,path}], target (pi or -1), clip}
+function transferSub(op,ctx){ const s=[];
+  if(ctx.others.length){ s.push({grp:'这个窗口的其他栏'});
+    ctx.others.forEach(o=>s.push({label:titleOf(o.path),path:o.path,mini:miniIcon(ctx.layout,o.pi),
+      key:o.pi===ctx.target?(op==='copy'?'Ctrl+Alt+C':'Ctrl+Alt+X'):'',act:{type:'xfer',op,dest:o.path}})); }
+  s.push({grp:'其他窗口'});
+  s.push({label:'相机导入',path:'E:\\DCIM\\相机导入',icon:IC.mFolderSm,sep:true,act:{type:'toast',msg:`演示：${op==='copy'?'复制':'移动'}到另一个窗口的「相机导入」（未真正执行）`}});
+  s.push({label:'选择文件夹…',icon:IC.mPick,act:{type:'toast',msg:'演示：打开文件夹选择窗口（folder_picker_dialog）'}});
+  return s; }
+function openInOther(ctx,path,label){ if(!ctx.others.length) return null;
+  if(ctx.others.length===1) return {label,icon:IC.mPane,tag:'new',act:{type:'openIn',pi:ctx.others[0].pi,path}};
+  return {label,icon:IC.mPane,tag:'new',sub:ctx.others.map(o=>({label:titleOf(o.path),path:o.path,mini:miniIcon(ctx.layout,o.pi),act:{type:'openIn',pi:o.pi,path}}))}; }
+function itemMenu(ctx){ const one=ctx.items.length===1, dir=one&&ctx.items[0].d, rows=[];
+  rows.push({label:'打开',key:'Enter',icon:IC.mOpen,act:{type:'open'}});
+  rows.push({strip:true});
+  if(dir) rows.push({label:'在新标签页中打开',icon:IC.mTab,act:{type:'toast',msg:'演示：在新标签页中打开（未真正执行）'}});
+  if(dir){ const o=openInOther(ctx,join(ctx.pane.path,ctx.items[0].n),'在另一栏打开'); if(o) rows.push(o); }
+  rows.push({label:'复制路径',key:'Ctrl+Shift+C',icon:IC.mPath,act:{type:'toast',msg:'已复制路径'}});
+  rows.push({label:'加入暂存架',key:'Ctrl+Shift+S',icon:IC.mTray,sep:true,act:{type:'toast',msg:'演示：已加入暂存架'}});
+  rows.push({label:'复制到',icon:IC.mCopy,tag:'chg',sub:transferSub('copy',ctx)});
+  rows.push({label:'移动到',icon:IC.mMove,tag:'chg',sep:true,sub:transferSub('move',ctx)});
+  rows.push({label:'属性',key:'Alt+Enter',icon:IC.mProps,act:{type:'toast',msg:'演示：属性'}});
+  return rows; }
+function backgroundMenu(ctx){ const rows=[];
+  rows.push({label:'查看',icon:IC.mView,sub:[{label:'详细信息',icon:IC.details,act:{type:'toast',msg:'演示：已是详细信息'}},{label:'大图标',icon:IC.mView,act:{type:'toast',msg:'演示：大图标（未切换）'}}]});
+  rows.push({label:'排序方式',icon:IC.mSort,sub:['名称','修改日期','大小'].map(t=>({label:t,act:{type:'toast',msg:`演示：按${t}排序（未切换）`}}))});
+  rows.push({label:'刷新',key:'F5',icon:IC.mRefresh,sep:true,act:{type:'toast',msg:'已刷新'}});
+  rows.push({label:'新建文件夹',key:'F7',icon:IC.mNewFolder,act:{type:'newFolder'}});
+  rows.push({label:'粘贴',key:'Ctrl+V',icon:IC.mPaste,dis:!ctx.clip,sep:true,act:{type:'paste'}});
+  const o=openInOther(ctx,ctx.pane.path,'在另一栏打开'); if(o) rows.push(o);
+  rows.push({label:'属性',key:'Alt+Enter',icon:IC.mProps,act:{type:'toast',msg:'演示：文件夹属性'}});
+  return rows; }
+
+/* ---------- renderer: one window, given explicit state ---------- */
+// st: {theme,on,ann,layout,W,H,panes:[{path,s,sel:Set}],focus,drop:{pi,row},hint,hot,menu,dragSet,target,toast}
+function renderWin(host,st){
+  const {theme,on,ann,layout,W,H}=st; const now=performance.now(); const rects=paneRects(layout,W,H);
+  const fp=st.panes[Math.min(st.focus||0,st.panes.length-1)];
+  const win=document.createElement('div'); win.className='win '+theme;
+  win.innerHTML=`<div class="titlebar"><div class="tab">${IC.folder}<span>${esc(titleOf(fp.path))}</span></div></div><div class="crumbs">${crumbs(fp.path)}</div>`;
+  const pe=document.createElement('div'); pe.className='panes'; pe.style.height=H+'px';
+  let html='';
+  st.panes.forEach((pn,pi)=>{ const r=rects[pi]; if(!r) return;
+    const items=listOf(pn.path), v=viewH(r.h), content=items.length*ROW, end=Math.max(0,content-v), over=content>v;
+    const sc=Math.max(0,scrollFor(pn.s,items.length,v,on)); const blank=over?Math.max(0,sc-end):0;
+    const showDate=r.w>=420, showSize=r.w>=250;
+    const cls=['pane']; if(pi===st.focus&&st.panes.length>1) cls.push('focused'); if(st.panes.length===1) cls.push('focused');
+    if(st.drop&&st.drop.pi===pi&&st.drop.row<0) cls.push('dropcol');
+    let h=`<div class="${cls.join(' ')}" data-pi="${pi}" style="left:${r.x}px;top:${r.y}px;width:${r.w}px;height:${r.h}px">`;
+    const par=parentOf(pn.path);
+    h+=`<div class="ph"><span class="pbar"></span><span class="up" ${par?`data-up="${pi}"`:'style="opacity:.35"'} title="上一级">${IC.up}</span><span class="pt">${esc(titleOf(pn.path))}</span>`;
+    if(r.w>=330) h+=`<span class="pp">${esc(pn.path)}</span>`;
+    if(st.target===pi) h+=`<span class="badge">目标栏</span>`;
+    h+=`<span class="sp"></span>${r.w>=300?`<span class="ib">${IC.details}</span>`:''}<span class="ib">${IC.more}</span></div>`;
+    h+=`<div class="ch"><span class="c-n">名称</span>${showDate?'<span class="c-d">修改日期</span>':''}${showSize?'<span class="c-s">大小</span>':''}</div>`;
+    h+=`<div class="view"><div class="rows" style="transform:translateY(${-sc}px)">`;
+    if(!items.length) h+=`<div class="empty">此文件夹为空</div>`;
+    const first=Math.max(0,Math.floor(sc/ROW)-1), last=Math.min(items.length,Math.ceil((sc+v)/ROW)+1);
+    for(let i=first;i<last;i++){ const it=items[i]; const c=['row'];
+      if(pn.sel&&pn.sel.has(it)) c.push('sel');
+      else if(st.hot&&st.hot.pi===pi&&st.hot.row===i) c.push('hot');
+      if(st.drop&&st.drop.pi===pi&&st.drop.row===i) c.push('droprow');
+      if(st.dragSet&&st.dragSet.has(it)) c.push('dragsrc');
+      let extra='';
+      if(it.born&&now-it.born<1000){ // just dropped in: fades in and slides 8 dip from the left (160 ms), then a short accent wash
+        const a=Math.min(1,(now-it.born)/160), wash=Math.max(0,1-(now-it.born)/900);
+        extra=`;opacity:${a};transform:translateX(${-8*(1-a)}px);background:rgba(0,120,212,${(.26*wash).toFixed(3)})`; }
+      h+=`<div class="${c.join(' ')}" data-row="${i}" style="top:${i*ROW+1}px${extra}">${iconFor(it)}<span class="nm">${esc(it.n)}</span>${showDate?`<span class="dt">${it.date}</span>`:''}${showSize?`<span class="sz">${it.size}</span>`:''}</div>`; }
+    if(ann&&on&&over&&blank>18){
+      h+=`<div class="ann" style="top:${content+4}px;height:${blank-8}px">空白 ${Math.round(blank)} / 最多 ${extraPx(v)}</div>`;
+      h+=`<div class="annlast" style="top:${(items.length-1)*ROW}px"></div>`; }
+    h+=`</div></div>`;
+    const ms=content+blank-v;
+    if(over&&ms>0){ const total=content+blank, th=Math.max(28,v*v/total), y=PH+CH+(v-th)*Math.min(1,sc/ms);
+      h+=`<div class="sb" style="top:${y}px;height:${th}px"></div>`; }
+    html+=h+'</div>'; });
+  if(st.hint){ const hx=Math.min(st.hint.x,W-220), hy=Math.min(st.hint.y,H-30);
+    const g=st.hint.kind==='copy'?IC.hcopy:st.hint.kind==='move'?IC.hmove:IC.hnone;
+    html+=`<div class="hint" style="left:${hx}px;top:${hy}px">${g}<span>${esc(st.hint.text)}</span>${st.hint.mod?`<span class="mod">${esc(st.hint.mod)}</span>`:''}</div>`;
+    html+=`<div class="ghost" style="left:${st.hint.x-58}px;top:${hy-42}px">${(st.hint.icon||IC.file).replace(/width="18" height="18"/,'width="26" height="26"')}${st.hint.count>1?`<span class="cnt">${st.hint.count}</span>`:''}</div>`; }
+  if(st.menu) html+=menuHTML(st.menu,W,H,ann,true);
+  html+=`<div class="toast${st.toast?' on':''}">${esc(st.toast||'')}</div>`;
+  pe.innerHTML=html; win.appendChild(pe); host.replaceChildren(win);
+  return {win,panesEl:pe,rects};
+}
+
+/* ---------- live demo ---------- */
+// Per pane: t = target scroll, s/vel = drawn scroll + velocity (Smooth spring, ui_motion.h: k 380, c 36),
+// open = how much empty space past the last item is currently allowed (0..extraPx).
+const SPRING={k:380,c:36};
+function newPane(path){ return {path,sel:new Set(),anchor:null,t:0,s:0,vel:0,open:0,h:300}; }
+const L={theme:'dark',on:true,ann:true,layout:'v',tall:false,focus:0,hot:null,drop:null,hint:null,menu:null,clip:null,toast:'',toastUntil:0,
+  panes:[newPane(DL),newPane(PIC),newPane(BAK)]};
+const liveHost=document.getElementById('live');
+function liveW(){ return liveHost.clientWidth||1100; }
+function liveH(){ return L.tall?540:360; }
+function visiblePanes(){ return L.panes.slice(0,VISIBLE[L.layout]); }
+function layoutLive(){ const rects=paneRects(L.layout,liveW(),liveH()); visiblePanes().forEach((p,i)=>p.h=rects[i].h); }
+function geom(p){ const n=listOf(p.path).length, content=n*ROW, v=viewH(p.h);
+  return {n,content,v,end:Math.max(0,content-v),over:content>v,extra:extraPx(v)}; }
+function maxT(p){ const g=geom(p); return g.end+(L.on&&g.over?Math.min(p.open,g.extra):0); }
+function setT(p,t){ p.t=Math.min(Math.max(0,t),maxT(p)); }
+function refit(){ layoutLive(); L.panes.forEach(p=>{ const g=geom(p); p.open=Math.min(p.open,g.extra); setT(p,p.t); }); dirty=true; }
+layoutLive();
+{ const p=L.panes[1]; setT(p,geom(p).end); p.s=p.t; }           // the photo pane starts scrolled to its last item
+{ const p=L.panes[0], it=listOf(DL).find(x=>x.n==='IMG_0431.jpg'); p.sel=new Set([it]); p.anchor=it; setT(p,ROW*3); p.s=p.t; }
+
+let liveRefs=null, dirty=true;
+function drawLive(){ layoutLive(); const vis=visiblePanes(); if(L.focus>=vis.length) L.focus=0;
+  const others=vis.length===2?1:-1;
+  liveRefs=renderWin(liveHost,{theme:L.theme,on:L.on,ann:L.ann,layout:L.layout,W:liveW(),H:liveH(),panes:vis,focus:L.focus,
+    drop:L.drop,hint:L.hint,hot:(dragging&&dragging.live)||L.menu?null:L.hot,menu:L.menu,
+    dragSet:dragging&&dragging.live?new Set(dragging.items):null,toast:performance.now()<L.toastUntil?L.toast:''}); }
+function toast(msg){ L.toast=msg; L.toastUntil=performance.now()+1700; dirty=true; }
+function locate(cx,cy){ const el=document.elementFromPoint(cx,cy); if(!el||el.closest('#live .menu')) return null;
+  const pel=el.closest('#live .pane'); if(!pel) return null;
+  const pi=+pel.dataset.pi, pane=L.panes[pi]; if(!pane) return null;
+  const view=pel.querySelector('.view').getBoundingClientRect(); const y=cy-view.top; const items=listOf(pane.path);
+  const r=Math.floor((y+pane.s)/ROW); const row=(y>=0&&r>=0&&r<items.length)?r:-1;
+  const pr=liveRefs.panesEl.getBoundingClientRect();
+  return {pi,pane,row,items,y,vh:view.height,x:cx-pr.left,yy:cy-pr.top}; }
+
+liveHost.addEventListener('wheel',e=>{ if(L.menu){ L.menu=null; dirty=true; }
+  const p=locate(e.clientX,e.clientY); if(!p) return; e.preventDefault();
+  const c=p.pane, g=geom(c), step=3*ROW;
+  if(e.deltaY>0){ // past the end the allowance grows with the wheel, up to its limit
+    if(L.on&&g.over&&c.t+step>g.end) c.open=Math.min(g.extra,Math.max(c.open,c.t+step-g.end));
+    setT(c,c.t+step);
+  } else { setT(c,c.t-step); c.open=Math.max(0,Math.min(c.open,c.t-g.end)); }
+  dirty=true; },{passive:false});
+liveHost.addEventListener('mousemove',e=>{ if(dragging||L.menu) return; const p=locate(e.clientX,e.clientY); const hot=p&&p.row>=0?{pi:p.pi,row:p.row}:null;
+  if(JSON.stringify(hot)!==JSON.stringify(L.hot)){ L.hot=hot; dirty=true; } });
+liveHost.addEventListener('mouseleave',()=>{ if(L.hot){ L.hot=null; dirty=true; } });
+
+function goTo(p,path){ p.path=path; p.sel=new Set(); p.anchor=null; p.t=p.s=p.vel=0; p.open=0; dirty=true; }
+let dragging=null, press=null, lastDown={t:0,pi:-1,row:-1};
+liveHost.addEventListener('mousedown',e=>{
+  if(L.menu){ if(!e.target.closest('.menu')){ L.menu=null; dirty=true; } return; }
+  if(e.button!==0) return;
+  const up=e.target.closest('[data-up]'); if(up){ const p=L.panes[+up.dataset.up]; const par=parentOf(p.path); if(par){ L.focus=+up.dataset.up; goTo(p,par); } e.preventDefault(); return; }
+  const p=locate(e.clientX,e.clientY); if(!p) return; L.focus=p.pi; dirty=true; e.preventDefault();
+  if(p.row<0) return;                                        // blank: selection unchanged
+  const now=performance.now(), it=p.items[p.row], pn=p.pane;
+  if(now-lastDown.t<420&&lastDown.pi===p.pi&&lastDown.row===p.row){ lastDown={t:0,pi:-1,row:-1}; openItem(pn,it); return; }
+  lastDown={t:now,pi:p.pi,row:p.row};
+  const wasSel=pn.sel.has(it);
+  if(e.shiftKey&&pn.anchor&&p.items.includes(pn.anchor)){ const a=p.items.indexOf(pn.anchor), b=p.row; pn.sel=new Set(p.items.slice(Math.min(a,b),Math.max(a,b)+1)); }
+  else if(e.ctrlKey){ if(!wasSel) pn.sel.add(it); }
+  else if(!wasSel){ pn.sel=new Set([it]); pn.anchor=it; }
+  press={pn,it,wasSel,ctrl:e.ctrlKey,shift:e.shiftKey};
+  const items=p.items.filter(x=>pn.sel.has(x));
+  dragging={fromPi:p.pi,fromPath:pn.path,items,sx:e.clientX,sy:e.clientY,live:false,last:null,ctrl:false,shift:false};
+});
+function openItem(pn,it){ if(it.d) goTo(pn,join(pn.path,it.n)); else toast('演示：打开 '+it.n+'（未真正执行）'); }
+window.addEventListener('mousemove',e=>{ if(!dragging) return;
+  if(!dragging.live&&Math.hypot(e.clientX-dragging.sx,e.clientY-dragging.sy)<6) return;
+  dragging.live=true; dragging.last={x:e.clientX,y:e.clientY}; dragging.ctrl=e.ctrlKey; dragging.shift=e.shiftKey; retarget(); });
+function onMods(e){ if(e.key==='Escape'){ if(dragging&&dragging.live){ dragging=null; L.drop=null; L.hint=null; L.panes.forEach(restore); dirty=true; } if(L.menu){ L.menu=null; dirty=true; } return; }
+  if(dragging&&dragging.live&&(dragging.ctrl!==e.ctrlKey||dragging.shift!==e.shiftKey)){ dragging.ctrl=e.ctrlKey; dragging.shift=e.shiftKey; retarget(); } }
+window.addEventListener('keydown',onMods); window.addEventListener('keyup',onMods);
+function restore(c){ if(!c.base) return; c.open=c.base.open; setT(c,c.base.t); delete c.base; }
+function opFor(fromPath,destPath,ctrl,shift){ return ctrl?'copy':shift?'move':driveOf(fromPath)===driveOf(destPath)?'move':'copy'; }
+function retarget(){ // what the pointer is over right now (rows move under it while the pane scrolls)
+  const d=dragging, p=locate(d.last.x,d.last.y);
+  L.panes.forEach(c=>{ if(c.base&&(!p||p.pane!==c)) restore(c); });   // left a pane without dropping: its empty space springs back
+  d.over=p;
+  if(!p){ L.drop=null; L.hint=null; dirty=true; return; }
+  if(!p.pane.base) p.pane.base={t:p.pane.t,open:p.pane.open};
+  const it=p.row>=0?p.items[p.row]:null; let dest, destName, drop;
+  if(it&&it.d&&!d.items.includes(it)){ dest=join(p.pane.path,it.n); destName=it.n; drop={pi:p.pi,row:p.row}; }
+  else { dest=p.pane.path; destName=titleOf(dest); drop={pi:p.pi,row:-1}; }
+  const n=d.items.length, icon=iconFor(d.items[0]);
+  const hx=p.x+16, hy=p.yy+20;
+  if(dest===d.fromPath){ L.drop=null; L.hint={x:hx,y:hy,text:'已在 '+destName+' 中',kind:'none',count:n,icon,dest}; dirty=true; return; }
+  if(d.items.some(x=>x.d&&(dest+'\\').startsWith(join(d.fromPath,x.n)+'\\'))){ L.drop=null; L.hint={x:hx,y:hy,text:'不能放进它自己里面',kind:'none',count:n,icon,dest}; dirty=true; return; }
+  const op=opFor(d.fromPath,dest,d.ctrl,d.shift);
+  L.drop=drop; L.hint={x:hx,y:hy,text:(op==='copy'?'复制到 ':'移动到 ')+destName,kind:op,dest,count:n,icon,
+    mod:d.ctrl?'Ctrl':d.shift?'Shift':driveOf(d.fromPath)!==driveOf(dest)?'跨盘':''};
+  L.hot=null; dirty=true; }
+function dragStep(dt){ // per frame while dragging over a pane
+  const p=dragging.over; if(!p) return; const c=p.pane, g=geom(c), zone=Math.min(48,p.vh*0.25);
+  if(p.y>=0&&p.y<zone&&c.t>0){ setT(c,c.t-dt*(150+650*Math.min(1,(zone-p.y)/zone))); retarget(); return; }  // top edge: scroll up as usual
+  if(p.y>p.vh-zone&&c.t<g.end-0.5){ // bottom edge: auto scroll to the last item first
+    setT(c,c.t+dt*(150+650*Math.min(1,(p.y-(p.vh-zone))/zone))); retarget(); return; }
+  if(L.on&&g.over&&c.t>=g.end-0.5){ // at the end: empty space opens as the pointer moves down the lower half
+    const f=Math.min(1,Math.max(0,(p.y-p.vh*0.5)/(p.vh*0.5-10)));
+    const want=g.extra*f*f*(3-2*f);
+    if(want>c.open+0.5){ c.open=want; c.t=g.end+c.open; retarget(); } // grows only: moving back up does not pull rows down under the pointer
+  } }
+function uniqueName(list,name){ if(!list.some(x=>x.n===name)) return name; const dot=name.lastIndexOf('.'), base=dot>0?name.slice(0,dot):name, ext=dot>0?name.slice(dot):'';
+  for(let k=2;;k++){ const n=`${base} (${k})${ext}`; if(!list.some(x=>x.n===n)) return n; } }
+function removeFrom(path,item){ const list=listOf(path), i=list.indexOf(item); if(i<0) return; list.splice(i,1);
+  L.panes.forEach(c=>{ if(c.path===path){ c.sel.delete(item); setT(c,c.t); } }); }
+function transfer(items,fromPath,destPath,op){ const dest=listOf(destPath), now=performance.now(), added=[];
+  for(const it of items){ if(op==='move') removeFrom(fromPath,it);
+    const ni={...it,n:uniqueName(dest,it.n),born:now}; dest.push(ni); added.push(ni); }
+  dest.sort(cmpItems);
+  L.panes.forEach(c=>{ if(c.path===destPath) c.sel=new Set(added); setT(c,c.t); });
+  toast(`演示：已${op==='copy'?'复制':'移动'} ${items.length} 项到 ${titleOf(destPath)}（只改了演示数据）`); }
+window.addEventListener('mouseup',e=>{
+  if(L.menu){ const row=e.target.closest&&e.target.closest('#live .menu [data-mi], #live .menu [data-strip]'); if(row) menuPick(row); return; }
+  if(!dragging) return; const d=dragging; dragging=null;
+  if(!d.live){ if(press){ const {pn,it,wasSel,ctrl,shift}=press;
+      if(ctrl&&wasSel) pn.sel.delete(it); else if(!ctrl&&!shift&&wasSel) pn.sel=new Set([it]);
+      if(!shift) pn.anchor=it; press=null; dirty=true; } return; }
+  press=null;
+  const p=d.over, hint=L.hint; L.drop=null; L.hint=null; dirty=true;
+  if(!p||!hint||hint.kind==='none'){ L.panes.forEach(restore); return; }
+  L.panes.forEach(c=>{ if(c!==p.pane) restore(c); }); delete p.pane.base;   // dropped here: the pane keeps its place
+  L.focus=p.pi; transfer(d.items,d.fromPath,hint.dest,hint.kind);
+});
+
+/* right-click menus */
+function menuCtx(pi){ const vis=visiblePanes(), pane=L.panes[pi];
+  const others=vis.map((p,i)=>({pi:i,path:p.path})).filter(o=>o.pi!==pi);
+  return {layout:L.layout,pane,pi,items:listOf(pane.path).filter(x=>pane.sel.has(x)),others,target:others.length===1?others[0].pi:-1,clip:L.clip}; }
+liveHost.addEventListener('contextmenu',e=>{ e.preventDefault(); const p=locate(e.clientX,e.clientY); if(!p){ L.menu=null; dirty=true; return; }
+  L.focus=p.pi; L.hot=null; const pn=p.pane;
+  let rows, bg=p.row<0;
+  if(!bg){ const it=p.items[p.row]; if(!pn.sel.has(it)){ pn.sel=new Set([it]); pn.anchor=it; } }
+  const ctx=menuCtx(p.pi); rows=bg?backgroundMenu(ctx):itemMenu(ctx);
+  L.menu={x:p.x+2,y:p.yy+2,rows,sub:-1,ctx,bg}; dirty=true; });
+liveHost.addEventListener('mouseover',e=>{ if(!L.menu) return; const r=e.target.closest('.menu [data-mi]'); if(!r) return;
+  const id=r.dataset.mi; if(id.includes('.')) return; const i=+id; const row=L.menu.rows[i];
+  const want=row&&row.sub?i:-1; if(want!==L.menu.sub){ L.menu.sub=want; dirty=true; } });
+function menuPick(el){ const m=L.menu, ctx=m.ctx;
+  if(el.dataset.strip){ const k=el.dataset.strip; L.menu=null; dirty=true;
+    if(k==='copy'||k==='cut'){ L.clip={items:ctx.items.slice(),from:ctx.pane.path,op:k==='cut'?'move':'copy'}; toast(`演示：已${k==='cut'?'剪切':'复制'} ${ctx.items.length} 项，到另一栏空白处右键可粘贴`); }
+    else if(k==='delete'){ ctx.items.forEach(it=>removeFrom(ctx.pane.path,it)); toast(`演示：已删除 ${ctx.items.length} 项`); }
+    else toast('演示：重命名'); return; }
+  const id=el.dataset.mi.split('.').map(Number); let row=m.rows[id[0]]; if(id.length>1) row=row.sub[id[1]];
+  if(!row||row.dis) return;
+  if(row.sub){ m.sub=id[0]; dirty=true; return; }
+  L.menu=null; dirty=true; const a=row.act; if(!a) return;
+  if(a.type==='toast') toast(a.msg);
+  else if(a.type==='open'){ if(ctx.items.length===1) openItem(ctx.pane,ctx.items[0]); else toast(`演示：打开 ${ctx.items.length} 项`); }
+  else if(a.type==='openIn'){ goTo(L.panes[a.pi],a.path); L.focus=a.pi; toast('在另一栏打开 '+titleOf(a.path)); }
+  else if(a.type==='xfer'){ if(!ctx.items.length) return; transfer(ctx.items,ctx.pane.path,a.dest,a.op); }
+  else if(a.type==='newFolder'){ const list=listOf(ctx.pane.path), n=uniqueName(list,'新建文件夹'); const it={n,d:true,born:performance.now()}; meta(ctx.pane.path,it); list.push(it); list.sort(cmpItems); ctx.pane.sel=new Set([it]); setT(ctx.pane,ctx.pane.t); toast('演示：已新建文件夹（在空白处右键）'); }
+  else if(a.type==='paste'){ const c=L.clip; if(!c) return; if(c.from===ctx.pane.path){ toast('已在 '+titleOf(c.from)+' 中'); return; }
+    transfer(c.items.filter(it=>c.op==='copy'||listOf(c.from).includes(it)),c.from,ctx.pane.path,c.op); if(c.op==='move') L.clip=null; }
+}
+
+function tick(){ const now=performance.now(); const dt=Math.min(64,now-(tick.last||now))/1000; tick.last=now; let moving=false;
+  if(dragging&&dragging.live) dragStep(dt);
+  for(const c of L.panes){ let rem=dt;
+    while(rem>0){ const h=Math.min(rem,0.004); c.vel+=(SPRING.k*(c.t-c.s)-SPRING.c*c.vel)*h; c.s+=c.vel*h; rem-=h; }
+    if(Math.abs(c.t-c.s)<0.5&&Math.abs(c.vel)<10){ c.s=c.t; c.vel=0; } else moving=true;
+    if(listOf(c.path).some(it=>it.born&&now-it.born<1000)) moving=true; }
+  const toastOn=now<L.toastUntil; if(toastOn!==tick.toast){ tick.toast=toastOn; dirty=true; }
+  if(moving||dirty){ drawLive(); dirty=false; }
+  requestAnimationFrame(tick); }
+
+/* toolbar */
+function press2(on,off){ on.setAttribute('aria-pressed','true'); off.setAttribute('aria-pressed','false'); }
+bOn.onclick=()=>{ L.on=true; press2(bOn,bOff); syncSwitch(); dirty=true; };
+bOff.onclick=()=>{ L.on=false; press2(bOff,bOn); L.panes.forEach(c=>{ c.open=0; setT(c,c.t); }); syncSwitch(); dirty=true; };
+bLow.onclick=()=>{ L.tall=false; press2(bLow,bTall); refit(); };
+bTall.onclick=()=>{ L.tall=true; press2(bTall,bLow); refit(); };
+bDark.onclick=()=>{ L.theme='dark'; press2(bDark,bLight); document.body.classList.add('pagedark'); dirty=true; };
+bLight.onclick=()=>{ L.theme='light'; press2(bLight,bDark); document.body.classList.remove('pagedark'); dirty=true; };
+bAnn.onclick=()=>{ L.ann=!L.ann; bAnn.setAttribute('aria-pressed',L.ann); dirty=true; };
+document.querySelectorAll('[data-layout]').forEach(b=>b.onclick=()=>{ L.layout=b.dataset.layout; L.menu=null;
+  document.querySelectorAll('[data-layout]').forEach(x=>x.setAttribute('aria-pressed',x===b)); refit(); });
+window.addEventListener('resize',()=>{ refit(); });
+document.body.classList.add('pagedark');
+drawLive(); dirty=false; requestAnimationFrame(tick);
+
+/* ---------- filmstrip: empty space opening as the drag moves down (lower pane of a stacked layout) ---------- */
+{ const host=document.getElementById('film'), FH=300;
+  const steps=[{f:0,t:'刚拖进来：已在最后一项，没有空白'},{f:.35,t:'往下移：空白跟着长出'},{f:.7,t:'继续往下：最后一项往上让'},{f:1,t:'到底边：空白到上限，松开即放进 2025'}];
+  ['dark','light'].forEach(theme=>steps.forEach((s,i)=>{
+    const fig=document.createElement('figure'); fig.className='frame'; const h=document.createElement('div'); fig.appendChild(h); host.appendChild(fig);
+    const W=h.clientWidth||270, rect=paneRects('single',W,FH)[0], v=viewH(rect.h), n=listOf(PIC).length, end=n*ROW-v, ex=extraPx(v);
+    const e=s.f*s.f*(3-2*s.f), py=v*0.5+s.f*(v*0.5-10);
+    renderWin(h,{theme,on:true,ann:theme==='dark',layout:'single',W,H:FH,focus:0,panes:[{path:PIC,s:end+ex*e,sel:new Set()}],
+      drop:{pi:0,row:-1},hint:{x:Math.round(W*0.42),y:rect.y+PH+CH+py+18,text:'移动到 2025',kind:'move',count:2,icon:IC.img}});
+    fig.insertAdjacentHTML('beforeend',`<figcaption><b>${i+1}</b>　${s.t}</figcaption>`); })); }
+
+/* ---------- gallery ---------- */
+{ const G=document.getElementById('gallery'), GH=330;
+  const sel=(path,names)=>new Set(listOf(path).filter(x=>names.includes(x.n)));
+  const states=[
+   {k:'3a',t:'关闭（现状）：右栏滚到底，最后一项贴着底边；看得见的大多是子文件夹，放进「2025」本身只能瞄准最后几行文件，右键也找不到空白处。',on:false,layout:'v',
+    panes:()=>[{path:DL,s:ROW*3,sel:sel(DL,['IMG_0431.jpg'])},{path:PIC,s:'end'}]},
+   {k:'3b',t:'开启 · 滚到最远：最后一项停在列表中间附近，下面是空白，可拖放、可右键。',on:true,layout:'v',
+    panes:()=>[{path:DL,s:ROW*3,sel:sel(DL,['IMG_0431.jpg'])},{path:PIC,s:'max'}]},
+   {k:'3c',t:'短栏与长栏：备份 本来就放得下，不加滚动、没有滚动条；2025 照常留空白。',on:true,layout:'v',
+    panes:()=>[{path:BAK,s:0},{path:PIC,s:'max'}]},
+   {k:'3d',t:'上下分屏 · 拖到空白处：整栏描边，提示放进这一栏的文件夹（同盘 = 移动）。',on:true,layout:'h',drop:{pi:1,row:-1},
+    hint:W=>({x:Math.round(W*0.55),y:GH-60,text:'移动到 2025',kind:'move',count:3,icon:IC.img}),
+    panes:()=>[{path:DL,s:ROW*3,sel:sel(DL,['IMG_0431.jpg','IMG_0432.jpg','IMG_0433.jpg'])},{path:PIC,s:'max'}]},
+   {k:'3e',t:'拖到子文件夹行：只描这一行，放进那个子文件夹；跨盘时提示「复制到」。',on:true,layout:'v',drop:{pi:1,row:0},
+    hint:W=>({x:Math.round(W*0.6),y:150,text:'复制到 手机 2024',kind:'copy',mod:'跨盘',count:1,icon:IC.zip}),
+    panes:()=>[{path:DL,s:ROW*10,sel:sel(DL,['phone-backup.zip'])},{path:BAK,s:0}]},
+   {k:'3f',t:'在空白处右键：这一栏的空白处菜单，含新命令「在另一栏打开」。',on:true,layout:'v',menu:W=>({x:Math.round(W*0.62),y:120,sub:-1}),
+    panes:()=>[{path:DL,s:ROW*3},{path:PIC,s:'max'}]},
+  ];
+  states.forEach(s=>['dark','light'].forEach(theme=>{
+    const fig=document.createElement('figure'); fig.className='frame'; const h=document.createElement('div'); fig.appendChild(h); G.appendChild(fig);
+    const W=h.clientWidth||540; const panes=s.panes().map(p=>({...p,sel:p.sel||new Set()}));
+    let menu=null;
+    if(s.menu){ const m=s.menu(W); const ctx={layout:s.layout,pane:panes[1],items:[],others:[{pi:0,path:panes[0].path}],target:0,clip:null};
+      menu={...m,rows:backgroundMenu(ctx)}; }
+    renderWin(h,{theme,on:s.on,ann:theme==='dark'&&s.on&&!s.drop&&!s.menu,layout:s.layout,W,H:GH,focus:s.menu?1:(s.drop?0:0),panes,
+      drop:s.drop,hint:s.hint&&s.hint(W),menu,target:-1});
+    fig.insertAdjacentHTML('beforeend',`<figcaption><b>${s.k} · ${theme==='dark'?'深色':'浅色'}</b>　${s.t}</figcaption>`); })); }
+
+/* ---------- menu comparison ---------- */
+{ const host=document.getElementById('cmp'), H=520;
+  const before=[
+    {label:'打开',key:'Enter',icon:IC.mOpen},{strip:true},
+    {label:'在新标签页中打开',icon:IC.mTab},
+    {label:'复制路径',key:'Ctrl+Shift+C',icon:IC.mPath},
+    {label:'加入暂存架',key:'Ctrl+Shift+S',icon:IC.mTray},
+    {label:'复制到目标栏',key:'Ctrl+Alt+C',icon:IC.mCopy,tag:'del'},
+    {label:'移动到目标栏',key:'Ctrl+Alt+X',icon:IC.mMove,tag:'del'},
+    {label:'复制到窗口',icon:IC.mCopy,sub:[],tag:'chg'},
+    {label:'移动到窗口',icon:IC.mMove,sub:[],sep:true,tag:'chg'},
+    {label:'属性',key:'Alt+Enter',icon:IC.mProps}];
+  const ctx={layout:'3',pane:{path:DL},items:[{n:'论文资料',d:true}],others:[{pi:1,path:PIC},{pi:2,path:BAK}],target:1,clip:null};
+  const after=itemMenu(ctx); const subIdx=after.findIndex(r=>r.label==='复制到');
+  [['现状','三栏时「…到目标栏」要先设目标栏；菜单里看不出去哪',before,-1],
+   ['建议','「在另一栏打开」新增；「复制到」直接列出去处（三栏，2025 已设为目标栏）',after,subIdx]].forEach(([cap,sub,rows,open])=>{
+    const box=document.createElement('div'); host.appendChild(box);
+    const st=document.createElement('div'); st.className='stage dark'; st.style.height=H+'px'; box.appendChild(st);
+    const W=st.clientWidth||540;
+    st.innerHTML=`<div class="cap">${cap}</div><div class="sub">${sub}</div>`+menuHTML({x:16,y:62,rows,sub:open},W,H,true,false);
+  }); }
+
+/* ---------- settings ---------- */
+const S=document.getElementById('sets');
+['dark','light'].forEach(theme=>{
+  const d=document.createElement('div'); d.className='set '+theme;
+  d.innerHTML=`<div class="pt">文件列表</div><div class="sec">列表外观</div>
+   <div class="card"><span class="ic">${IC.tag}</span><div class="t">别名旁显示小图标</div><div class="d">在列表、侧栏和地址栏里用小图标标出设置了别名的项目</div><div class="sw on"></div></div>
+   <div class="card"><span class="ic">${IC.pin}</span><div class="t">滚动时固定上级文件夹</div><div class="d">展开的文件夹滚出顶部时停在列表上方</div><div class="sw"></div></div>
+   <div class="card new"><span class="badge">新增</span><span class="ic">${IC.past}</span><div class="t">滚动到最后一项之后</div><div class="d">列表到底后还能再往下滚一段，留出空白处，方便多栏之间拖放或右键</div><div class="sw ${theme==='dark'?'':'on'}" data-live="1"></div></div>`;
+  S.appendChild(d); });
+let syncing=false;
+function syncSwitch(){ if(syncing) return; /* settings mock keeps its own two states; the live switch follows clicks only */ }
+S.addEventListener('click',e=>{ const sw=e.target.closest('.sw'); if(!sw) return; sw.classList.toggle('on');
+  if(sw.dataset.live){ (sw.classList.contains('on')?bOn:bOff).click(); } });
+</script>
+</body>
+</html>

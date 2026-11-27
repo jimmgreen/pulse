@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pulse 标题栏图标重设计</title>
+<style>
+:root{--ui:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI",sans-serif;--acc:#0078D4}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{font-family:var(--ui);background:#121214;color:#ddd;-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit}
+.bar{position:sticky;top:0;z-index:20;height:48px;display:flex;align-items:center;gap:16px;padding:0 18px;background:rgba(18,18,20,.92);
+  backdrop-filter:blur(16px);border-bottom:1px solid rgba(255,255,255,.07);font-size:12.5px;color:#c9c9cc;white-space:nowrap;overflow-x:auto}
+.bar b{color:#fff;font-size:13px}
+.grp{display:flex;align-items:center;gap:6px}.grp>span{color:#8a8a90}
+.mseg{display:inline-flex;background:rgba(255,255,255,.07);border-radius:7px;padding:2px;gap:2px}
+.mseg button{border:0;background:transparent;padding:4px 9px;border-radius:5px;cursor:pointer;color:#bdbdc2;font-size:12px}
+.mseg button.on{background:rgba(255,255,255,.16);color:#fff}
+.chk{display:flex;align-items:center;gap:4px;cursor:pointer}
+main{padding:24px 28px 60px;max-width:1400px;margin:0 auto}
+h2{font:600 18px var(--ui);color:#fff;margin:28px 0 6px}
+p.lead{margin:0 0 14px;color:#a8a8ae;font-size:13px;line-height:1.7;max-width:980px}
+
+/* ---------- Pulse title bar replica ---------- */
+.win{border-radius:8px;overflow:hidden;box-shadow:0 0 0 1px rgba(0,0,0,.25),0 18px 50px rgba(0,0,0,.45);margin-bottom:14px}
+.light{--bg:#F3F5F1;--sheet:#F7F8F4;--ink:#303B50;--ink2:#66748A;--hover:rgba(82,125,112,.055);--press:rgba(82,125,112,.09);--pill:rgba(48,59,80,.045);--div:rgba(48,59,80,.12);--tone-acc:color-mix(in srgb,var(--acc) 86%,#000)}
+.dark{--bg:#1A1A1A;--sheet:#202020;--ink:#FFFFFF;--ink2:rgba(255,255,255,.6);--hover:rgba(255,255,255,.08);--press:rgba(255,255,255,.06);--pill:rgba(255,255,255,.06);--div:rgba(255,255,255,.12);--tone-acc:color-mix(in srgb,var(--acc) 70%,#fff)}
+.tb{height:44px;background:var(--bg);display:flex;align-items:stretch;color:var(--ink);position:relative}
+.tb .tabs{flex:1;display:flex;align-items:flex-end;padding-left:10px;gap:4px}
+.tb .tab{height:36px;width:210px;border-radius:8px 8px 0 0;background:var(--sheet);display:flex;align-items:center;padding:0 12px;gap:8px;font-size:12.5px}
+.tb .tab i{width:16px;height:16px;border-radius:3px;background:#E6A93A;display:block}
+.tb .plus{width:36px;display:grid;place-items:center;align-self:center;height:32px;border-radius:6px;color:var(--ink2)}
+.pillwrap{display:flex;align-items:center;padding-right:8px}
+.pill{display:flex;align-items:center;gap:0;height:36px;padding:2px;border-radius:8px;background:var(--pill)}
+.pill .d{width:1px;height:16px;background:var(--div);margin:0 5px}
+.btn{width:36px;height:32px;border-radius:6px;display:grid;place-items:center;position:relative;cursor:default;color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn:active{background:var(--press)}
+.btn.sel{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--tone-acc)}
+.btn.sel:hover{background:color-mix(in srgb,var(--acc) 26%,transparent)}
+.btn.sel::after{content:"";position:absolute;left:11px;right:11px;bottom:1px;height:2.5px;border-radius:2px;background:var(--acc)}
+.btn .badge{position:absolute;right:1px;top:0;height:15px;min-width:15px;padding:0 4px;border-radius:8px;background:var(--acc);color:#fff;font-size:10.5px;line-height:15px;text-align:center}
+.dark .btn .badge{color:#141414}
+.caps{display:flex}
+.cap{width:46px;display:grid;place-items:center;color:var(--ink)}
+.cap:hover{background:var(--hover)}
+.cap.x:hover{background:#C42B1C;color:#fff}
+.inactive .btn,.inactive .cap{color:var(--ink2)}
+.sheetrow{height:52px;background:var(--sheet);display:flex;align-items:center;padding:0 14px;gap:10px;color:var(--ink2);font-size:13px}
+.sheetrow .addr{flex:1;max-width:520px;height:34px;border-radius:8px;background:var(--bg);display:flex;align-items:center;padding:0 12px;gap:8px}
+svg.ic{display:block;overflow:visible}
+.fg{font-family:"Segoe Fluent Icons","Segoe MDL2 Assets";font-size:16px;line-height:1}
+.fg.cap10{font-size:10px}
+
+/* ---------- spec sheet ---------- */
+.sheet{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
+.card{border-radius:12px;padding:14px;background:var(--bg);color:var(--ink);box-shadow:inset 0 0 0 1px var(--div)}
+.card h4{margin:0 0 2px;font:600 14px var(--ui)}
+.card .why{font-size:12px;color:var(--ink2);line-height:1.55;min-height:38px}
+.big{display:flex;gap:12px;align-items:center;margin:10px 0}
+.grid96{width:96px;height:96px;border-radius:8px;background:var(--sheet);position:relative;flex:none}
+.grid96 svg{position:absolute;inset:0}
+.sizes{display:flex;gap:12px;align-items:flex-end}
+.sizes div{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:10.5px;color:var(--ink2)}
+.cmp{display:flex;gap:10px;align-items:center;font-size:11px;color:var(--ink2)}
+.cmp .old{width:34px;height:34px;border-radius:6px;background:var(--sheet);display:grid;place-items:center;color:var(--ink)}
+code.pd{display:block;margin-top:8px;font:10.5px/1.45 Consolas,monospace;color:var(--ink2);word-break:break-all;background:var(--sheet);border-radius:6px;padding:6px 8px;max-height:84px;overflow:auto}
+table.rules{border-collapse:collapse;font-size:13px;margin:6px 0 10px;color:#cfcfd4}
+table.rules td,table.rules th{border-bottom:1px solid rgba(255,255,255,.08);padding:7px 14px 7px 0;text-align:left;vertical-align:top}
+table.rules th{color:#fff;font-weight:600}
+.zoom{transform-origin:0 0}
+</style>
+</head>
+<body class="light">
+<div class="bar">
+  <b>标题栏图标</b>
+  <div class="grp"><span>方案</span><div class="mseg" id="c-var"><button data-v="now">现状</button><button data-v="mono">新 · 单色</button><button data-v="duo">新 · 双色</button></div></div>
+  <div class="grp"><span>设置图标</span><div class="mseg" id="c-set-ic"><button data-v="toggle">两个开关</button><button data-v="wrench">扳手</button><button data-v="gear6">简化齿轮</button></div></div>
+  <div class="grp"><span>主题</span><div class="mseg" id="c-theme"><button data-v="light">浅色</button><button data-v="dark">深色</button></div></div>
+  <div class="grp"><span>放大</span><div class="mseg" id="c-zoom"><button data-v="2">2×</button><button data-v="3">3×</button></div></div>
+  <label class="chk"><input type="checkbox" id="c-set">设置已打开</label>
+  <label class="chk"><input type="checkbox" id="c-max">已最大化</label>
+  <label class="chk"><input type="checkbox" id="c-inact">窗口未激活</label>
+  <label class="chk"><input type="checkbox" id="c-extra">显示暂存区 / AI 按钮</label>
+</div>
+<main>
+  <h2>标题栏（鼠标移上去看悬停）</h2>
+  <p class="lead" id="lead"></p>
+  <div id="bars"></div>
+  <h2>放大看（按钮组 + 窗口控制）</h2>
+  <div id="closeup" style="display:flex;flex-wrap:wrap;gap:18px"></div>
+
+  <h2>设置图标候选（齿轮已换掉；滑杆被工具栏"选项"占用，不用）</h2>
+  <p class="lead">同一排按钮里并排看，点一下切换到标题栏和下方规格里。</p>
+  <div id="cands" style="display:flex;gap:16px;flex-wrap:wrap"></div>
+  <h2>统一规则</h2>
+  <table class="rules">
+    <tr><th>项目</th><th>现状</th><th>新设计</th></tr>
+    <tr><td>来源</td><td>窗口、界面是 Pulse 自绘路径；设置、主题、最小化 / 最大化 / 关闭是 Segoe Fluent 字体字形</td><td>七个全部改成 <code>command_icons.h</code> 的路径图标，同一套绘制代码</td></tr>
+    <tr><td>网格与线宽</td><td>路径 24 网格、1.75 线宽；字形的线宽由字体决定，最小化等再缩到 0.66 倍，比左边细一截</td><td>24 网格、线宽 1.75、圆头圆角；按钮内图标 18 DIP（100% 时线宽约 1.3 px）</td></tr>
+    <tr><td>大小</td><td>窗口、界面占满 16 格以上，设置齿轮偏大，最小化等只有约 10 px</td><td>工具按钮外框统一 16 格（4–20）；最小化 / 最大化 / 关闭 13 格（约 10 px，和 Windows 一样小一号），但线宽和圆角相同</td></tr>
+    <tr><td>圆角</td><td>2 / 2.25 / 字体自带各不相同</td><td>窗口类外框半径 2.5，最大化 2.25（小一号按比例缩）</td></tr>
+    <tr><td>主题按钮</td><td>深色时把整个字形旋转 180°</td><td>两条路径：圆框 + 实心半边，浅色实心在右、深色实心在左，不再旋转</td></tr>
+    <tr><td>颜色</td><td>单色</td><td>默认单色（标题栏要安静）；"双色"方案只把一个部件染成强调色，和工具栏图标同一套色调规则，最小化 / 最大化 / 关闭永远单色</td></tr>
+  </table>
+
+  <h2>逐个图标</h2>
+  <p class="lead">左：96 px 放大在 24 网格上（浅色线为 4–20 外框）；中：实际尺寸 16 / 18 / 24 px；右：现状对照。下方是可以直接放进 <code>kDesignParts</code> 的路径数据（实线 = 墨色部件，标 ★ 的是双色方案里的强调色部件）。</p>
+  <div class="sheet" id="sheet"></div>
+</main>
+<script>
+const Q = new URLSearchParams(location.search);
+const S = {setIcon: Q.get('set') || 'toggle', variant: Q.get('var') || 'mono', theme: Q.get('theme') || 'light', zoom: +(Q.get('zoom') || 2),
+  settings: Q.get('settings') === '1', max: Q.get('max') === '1', inactive: Q.get('inactive') === '1', extra: Q.get('extra') === '1'};
+
+// ---------- the new icons: 24 grid, stroke 1.75, round caps/joins ----------
+// parts: [pathData, accent?, filled?]
+function gear(cx, cy, ro, ri, teeth, twf = 0.5) {
+  const pts = [];
+  const step = Math.PI * 2 / teeth, half = step / 2, tw = half * twf;  // tooth top width
+  for (let i = 0; i < teeth; i++) {
+    const a = i * step - Math.PI / 2;
+    const seq = [[a - half + 0.08, ri], [a - tw, ro], [a + tw, ro], [a + half - 0.08, ri]];
+    for (const [ang, r] of seq) pts.push([cx + r * Math.cos(ang), cy + r * Math.sin(ang)]);
+  }
+  return 'M' + pts.map(p => p.map(v => v.toFixed(2)).join(' ')).join('L') + 'Z';
+}
+const GEAR = gear(12, 12, 8.1, 6.3, 8);
+// 设置 candidates (the 8-tooth gear was rejected). Sliders are taken by the toolbar's 选项.
+const SETTINGS = {
+  toggle: {label: '两个开关', why: '推荐。上开下关的两个开关，偏好设置的意思；两条胶囊之间留出空隙，小尺寸下也分得开，不会糊成一块。和工具栏"选项"（滑杆）是两种形状。',
+    parts: [['M7.25 4.25h9.5a3 3 0 0 1 0 6h-9.5a3 3 0 0 1 0-6Z'], ['M16.75 5.75a1.5 1.5 0 1 1 0 3a1.5 1.5 0 1 1 0-3Z', true, true],
+            ['M7.25 13.75h9.5a3 3 0 0 1 0 6h-9.5a3 3 0 0 1 0-6Z'], ['M7.25 15.5a1.25 1.25 0 1 1 0 2.5a1.25 1.25 0 1 1 0-2.5Z']]},
+  wrench: {label: '扳手', why: '一把扳手："调整、维护"。斜向轮廓在一排方框里一眼能分开，16 px 下也认得出；线宽、圆头与其他六个一致。',
+    parts: [['M15 6.6a1 1 0 0 0 0 1.4l1.3 1.3a1 1 0 0 0 1.4 0l2.9-2.9a5.25 5.25 0 0 1-6.95 6.95l-6.2 6.2a1.9 1.9 0 0 1-2.7-2.7l6.2-6.2a5.25 5.25 0 0 1 6.95-6.95Z'],
+            ['M6.3 17.7h.01', true]]},
+  gear6: {label: '简化齿轮', why: '还要齿轮的话：6 个宽齿、小中心孔，齿少线疏，比 8 齿轻得多；仍是最多人认识的"设置"。',
+    parts: [[gear(12, 12, 8.0, 6.2, 6, 0.62)], ['M12 9.75a2.25 2.25 0 1 1 0 4.5a2.25 2.25 0 1 1 0-4.5Z', true]]},
+};
+const ICONS = [
+  {id: 'win', name: '窗口', why: '切换 / 新建窗口。两扇带标题条的窗口；后面那扇只画露出来的部分，和右侧"还原"区分开（还原没有标题条）。',
+   parts: [['M8.5 7.75V6.5A2.5 2.5 0 0 1 11 4h7a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5h-1.5', true],
+           ['M6 8.5h8a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 18v-7A2.5 2.5 0 0 1 6 8.5Z'],
+           ['M3.5 12.25h13']],
+   old: {svg: [['M8.5 7.5V6.25a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-1.75'], ['M5.5 8.25h9a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-9a2 2 0 0 1-2-2v-7.5a2 2 0 0 1 2-2Z'], ['M3.5 11.75h13']]}},
+  {id: 'layout', name: '界面', why: '界面布局。窗口 + 顶栏 + 侧栏；外框与"窗口"同半径、同 16 格，和最大化（空心方框）一眼能分开。',
+   parts: [['M6 4.5h12A2.5 2.5 0 0 1 20.5 7v10a2.5 2.5 0 0 1-2.5 2.5H6A2.5 2.5 0 0 1 3.5 17V7A2.5 2.5 0 0 1 6 4.5Z'],
+           ['M3.5 9h17', true], ['M9 9v10.5', true]],
+   old: {svg: [['M5.5 4.75H18.5A2.25 2.25 0 0 1 20.75 7V17A2.25 2.25 0 0 1 18.5 19.25H5.5A2.25 2.25 0 0 1 3.25 17V7A2.25 2.25 0 0 1 5.5 4.75Z'], ['M3.25 9h17.5'], ['M9 9v10.25']]}},
+  {id: 'settings', name: '设置', why: '', parts: [['SETTINGS']], old: {glyph: ''}},
+  {id: 'theme', name: '切换主题', why: '圆框 + 实心半边，实心那半表示当前主题（浅色在右、深色在左），用两条路径画，不再旋转字形。',
+   parts: [['M12 4.25a7.75 7.75 0 1 1 0 15.5a7.75 7.75 0 1 1 0-15.5Z'], ['THEME_HALF', true, true]], old: {themeSvg: true}},
+  {id: 'tray', name: '暂存区（可选）', why: '托盘：开口盒子 + 中间的凹槽。和侧栏里的暂存区同一个意思，计数徽标挂在右上角。', extra: true,
+   parts: [['M3.75 13.5 6.4 6.3A2.5 2.5 0 0 1 8.75 4.75h6.5a2.5 2.5 0 0 1 2.35 1.55l2.65 7.2V17a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 3.75 17Z'],
+           ['M3.75 13.5h4.5l1.25 2h5l1.25-2h4.5', true]], old: {glyph: ''}},
+  {id: 'ai', name: 'AI 助手（可选）', why: '一大一小两颗四角星，线宽与其他一致；原字形是实心的，放在描边图标中间会显得重。', extra: true,
+   parts: [['M10.5 5c.55 3.6 2.4 5.45 6 6-3.6.55-5.45 2.4-6 6-.55-3.6-2.4-5.45-6-6 3.6-.55 5.45-2.4 6-6Z'],
+           ['M18 3.5c.25 1.4.85 2 2.25 2.25-1.4.25-2 .85-2.25 2.25-.25-1.4-.85-2-2.25-2.25 1.4-.25 2-.85 2.25-2.25Z', true]], old: {glyph: ''}},
+  {id: 'min', name: '最小化', why: '一条横线，13 格（约 10 px），和 Windows 一样比工具按钮小一号，但线宽、圆头一致。', cap: true,
+   parts: [['M5.5 12h13']], old: {glyph: '', cap: true}},
+  {id: 'max', name: '最大化 / 还原', why: '最大化是 13 格圆角方框；还原是两层方框，后层只画露出的折角。半径按比例缩到 2.25。', cap: true,
+   parts: [['MAXRESTORE']], old: {glyph: '', cap: true}},
+  {id: 'close', name: '关闭', why: '对角两条线，与最小化同宽同高；悬停变红底白线，和现在一样。', cap: true,
+   parts: [['M6.5 6.5l11 11M17.5 6.5l-11 11']], old: {glyph: '', cap: true}},
+];
+const MAX_PATH = 'M7.75 5.5h8.5a2.25 2.25 0 0 1 2.25 2.25v8.5a2.25 2.25 0 0 1-2.25 2.25h-8.5A2.25 2.25 0 0 1 5.5 16.25v-8.5A2.25 2.25 0 0 1 7.75 5.5Z';
+const RESTORE_PATHS = [['M7.25 8h7.5A1.75 1.75 0 0 1 16.5 9.75v7.5A1.75 1.75 0 0 1 14.75 19h-7.5A1.75 1.75 0 0 1 5.5 17.25v-7.5A1.75 1.75 0 0 1 7.25 8Z'],
+                       ['M8.5 8V6.75A1.75 1.75 0 0 1 10.25 5h6.5a1.75 1.75 0 0 1 1.75 1.75v6.5a1.75 1.75 0 0 1-1.75 1.75H16.5']];
+const half = dark => dark ? 'M12 4.25a7.75 7.75 0 1 0 0 15.5Z' : 'M12 4.25a7.75 7.75 0 1 1 0 15.5Z';
+
+function partsFor(ic, dark, maximized) {
+  if (ic.id === 'settings') return SETTINGS[S.setIcon].parts;
+  return ic.parts.flatMap(p => p[0] === 'THEME_HALF' ? [[half(dark), true, true]]
+    : p[0] === 'MAXRESTORE' ? (maximized ? RESTORE_PATHS : [[MAX_PATH]]) : [p]);
+}
+// Draws parts into an SVG of `px` size; duo colours the accent parts.
+function svg(parts, px, duo, extra = '') {
+  const inner = parts.map(([d, acc, fill]) => {
+    const col = duo && acc ? 'var(--tone-acc)' : 'currentColor';
+    return fill ? `<path d="${d}" fill="${col}"/>` : `<path d="${d}" fill="none" stroke="${col}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>`;
+  }).join('');
+  return `<svg class="ic" width="${px}" height="${px}" viewBox="0 0 24 24">${extra}${inner}</svg>`;
+}
+function oldIcon(ic, dark, px) {
+  if (ic.old.svg) return svg(ic.old.svg, px, false);
+  if (ic.old.themeSvg)  // the app's current glyph (screenshot): heavier ring, solid half, rotated in dark
+    return `<svg class="ic" width="${px}" height="${px}" viewBox="0 0 24 24" style="${dark ? 'transform:rotate(180deg)' : ''}"><circle cx="12" cy="12" r="8.6" fill="none" stroke="currentColor" stroke-width="2.1"/><path d="M12 3.4a8.6 8.6 0 0 1 0 17.2Z" fill="currentColor"/></svg>`;
+  const rot = ic.id === 'theme' && dark ? 'transform:rotate(180deg)' : '';
+  return `<span class="fg ${ic.old.cap ? 'cap10' : ''}" style="${rot}">${ic.old.glyph}</span>`;
+}
+function iconHtml(ic, dark) {
+  if (S.variant === 'now') {
+    if (ic.id === 'max') return `<span class="fg cap10">${S.max ? '' : ''}</span>`;
+    return oldIcon(ic, dark, 20);
+  }
+  return svg(partsFor(ic, dark, S.max), 18, S.variant === 'duo');
+}
+
+function titleBar(theme) {
+  const dark = theme === 'dark';
+  const get = id => ICONS.find(i => i.id === id);
+  const order = S.extra ? ['tray', 'win', 'layout', 'settings', '|', 'theme', 'ai'] : ['win', 'layout', 'settings', '|', 'theme'];
+  const pill = order.map(id => id === '|' ? '<i class="d"></i>' :
+    `<div class="btn ${id === 'settings' && S.settings ? 'sel' : ''}" title="${get(id).name}">${iconHtml(get(id), dark)}${id === 'tray' ? '<span class="badge">3</span>' : ''}</div>`).join('');
+  const caps = ['min', 'max', 'close'].map(id => `<div class="cap ${id === 'close' ? 'x' : ''}">${iconHtml(get(id), dark)}</div>`).join('');
+  if (arguments[1]) return `<div class="win ${theme} ${S.inactive ? 'inactive' : ''}" style="zoom:${S.zoom};margin:0">
+    <div class="tb" style="padding-left:6px"><div class="pillwrap"><div class="pill">${pill}</div></div><div class="caps">${caps}</div></div></div>`;
+  return `<div class="win ${theme} ${S.inactive ? 'inactive' : ''}" style="width:1100px">
+    <div>
+    <div class="tb"><div class="tabs"><div class="tab"><i></i>YJK后处理目录</div><div class="plus">${svg([['M12 5.5v13M5.5 12h13']], 16, false)}</div></div>
+      <div class="pillwrap"><div class="pill">${pill}</div></div><div class="caps">${caps}</div></div>
+    <div class="sheetrow"><span>‹ ›</span><div class="addr">${svg([['M10.5 4.5a6 6 0 1 1 0 12a6 6 0 1 1 0-12Z'], ['M15 15l4.5 4.5']], 16, false)}搜索YJK后处理目录</div></div>
+    </div></div>`;
+}
+
+function renderBars() {
+  const lead = {now: '现状：设置、主题、最小化 / 最大化 / 关闭来自字体，窗口、界面是自绘路径——线宽、大小、圆角都不一样。',
+    mono: '新 · 单色（推荐）：七个图标同一网格、同一线宽、同一圆角；工具按钮 16 格，窗口控制 13 格。',
+    duo: '新 · 双色：在单色基础上每个工具按钮只有一个部件用强调色（和工具栏同一套色调），窗口控制保持单色。'}[S.variant];
+  document.getElementById('lead').textContent = lead;
+  // Show both themes stacked so they can be compared; the chosen theme first.
+  const themes = S.theme === 'dark' ? ['dark', 'light'] : ['light', 'dark'];
+  document.getElementById('bars').innerHTML = themes.map(t => titleBar(t)).join('');
+  document.getElementById('closeup').innerHTML = themes.map(t => titleBar(t, true)).join('');
+}
+function renderSheet() {
+  const dark = S.theme === 'dark';
+  const grid = `<g stroke="var(--div)" stroke-width=".06">${Array.from({length: 25}, (_, i) => `<path d="M${i} 0V24M0 ${i}H24"/>`).join('')}</g>
+    <rect x="4" y="4" width="16" height="16" fill="none" stroke="var(--acc)" stroke-opacity=".35" stroke-width=".12"/>`;
+  document.getElementById('sheet').innerHTML = ICONS.map(ic => {
+    const parts = partsFor(ic, dark, false);
+    const big = svg(parts, 96, S.variant === 'duo', grid);
+    const sizes = [16, 18, 24].map(px => `<div>${svg(parts, px, S.variant === 'duo')}${px}</div>`).join('');
+    const extraPaths = ic.id === 'max' ? [[MAX_PATH], ...RESTORE_PATHS.map(p => [p[0] + '  (还原)'])] :
+      ic.id === 'theme' ? [ic.parts[0], [half(false) + '  (浅色)', true], [half(true) + '  (深色)', true]] : parts;
+    const pd = extraPaths.map(([d, acc]) => (acc ? '★ ' : '') + d).join('\n');
+    const why = ic.id === 'settings' ? SETTINGS[S.setIcon].why : ic.why;
+    const name = ic.id === 'settings' ? `设置 · ${SETTINGS[S.setIcon].label}` : ic.name;
+    return `<div class="card ${S.theme}"><h4>${name}</h4><div class="why">${why}</div>
+      <div class="big"><div class="grid96">${big}</div><div><div class="sizes">${sizes}</div>
+      <div class="cmp" style="margin-top:10px"><div class="old">${oldIcon(ic, dark, 20)}</div>现状</div></div></div>
+      <code class="pd">${pd.replace(/\n/g, '<br>')}</code></div>`;
+  }).join('');
+}
+function renderCands() {
+  const dark = S.theme === 'dark';
+  const get = id => ICONS.find(i => i.id === id);
+  document.getElementById('cands').innerHTML = Object.entries(SETTINGS).map(([k, c]) => {
+    const pill = ['win', 'layout'].map(id => `<div class="btn">${svg(partsFor(get(id), dark, false), 18, S.variant === 'duo')}</div>`).join('') +
+      `<div class="btn ${S.setIcon === k ? 'sel' : ''}">${svg(c.parts, 18, S.variant === 'duo')}</div><i class="d"></i>` +
+      `<div class="btn">${svg(partsFor(get('theme'), dark, false), 18, S.variant === 'duo')}</div>`;
+    return `<div class="win ${S.theme}" style="margin:0;cursor:pointer" data-cand="${k}"><div class="tb" style="zoom:2;height:44px;padding:0 6px">
+      <div class="pillwrap"><div class="pill">${pill}</div></div></div>
+      <div style="padding:8px 12px 10px;background:var(--bg);color:var(--ink);font-size:13px;font-weight:${S.setIcon === k ? 700 : 400}">${c.label}${k === 'toggle' ? '（采用）' : ''}</div></div>`;
+  }).join('');
+}
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-cand]');
+  if (c) { S.setIcon = c.dataset.cand; render(); }
+});
+function render() {
+  document.body.className = S.theme;
+  for (const [id, key, num] of [['c-var', 'variant'], ['c-theme', 'theme'], ['c-zoom', 'zoom', true], ['c-set-ic', 'setIcon']])
+    document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle('on', (num ? +b.dataset.v : b.dataset.v) === S[key]));
+  for (const [id, key] of [['c-set', 'settings'], ['c-max', 'max'], ['c-inact', 'inactive'], ['c-extra', 'extra']])
+    document.getElementById(id).checked = S[key];
+  renderBars(); renderCands(); renderSheet();
+}
+document.querySelector('.bar').addEventListener('click', e => {
+  const b = e.target.closest('.mseg button');
+  if (!b) return;
+  const key = {'c-var': 'variant', 'c-theme': 'theme', 'c-zoom': 'zoom', 'c-set-ic': 'setIcon'}[b.parentElement.id];
+  S[key] = key === 'zoom' ? +b.dataset.v : b.dataset.v;
+  render();
+});
+for (const [id, key] of [['c-set', 'settings'], ['c-max', 'max'], ['c-inact', 'inactive'], ['c-extra', 'extra']])
+  document.getElementById(id).addEventListener('change', e => { S[key] = e.target.checked; render(); });
+render();
+</script>
+</body>
+</html>
