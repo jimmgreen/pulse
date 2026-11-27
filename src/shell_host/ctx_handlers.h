@@ -42,8 +42,8 @@ struct CtxItemOut {
     std::wstring clsid;
     std::wstring handler;
     wchar_t mnemonic = 0;   // access key from the raw label ("&X"), 0 = none
-    // The row's MIIM_BITMAP as premultiplied BGRA (what Explorer paints next
-    // to the label); null when the handler set none.
+    // The provider's bitmap, legacy checkmark bitmap, or bitmap callback draw
+    // as premultiplied BGRA; null when the handler supplies no icon pixels.
     common::MenuIconRef icon;
     uint8_t depth = 0;          // preorder tree depth; legacy child rows default to 1
 };
