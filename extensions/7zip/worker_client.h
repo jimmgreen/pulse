@@ -8,6 +8,22 @@
 
 namespace worker_client {
 
+// Overrides the worker only on this thread. Invalid paths fail closed; scoped
+// requests never borrow or populate the extension's shared warm worker.
+class ScopedWorkerExecutable final {
+public:
+    explicit ScopedWorkerExecutable(const std::wstring& absolute_exe);
+    ~ScopedWorkerExecutable() noexcept;
+    ScopedWorkerExecutable(const ScopedWorkerExecutable&) = delete;
+    ScopedWorkerExecutable& operator=(const ScopedWorkerExecutable&) = delete;
+    ScopedWorkerExecutable(ScopedWorkerExecutable&&) = delete;
+    ScopedWorkerExecutable& operator=(ScopedWorkerExecutable&&) = delete;
+
+private:
+    std::wstring executable_;
+    const std::wstring* previous_ = nullptr;
+};
+
 struct WorkerLimits {
     size_t preview_memory_bytes = 512ull * 1024u * 1024u;
     size_t task_memory_bytes = 2048ull * 1024u * 1024u;

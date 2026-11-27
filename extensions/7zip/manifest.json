@@ -4,7 +4,7 @@
   "name": "7-Zip",
   "resources": ["settings.own"],
   "showcase": {
-    "version": "1.1.0",
+    "version": "1.1.1",
     "summary": {
       "zh": "支持 7z、zip、rar 等数十种压缩格式：智能解压、虚拟浏览、分卷创建与校验。",
       "en": "Smart extract, virtual browsing, archive creation, and checksums across 7z, zip, rar, and more.",

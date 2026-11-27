@@ -32,6 +32,7 @@ constexpr DWORD kRequestWriteTimeoutMs = 10000u;
 
 std::mutex g_config_lock;
 worker_client::WorkerLimits g_limits{};
+thread_local const std::wstring* g_scoped_worker_executable = nullptr;
 
 worker_client::WorkerLimits CurrentLimits() noexcept {
     std::lock_guard guard(g_config_lock);
@@ -45,6 +46,7 @@ std::atomic<uint64_t> g_preview_generation{0};
 void AnchorInClientModule() noexcept {}
 
 fs::path ResolveWorkerExecutablePath() {
+    if (g_scoped_worker_executable) return fs::path(*g_scoped_worker_executable);
     HMODULE self = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                             reinterpret_cast<LPCWSTR>(&AnchorInClientModule), &self) || !self) {
@@ -81,6 +83,7 @@ class WorkerSession {
     size_t memory_limit_bytes_ = 0;
     bool allow_faults_ = false;
     bool tainted_ = false;
+    bool scoped_executable_ = false;
     PipeChannel channel_;
 
 public:
@@ -92,6 +95,7 @@ public:
     DWORD Pid() const noexcept { return pid_; }
     size_t MemoryLimitBytes() const noexcept { return memory_limit_bytes_; }
     bool AllowFaults() const noexcept { return allow_faults_; }
+    bool UsesScopedExecutable() const noexcept { return scoped_executable_; }
 
     bool Healthy() const noexcept {
         return !tainted_ && process_ != nullptr && channel_.Valid() &&
@@ -144,6 +148,7 @@ public:
         tainted_ = false;
         memory_limit_bytes_ = memory_limit_bytes;
         allow_faults_ = allow_faults;
+        scoped_executable_ = g_scoped_worker_executable != nullptr;
 
         const fs::path worker_exe = ResolveWorkerExecutablePath();
         std::error_code ec;
@@ -460,7 +465,7 @@ std::unique_ptr<WorkerSession> g_warm_preview_worker;
 std::unique_ptr<WorkerSession> AcquirePreviewSession(const worker_client::WorkerLimits& limits, std::string& error,
                                                      bool* out_reused = nullptr) {
     if (out_reused) *out_reused = false;
-    {
+    if (!g_scoped_worker_executable) {
         std::lock_guard guard(g_warm_lock);
         if (g_warm_preview_worker) {
             auto candidate = std::move(g_warm_preview_worker);
@@ -482,6 +487,10 @@ std::unique_ptr<WorkerSession> AcquirePreviewSession(const worker_client::Worker
 
 void ReleasePreviewSession(std::unique_ptr<WorkerSession> session) noexcept {
     if (!session) return;
+    if (session->UsesScopedExecutable()) {
+        session->ShutdownCleanly();
+        return;
+    }
     if (!session->Healthy()) {
         session->KillAndReap();
         return;
@@ -512,6 +521,20 @@ uint32_t EffectiveHardTimeoutMs(uint32_t budget_duration_ms, uint32_t slack_ms, 
 } // namespace
 
 namespace worker_client {
+
+ScopedWorkerExecutable::ScopedWorkerExecutable(const std::wstring& absolute_exe)
+    : previous_(g_scoped_worker_executable) {
+    const fs::path path(absolute_exe);
+    if (absolute_exe.find(L'\0') == std::wstring::npos && path.is_absolute() &&
+        _wcsicmp(path.filename().c_str(), L"pulse_7zip_worker.exe") == 0) {
+        executable_ = absolute_exe;
+    }
+    g_scoped_worker_executable = &executable_;
+}
+
+ScopedWorkerExecutable::~ScopedWorkerExecutable() noexcept {
+    g_scoped_worker_executable = previous_;
+}
 
 void ConfigureForTests(const WorkerLimits& limits) noexcept {
     {
@@ -659,7 +682,7 @@ std::vector<std::string> ArchiveExtensions() {
 }
 
 std::vector<std::wstring> SupportedFormats() {
-    {
+    if (!g_scoped_worker_executable) {
         std::lock_guard guard(g_formats_lock);
         if (!g_cached_formats.empty()) return g_cached_formats;
     }
@@ -689,7 +712,7 @@ std::vector<std::wstring> SupportedFormats() {
     }
     ReleasePreviewSession(std::move(session));
 
-    if (!formats.empty()) {
+    if (!g_scoped_worker_executable && !formats.empty()) {
         std::lock_guard guard(g_formats_lock);
         g_cached_formats = formats;
     }
@@ -735,10 +758,11 @@ Listing List(const std::wstring& path, const Cancelled& cancelled, const AskPass
     }
 
     const uint64_t req_id = ++g_next_request_id;
-    const uint64_t gen = is_preview ? ++g_preview_generation : ++g_next_task_generation;
-    const Cancelled effective_cancel = [&cancelled, is_preview, gen]() -> bool {
+    const bool shared_preview = is_preview && !g_scoped_worker_executable;
+    const uint64_t gen = shared_preview ? ++g_preview_generation : ++g_next_task_generation;
+    const Cancelled effective_cancel = [&cancelled, shared_preview, gen]() -> bool {
         if (SafeCallCancelled(cancelled)) return true;
-        if (is_preview && g_preview_generation.load(std::memory_order_acquire) != gen) return true;
+        if (shared_preview && g_preview_generation.load(std::memory_order_acquire) != gen) return true;
         return false;
     };
 
@@ -798,7 +822,7 @@ Listing List(const std::wstring& path, const Cancelled& cancelled, const AskPass
     }
 
     if (is_preview) {
-        if (g_preview_generation.load(std::memory_order_acquire) != gen) {
+        if (shared_preview && g_preview_generation.load(std::memory_order_acquire) != gen) {
             ReleasePreviewSession(std::move(session));
             result = Listing{};
             result.status = Status::Cancelled;

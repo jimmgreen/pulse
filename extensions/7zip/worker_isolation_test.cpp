@@ -140,7 +140,7 @@ engine::AskPassword PasswordAnswers(std::vector<std::wstring> answers, int* prom
     };
 }
 
-int RunSuite() {
+int RunSuite(bool preview_only) {
     const fs::path bin_dir = ModuleDir();
     const fs::path root = bin_dir / L"worker-isolation-test-data";
     std::error_code ec;
@@ -192,19 +192,21 @@ int RunSuite() {
         WriteBytes(root / L"readme.txt", "hello worker\n");
 
         // Create encrypted .7z with header encryption and streaming progress.
-        const fs::path out_7z_dir = root / L"out7z";
-        fs::create_directories(out_7z_dir);
-        engine::CreateOptions enc_opts;
-        enc_opts.format = engine::Format::SevenZip;
-        enc_opts.password = L"隔离密码#2026";
-        enc_opts.encrypt_names = true;
-        int create_progress_events = 0;
-        const auto created_7z = engine::Create(
-            {src.wstring()}, out_7z_dir.wstring(), L"encrypted.7z", enc_opts, never,
-            [&](const engine::Progress&) { ++create_progress_events; });
-        Check(created_7z.status == engine::Status::Ok && created_7z.files == 2 && create_progress_events > 0,
-              "out-of-process Create produces encrypted .7z and streams progress", created_7z.error);
-        encrypted_7z = out_7z_dir / L"encrypted.7z";
+        if (!preview_only) {
+            const fs::path out_7z_dir = root / L"out7z";
+            fs::create_directories(out_7z_dir);
+            engine::CreateOptions enc_opts;
+            enc_opts.format = engine::Format::SevenZip;
+            enc_opts.password = L"隔离密码#2026";
+            enc_opts.encrypt_names = true;
+            int create_progress_events = 0;
+            const auto created_7z = engine::Create(
+                {src.wstring()}, out_7z_dir.wstring(), L"encrypted.7z", enc_opts, never,
+                [&](const engine::Progress&) { ++create_progress_events; });
+            Check(created_7z.status == engine::Status::Ok && created_7z.files == 2 && create_progress_events > 0,
+                  "out-of-process Create produces encrypted .7z and streams progress", created_7z.error);
+            encrypted_7z = out_7z_dir / L"encrypted.7z";
+        }
 
         // Create unencrypted .zip for fast preview reuse tests.
         const fs::path out_zip_dir = root / L"outzip";
@@ -222,6 +224,11 @@ int RunSuite() {
         const uint32_t warm_pid_after = worker_client::WarmWorkerPidForTests();
         Check(preview1.status == engine::Status::Ok && preview1.entries.size() == 5 && warm_pid_after == warm_pid,
               "preview List succeeds and reuses warm worker session");
+        if (preview_only) {
+            engine::ShutdownWorkers();
+            Check(worker_client::WarmWorkerPidForTests() == 0, "ShutdownWorkers reaps warm worker cleanly");
+            return g_failures ? 1 : 0;
+        }
 
         // Password prompt round-trips across Named Pipe (refuse, wrong, right).
         int prompts = 0;
@@ -402,10 +409,10 @@ int RunSuite() {
 
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     try {
-        const int rc = RunSuite();
+        const int rc = RunSuite(argc == 2 && std::wstring(argv[1]) == L"--preview-only");
         std::printf("worker_isolation_test: %d failed\n", g_failures);
         return rc;
     } catch (const std::exception& ex) {
