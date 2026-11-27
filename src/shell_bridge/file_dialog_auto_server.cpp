@@ -2,6 +2,7 @@
 #include "dialog_core_abi.h"
 #include "dialog_sink_hooks.h"
 #include "direct_reveal_hook.h"
+#include "explorer_process_route.h"
 #include "../common/dialog_bridge_state.h"
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
 #include "winrt_picker_activation.h"
@@ -68,14 +69,32 @@ bool UserExplicitlyDisabledDialogAuto() noexcept {
     return read == ERROR_SUCCESS && type == REG_DWORD && size == sizeof(value) && value == 0;
 }
 
+std::wstring Utf8ToWideLocal(std::string_view input) {
+    if (input.empty()) return {};
+    const int needed = MultiByteToWideChar(CP_UTF8, 0, input.data(), static_cast<int>(input.size()), nullptr, 0);
+    if (needed <= 0) return {};
+    std::wstring out(static_cast<size_t>(needed), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, input.data(), static_cast<int>(input.size()), out.data(), needed);
+    return out;
+}
+
+bool StubBridgeEnabled(bool force_refresh = false) noexcept;
+
 std::wstring StubHostExe() {
     AcquireSRWLockShared(&stub_config_lock);
     auto copy = stub_host_exe;
     ReleaseSRWLockShared(&stub_config_lock);
+    if (stub_managed.load(std::memory_order_acquire) &&
+        (copy.empty() || GetFileAttributesW(copy.c_str()) == INVALID_FILE_ATTRIBUTES)) {
+        (void)StubBridgeEnabled(true);
+        AcquireSRWLockShared(&stub_config_lock);
+        copy = stub_host_exe;
+        ReleaseSRWLockShared(&stub_config_lock);
+    }
     return copy;
 }
 
-bool StubBridgeEnabled() noexcept {
+bool StubBridgeEnabled(bool force_refresh) noexcept {
     try {
         std::wstring root;
         AcquireSRWLockShared(&stub_config_lock);
@@ -85,7 +104,7 @@ bool StubBridgeEnabled() noexcept {
 
         std::lock_guard<std::mutex> lock(stub_pointer_mutex);
         const ULONGLONG now = GetTickCount64();
-        if (stub_pointer_checked_tick != 0 && (now - stub_pointer_checked_tick) < 250) {
+        if (!force_refresh && stub_pointer_checked_tick != 0 && (now - stub_pointer_checked_tick) < 250) {
             return stub_pointer_enabled;
         }
         stub_pointer_checked_tick = now;
@@ -129,6 +148,26 @@ bool StubBridgeEnabled() noexcept {
         }
         const auto* disabled = doc.find("disabled");
         stub_pointer_enabled = !(disabled && disabled->is_bool() && disabled->as_bool());
+        if (stub_pointer_enabled) {
+            if (const auto* host = doc.find("host_exe"); host && host->is_string() && !host->as_string().empty()) {
+                const std::wstring candidate = Utf8ToWideLocal(host->as_string());
+                if (candidate.size() >= 4 && candidate[1] == L':' &&
+                    (candidate[2] == L'\\' || candidate[2] == L'/') &&
+                    candidate.find(L"..") == std::wstring::npos) {
+                    bool trust_ok = true;
+                    if (pulse::dialog_admin::IsElevated()) {
+                        const auto slash = candidate.find_last_of(L"\\/");
+                        trust_ok = slash != std::wstring::npos &&
+                            pulse::dialog_admin::VerifyProtectedTree(candidate.substr(0, slash)) == ERROR_SUCCESS;
+                    }
+                    if (trust_ok) {
+                        AcquireSRWLockExclusive(&stub_config_lock);
+                        stub_host_exe = candidate;
+                        ReleaseSRWLockExclusive(&stub_config_lock);
+                    }
+                }
+            }
+        }
         return stub_pointer_enabled;
     } catch (...) {
         return false;
@@ -896,12 +935,35 @@ extern "C" BOOL WINAPI PulseIsDirectRevealInstalled() noexcept {
         ? TRUE : FALSE;
 }
 
+extern "C" BOOL WINAPI PulseIsExplorerProcessInstalled() noexcept {
+    return (shell::runtime::IsExplorerProcessHookInstalled() ||
+            ((shell::sink_hooks::QueryStatus().active_mask & shell::sink_hooks::kSinkKernel32CreateProcessW) != 0 &&
+             shell::explorer_process::IsReady()))
+        ? TRUE : FALSE;
+}
+
 namespace {
 DWORD InstallCoreSinkHooks(uint32_t flags) noexcept {
     using namespace shell::sink_hooks;
     uint32_t mask = kSinkComDlgClassObject | kSinkComDlgOpenSaveW | kSinkComDlgOpenSaveA |
         kSinkComDlgExtendedError | kSinkShell32Browse;
-    if (flags & PULSE_STUB_FLAG_DIRECT_REVEAL) mask |= kSinkShell32DirectReveal;
+    if (flags & PULSE_STUB_FLAG_DIRECT_REVEAL) {
+        mask |= kSinkShell32DirectReveal;
+        {
+            (void)shell::explorer_process::Configure(module, DirectRevealEnabled);
+            // A CreateProcess callback may still be on another thread during shutdown.
+            // Pin only when enabling this new sink: Disable/Uninstall revoke routing,
+            // but this generation's code lives until target exit (updates require restart).
+            HMODULE pinned = nullptr;
+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                    reinterpret_cast<LPCWSTR>(&InstallCoreSinkHooks), &pinned) && pinned == module)
+                mask |= kSinkKernel32CreateProcessW;
+            else
+                shell::explorer_process::Disable();
+        }
+    } else {
+        shell::explorer_process::Disable();
+    }
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
     if (flags & PULSE_STUB_FLAG_WINRT_ENABLED) mask |= kSinkGroupCombaseAll;
 #endif
@@ -961,46 +1023,60 @@ DWORD InstallCoreSinkHooks(uint32_t flags) noexcept {
     if (flags & PULSE_STUB_FLAG_DIRECT_REVEAL) {
         cb.on_reveal_items = [](PCIDLIST_ABSOLUTE folder, UINT count, PCUITEMID_CHILD_ARRAY items, DWORD fl,
                                 SHOpenFolderAndSelectItemsFn orig) -> HRESULT {
-            if (DirectRevealEnabled() &&
-                shell::runtime::DispatchDirectRevealPidl(folder, count, items, fl) == pulse::DirectRevealResult::Accepted) {
-                return S_OK;
+            if (DirectRevealEnabled()) {
+                const auto result = shell::runtime::DispatchDirectRevealPidl(folder, count, items, fl);
+                if (!pulse::ShouldUseNativeBrowse(result)) return shell::runtime::CompleteDirectReveal(result);
             }
-            return orig(folder, count, items, fl);
+            return shell::runtime::FallbackDirectRevealPidl(orig, folder, count, items, fl);
         };
         cb.on_shell_execute_w = [](HWND hwnd, LPCWSTR verb, LPCWSTR file, LPCWSTR params, LPCWSTR dir, INT show,
                                    ShellExecuteWFn orig) -> HINSTANCE {
-            if (DirectRevealEnabled() &&
-                shell::runtime::DispatchDirectShellExecuteW(verb, file, params, dir, show) == pulse::DirectRevealResult::Accepted) {
-                return reinterpret_cast<HINSTANCE>(33);
+            auto result = pulse::DirectRevealResult::NotHandled;
+            if (DirectRevealEnabled()) {
+                result = shell::runtime::DispatchDirectShellExecuteW(verb, file, params, dir, show);
+                if (!pulse::ShouldUseNativeBrowse(result)) return shell::runtime::CompleteDirectShellExecute(result);
             }
-            return orig(hwnd, verb, file, params, dir, show);
+            return shell::runtime::FallbackShellExecuteW(result, orig, hwnd, verb, file, params, dir, show);
         };
         cb.on_shell_execute_ex_w = [](SHELLEXECUTEINFOW* info, ShellExecuteExWFn orig) -> BOOL {
-            if (info && DirectRevealEnabled() &&
-                shell::runtime::DispatchDirectShellExecuteExW(info) == pulse::DirectRevealResult::Accepted) {
-                info->hInstApp = reinterpret_cast<HINSTANCE>(33);
-                return TRUE;
+            auto result = pulse::DirectRevealResult::NotHandled;
+            if (DirectRevealEnabled()) {
+                result = shell::runtime::DispatchDirectShellExecuteExW(info);
+                if (!pulse::ShouldUseNativeBrowse(result)) return shell::runtime::CompleteDirectShellExecuteEx(info, result);
             }
-            return orig(info);
+            return shell::runtime::FallbackShellExecuteExW(result, orig, info);
         };
         cb.on_shell_execute_a = [](HWND hwnd, LPCSTR verb, LPCSTR file, LPCSTR params, LPCSTR dir, INT show,
                                    ShellExecuteAFn orig) -> HINSTANCE {
-            if (DirectRevealEnabled() &&
-                shell::runtime::DispatchDirectShellExecuteA(verb, file, params, dir, show) == pulse::DirectRevealResult::Accepted) {
-                return reinterpret_cast<HINSTANCE>(33);
+            auto result = pulse::DirectRevealResult::NotHandled;
+            if (DirectRevealEnabled()) {
+                result = shell::runtime::DispatchDirectShellExecuteA(verb, file, params, dir, show);
+                if (!pulse::ShouldUseNativeBrowse(result)) return shell::runtime::CompleteDirectShellExecute(result);
             }
-            return orig(hwnd, verb, file, params, dir, show);
+            return shell::runtime::FallbackShellExecuteA(result, orig, hwnd, verb, file, params, dir, show);
         };
         cb.on_shell_execute_ex_a = [](SHELLEXECUTEINFOA* info, ShellExecuteExAFn orig) -> BOOL {
-            if (info && DirectRevealEnabled() &&
-                shell::runtime::DispatchDirectShellExecuteExA(info) == pulse::DirectRevealResult::Accepted) {
-                info->hInstApp = reinterpret_cast<HINSTANCE>(33);
-                return TRUE;
+            auto result = pulse::DirectRevealResult::NotHandled;
+            if (DirectRevealEnabled()) {
+                result = shell::runtime::DispatchDirectShellExecuteExA(info);
+                if (!pulse::ShouldUseNativeBrowse(result)) return shell::runtime::CompleteDirectShellExecuteEx(info, result);
             }
-            return orig(info);
+            return shell::runtime::FallbackShellExecuteExA(result, orig, info);
         };
     }
 
+    if (mask & kSinkKernel32CreateProcessW) {
+        cb.on_create_process_w = [](LPCWSTR app, LPWSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
+            BOOL inherit, DWORD creation_flags, LPVOID env, LPCWSTR cwd, LPSTARTUPINFOW startup,
+            LPPROCESS_INFORMATION pi, CreateProcessWFn original) -> BOOL {
+            const DWORD incoming = GetLastError();
+            BOOL result = FALSE;
+            if (shell::explorer_process::TryRoute(original, app, cmd, pa, ta, inherit, creation_flags,
+                    env, cwd, startup, pi, result)) return result;
+            SetLastError(incoming);
+            return shell::explorer_process::FallbackCreateProcess(original, app, cmd, pa, ta, inherit, creation_flags, env, cwd, startup, pi);
+        };
+    }
     InstallOptions opts;
     opts.requested_mask = mask;
     opts.watch_late_dll_loads = true;
@@ -1036,6 +1112,7 @@ HRESULT WINAPI CoreInitialize(const PulseStubConfigV1* cfg) noexcept {
 }
 
 void WINAPI CoreShutdown() noexcept {
+    shell::explorer_process::Disable();
     shell::sink_hooks::Uninstall();
     log::Shutdown();
 }

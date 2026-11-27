@@ -15,7 +15,7 @@ struct HandleGuard {
     ~HandleGuard() { if (h && h != INVALID_HANDLE_VALUE) CloseHandle(h); }
 };
 
-constexpr std::array<std::wstring_view, 65> kBuiltInExcluded = {
+constexpr std::array<std::wstring_view, 71> kBuiltInExcluded = {
     // Windows critical / core session processes
     L"system", L"registry", L"smss.exe", L"csrss.exe", L"wininit.exe",
     L"winlogon.exe", L"services.exe", L"lsass.exe", L"lsaiso.exe",
@@ -24,6 +24,8 @@ constexpr std::array<std::wstring_view, 65> kBuiltInExcluded = {
     L"dllhost.exe", L"audiodg.exe", L"spoolsv.exe", L"searchindexer.exe",
     L"wmiprvse.exe", L"werfault.exe", L"werfaultsecure.exe", L"tiworker.exe",
     L"trustedinstaller.exe", L"msiexec.exe", L"consent.exe", L"logonui.exe",
+    L"backgroundtaskhost.exe", L"searchprotocolhost.exe", L"searchfilterhost.exe",
+    L"wermgr.exe", L"compattelrunner.exe", L"musnotification.exe",
     // Security / AV / EDR
     L"msmpeng.exe", L"mpdefendercoreservice.exe", L"nissrv.exe", L"securityhealthservice.exe",
     L"hipsdaemon.exe", L"hipstray.exe", L"usysdiag.exe",
@@ -37,6 +39,21 @@ constexpr std::array<std::wstring_view, 65> kBuiltInExcluded = {
     L"pulse.preview.exe", L"pulse_7zip_worker.exe", L"pulse_hotkey_broker.exe",
     L"pulsedialogbroker.exe", L"pulsedialogoverlay.exe", L"pulsedialoglauncher.exe",
     L"pulsedialoginject32.exe", L"pulsedialogadminauto.exe",
+};
+
+// Pure CLI shells, compilers, VCS, and network utilities that often transitively load
+// user32.dll on Windows despite never showing native file open/save dialogs.
+// Excluded only when the PE image is IMAGE_SUBSYSTEM_WINDOWS_CUI.
+constexpr std::array<std::wstring_view, 46> kBuiltInCuiCliExcluded = {
+    L"cmd.exe", L"powershell.exe", L"pwsh.exe", L"openconsole.exe",
+    L"bash.exe", L"sh.exe", L"zsh.exe", L"ssh.exe", L"scp.exe", L"sftp.exe",
+    L"git.exe", L"git-remote-https.exe", L"git-upload-pack.exe", L"git-receive-pack.exe",
+    L"cl.exe", L"link.exe", L"lib.exe", L"rc.exe", L"mt.exe", L"ml64.exe", L"ml.exe",
+    L"nmake.exe", L"cmake.exe", L"ctest.exe", L"cpack.exe", L"ninja.exe", L"msbuild.exe",
+    L"mspdbsrv.exe", L"vctip.exe", L"csc.exe", L"vbc.exe", L"clang.exe", L"clang++.exe",
+    L"taskkill.exe", L"tasklist.exe", L"findstr.exe", L"where.exe", L"whoami.exe",
+    L"sc.exe", L"net.exe", L"net1.exe", L"reg.exe", L"icacls.exe", L"takeown.exe",
+    L"rg.exe", L"sing-box.exe",
 };
 
 bool EqualsIgnoreCase(std::wstring_view a, std::wstring_view b) noexcept {
@@ -257,6 +274,55 @@ std::vector<DWORD> EnumerateInteractiveProcessIds() noexcept {
     return pids;
 }
 
+std::vector<DWORD> EnumerateInteractiveProcessIdsFast(std::vector<uint8_t>& scratch) noexcept {
+    std::vector<DWORD> pids;
+    try {
+        using NtQsiFn = NTSTATUS (NTAPI*)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
+        static const auto nt_qsi = []() -> NtQsiFn {
+            HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+            return ntdll ? reinterpret_cast<NtQsiFn>(GetProcAddress(ntdll, "NtQuerySystemInformation")) : nullptr;
+        }();
+        if (nt_qsi) {
+            if (scratch.size() < 256 * 1024) scratch.resize(256 * 1024);
+            constexpr NTSTATUS kStatusInfoLengthMismatch = static_cast<NTSTATUS>(0xC0000004L);
+            ULONG needed = 0;
+            NTSTATUS st = kStatusInfoLengthMismatch;
+            for (int attempt = 0; attempt < 6; ++attempt) {
+                st = nt_qsi(SystemProcessInformation, scratch.data(),
+                            static_cast<ULONG>(scratch.size()), &needed);
+                if (st != kStatusInfoLengthMismatch) break;
+                const size_t grown = needed > scratch.size()
+                    ? static_cast<size_t>(needed) + 64 * 1024
+                    : scratch.size() * 2;
+                if (grown > 64 * 1024 * 1024) break;
+                scratch.resize(grown);
+            }
+            if (st >= 0) {
+                const DWORD self_pid = GetCurrentProcessId();
+                const uint8_t* base = scratch.data();
+                const size_t limit = scratch.size();
+                size_t offset = 0;
+                for (;;) {
+                    if (offset + sizeof(SYSTEM_PROCESS_INFORMATION) > limit) break;
+                    const auto* pi = reinterpret_cast<const SYSTEM_PROCESS_INFORMATION*>(base + offset);
+                    const uint64_t pid_val = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pi->UniqueProcessId));
+                    if (pid_val > 4 && pid_val <= UINT32_MAX && pi->SessionId != 0) {
+                        const DWORD pid = static_cast<DWORD>(pid_val);
+                        if (pid != self_pid) pids.push_back(pid);
+                    }
+                    if (pi->NextEntryOffset == 0 || pi->NextEntryOffset > limit - offset) break;
+                    offset += pi->NextEntryOffset;
+                }
+                return pids;
+            }
+        }
+        return EnumerateInteractiveProcessIds();
+    } catch (...) {
+        pids.clear();
+    }
+    return pids;
+}
+
 AdmissionDecision EvaluateProcessPolicy(const ProcessCharacteristics& info,
                                         const dialog_bridge_state::StateSnapshot* state) noexcept {
     if (info.pid <= 4 || info.basename.empty()) {
@@ -286,9 +352,17 @@ AdmissionDecision EvaluateProcessPolicy(const ProcessCharacteristics& info,
     if (info.machine != IMAGE_FILE_MACHINE_AMD64 && info.machine != IMAGE_FILE_MACHINE_I386) {
         return {AdmissionVerdict::SkipUnsupportedArch, info.machine, "unsupported_machine"};
     }
-    // Skip pure console-only utilities (cmd/git/compilers) unless they have mapped GUI DLLs.
-    if (info.pe_subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI && !info.has_gui_dll_loaded) {
-        return {AdmissionVerdict::SkipConsoleOnlySubsystem, info.machine, "cui_without_gui_dll"};
+    // Skip pure console-only utilities (cmd/git/compilers) unless they have mapped GUI DLLs,
+    // and always skip known pure CLI shells/build tools that transitively map user32.dll.
+    if (info.pe_subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI) {
+        for (const auto item : kBuiltInCuiCliExcluded) {
+            if (EqualsIgnoreCase(info.basename, item)) {
+                return {AdmissionVerdict::SkipConsoleOnlySubsystem, info.machine, "cui_cli_excluded"};
+            }
+        }
+        if (!info.has_gui_dll_loaded) {
+            return {AdmissionVerdict::SkipConsoleOnlySubsystem, info.machine, "cui_without_gui_dll"};
+        }
     }
     return {AdmissionVerdict::Eligible, info.machine, "eligible"};
 }

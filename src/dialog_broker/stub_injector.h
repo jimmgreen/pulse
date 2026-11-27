@@ -26,4 +26,8 @@ InjectionResult InjectViaHelper32(const std::wstring& helper32_exe, DWORD pid,
 // Computes the RVA of a named PE export directly from the on-disk DLL image.
 DWORD FindExportRva(const std::wstring& dll_path, const char* export_name, DWORD& rva_out) noexcept;
 
+// Computes the RVA of a named PE export directly from an already-mapped module inside
+// a remote process via ReadProcessMemory (safe even if the on-disk DLL was replaced/renamed).
+DWORD FindRemoteExportRva(HANDLE process, HMODULE remote_mod, const char* export_name, DWORD& rva_out) noexcept;
+
 } // namespace pulse::dialog_broker

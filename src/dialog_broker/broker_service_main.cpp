@@ -35,6 +35,12 @@ constexpr DWORD kFallbackPollIntervalMs = 1500;
 constexpr DWORD kSteadyWaitIntervalMs = 5000;
 constexpr DWORD kNewProcessSettleMs = 120;
 constexpr DWORD kTransientRetryDelayMs = 500;
+// Safety net for late ETW delivery: a reusable-buffer interactive PID diff picks up
+// new processes within ~1.5 s even when the process-start ETW event arrives late or never.
+constexpr DWORD kNewProcessSweepMs = 1500;
+// ETW payload CreateTime and GetProcessTimes come from the same kernel field; allow
+// a small tolerance so PID-reuse detection never double-queues the same process.
+constexpr uint64_t kCreationTimeTolerance = 100000; // 10 ms in FILETIME units
 constexpr std::array<DWORD, 4> kEtwRetryBackoffMs = {5000, 15000, 60000, 300000};
 
 SERVICE_STATUS_HANDLE g_status_handle = nullptr;
@@ -59,7 +65,10 @@ std::wstring DefaultLogRoot() {
 }
 
 uint64_t ProcessAgeMs(uint64_t creation_time) noexcept {
-    if (creation_time == 0) return 0;
+    // Reject missing or non-FILETIME values (before 1970-01-01) so corrupt payloads
+    // never look centuries old and bypass kNewProcessSettleMs.
+    constexpr uint64_t kUnixEpochFileTime = 116444736000000000ull;
+    if (creation_time < kUnixEpochFileTime) return 0;
     FILETIME now_ft{};
     GetSystemTimeAsFileTime(&now_ft);
     ULARGE_INTEGER now_uli{};
@@ -69,11 +78,16 @@ uint64_t ProcessAgeMs(uint64_t creation_time) noexcept {
     return (now_uli.QuadPart - creation_time) / 10000ull;
 }
 
+bool SameCreationTime(uint64_t a, uint64_t b) noexcept {
+    return a > b ? (a - b) <= kCreationTimeTolerance : (b - a) <= kCreationTimeTolerance;
+}
+
 enum class CandidateSource : uint8_t {
     Etw = 0,
     StartupScan = 1,
     FallbackPoll = 2,
     Retry = 3,
+    Sweep = 4,
 };
 
 const wchar_t* SourceName(CandidateSource src) noexcept {
@@ -82,6 +96,7 @@ const wchar_t* SourceName(CandidateSource src) noexcept {
     case CandidateSource::StartupScan: return L"startup_scan";
     case CandidateSource::FallbackPoll: return L"fallback_poll";
     case CandidateSource::Retry: return L"retry";
+    case CandidateSource::Sweep: return L"sweep";
     default: return L"unknown";
     }
 }
@@ -92,6 +107,8 @@ struct PendingCandidate {
     CandidateSource source = CandidateSource::Etw;
     uint8_t attempt = 0;
     ULONGLONG ready_tick = 0;
+    uint64_t detect_ms = 0; // process age when first queued (detection latency); 0 if unknown
+    bool refresh_existing = false; // allow already-loaded Stub processes to hot-reload/re-activate
 };
 
 struct TrackedProcess {
@@ -151,11 +168,18 @@ struct BrokerRuntime {
     std::deque<PendingCandidate> pending_queue;
     std::vector<PendingCandidate> retry_queue;
     std::unordered_map<DWORD, TrackedProcess> tracked;
+    std::vector<uint8_t> sweep_scratch;
     HANDLE work_event = nullptr;
     HANDLE cleanup_wake_event = nullptr;
 
     std::atomic<uint64_t> injected_ok{0};
     std::atomic<uint64_t> injected_fail{0};
+    uint64_t sweep_runs = 0;
+    uint64_t sweep_enqueued = 0;
+    uint64_t sweep_total_us = 0;
+    uint64_t sweep_max_us = 0;
+    uint64_t sweep_idle_runs = 0;      // runs that found no new PID (steady-state cost)
+    uint64_t sweep_idle_total_us = 0;
     uint32_t etw_start_attempts = 0;
 
     struct RefreshOutcome {
@@ -207,7 +231,8 @@ struct BrokerRuntime {
         return out;
     }
 
-    bool EnqueueCandidate(DWORD pid, uint64_t creation_time, CandidateSource source) noexcept {
+    bool EnqueueCandidate(DWORD pid, uint64_t creation_time, CandidateSource source,
+                          bool refresh_existing = false) noexcept {
         if (pid <= 4 || pid == GetCurrentProcessId()) return false;
         const ULONGLONG now = GetTickCount64();
         bool enqueued = false;
@@ -217,12 +242,12 @@ struct BrokerRuntime {
             if (it != tracked.end()) {
                 TrackedProcess& entry = it->second;
                 const bool pid_reused = (creation_time != 0 && entry.creation_time != 0 &&
-                                         entry.creation_time != creation_time);
+                                         !SameCreationTime(entry.creation_time, creation_time));
                 if (!pid_reused) {
                     if (entry.queued) return false;
                     if (entry.settled) {
                         if (entry.creation_time != 0 && creation_time != 0 &&
-                            entry.creation_time == creation_time) {
+                            SameCreationTime(entry.creation_time, creation_time)) {
                             return false;
                         }
                         if ((now - entry.last_touch_tick) < 10000) return false;
@@ -231,11 +256,17 @@ struct BrokerRuntime {
             }
             if (pending_queue.size() >= 512) return false;
             tracked[pid] = TrackedProcess{creation_time, false, true, now};
-            pending_queue.push_back(PendingCandidate{pid, creation_time, source, 0, now});
+            pending_queue.push_back(PendingCandidate{pid, creation_time, source, 0, now,
+                                                     ProcessAgeMs(creation_time), refresh_existing});
             enqueued = true;
         }
         if (enqueued && work_event) SetEvent(work_event);
         return enqueued;
+    }
+
+    size_t TrackedCount() noexcept {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        return tracked.size();
     }
 
     void ClearSettledTracking() noexcept {
@@ -279,6 +310,8 @@ struct BrokerRuntime {
             next.source = CandidateSource::Retry;
             next.attempt = static_cast<uint8_t>(prev.attempt + 1);
             next.ready_tick = now + kTransientRetryDelayMs;
+            next.detect_ms = prev.detect_ms;
+            next.refresh_existing = prev.refresh_existing;
             retry_queue.push_back(next);
             auto& entry = tracked[prev.pid];
             entry.creation_time = alive_ct;
@@ -290,7 +323,8 @@ struct BrokerRuntime {
         return true;
     }
 
-    size_t ScanInteractiveProcesses(const wchar_t* reason, CandidateSource source, bool log_if_empty) noexcept {
+    size_t ScanInteractiveProcesses(const wchar_t* reason, CandidateSource source, bool log_if_empty,
+                                    bool refresh_existing = false) noexcept {
         bool bridge_enabled = false;
         {
             std::lock_guard<std::mutex> lock(state_mutex);
@@ -336,7 +370,7 @@ struct BrokerRuntime {
 
             uint64_t ct = 0;
             broker::QueryProcessCreationTime(pid, ct);
-            if (EnqueueCandidate(pid, ct, source)) {
+            if (EnqueueCandidate(pid, ct, source, refresh_existing)) {
                 ++newly_enqueued;
             }
         }
@@ -350,6 +384,52 @@ struct BrokerRuntime {
             });
         }
         return newly_enqueued;
+    }
+
+    // Periodic diff of interactive-session PIDs via reusable-buffer NtQuerySystemInformation.
+    // Only PIDs not yet tracked are opened, keeping steady-state work to one snapshot + set lookups.
+    size_t SweepNewProcesses(CandidateSource source) noexcept {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            if (!(current_state.flags & state_ns::kFlagGlobalEnabled)) return 0;
+        }
+        LARGE_INTEGER freq{}, t0{}, t1{};
+        QueryPerformanceFrequency(&freq);
+        QueryPerformanceCounter(&t0);
+        const auto pids = broker::EnumerateInteractiveProcessIdsFast(sweep_scratch);
+        if (pids.empty()) return 0;
+        std::vector<DWORD> fresh;
+        try {
+            const std::unordered_set<DWORD> alive(pids.begin(), pids.end());
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            for (auto it = tracked.begin(); it != tracked.end();) {
+                if (!it->second.queued && !alive.count(it->first)) it = tracked.erase(it);
+                else ++it;
+            }
+            for (DWORD pid : pids) {
+                if (!tracked.count(pid)) fresh.push_back(pid);
+            }
+        } catch (...) {
+            return 0;
+        }
+        size_t enqueued = 0;
+        for (DWORD pid : fresh) {
+            uint64_t ct = 0;
+            broker::QueryProcessCreationTime(pid, ct);
+            if (EnqueueCandidate(pid, ct, source)) ++enqueued;
+        }
+        QueryPerformanceCounter(&t1);
+        const uint64_t us = freq.QuadPart
+            ? static_cast<uint64_t>((t1.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart) : 0;
+        ++sweep_runs;
+        sweep_enqueued += enqueued;
+        sweep_total_us += us;
+        if (us > sweep_max_us) sweep_max_us = us;
+        if (fresh.empty()) {
+            ++sweep_idle_runs;
+            sweep_idle_total_us += us;
+        }
+        return enqueued;
     }
 
     void ProcessCandidate(const PendingCandidate& cand, HANDLE stop_evt) noexcept {
@@ -399,7 +479,20 @@ struct BrokerRuntime {
         const auto info = broker::InspectLiveProcess(cand.pid);
         if (info.creation_time != 0) creation_time = info.creation_time;
         const auto decision = broker::EvaluateProcessPolicy(info, &snap);
-        if (decision.verdict != broker::AdmissionVerdict::Eligible) {
+        const bool refresh_loaded_stub =
+            cand.refresh_existing &&
+            decision.verdict == broker::AdmissionVerdict::SkipAlreadyLoaded &&
+            (decision.target_machine == IMAGE_FILE_MACHINE_AMD64 ||
+             decision.target_machine == IMAGE_FILE_MACHINE_I386);
+        if (decision.verdict != broker::AdmissionVerdict::Eligible && !refresh_loaded_stub) {
+            // A brand-new CUI process that imports or loads user32.dll can still be inside
+            // LdrInitializeThunk (or an AV scan) at 120 ms, making EnumProcessModulesEx miss
+            // user32.dll (or fail with ERROR_PARTIAL_COPY). Retry once before settling.
+            if (decision.verdict == broker::AdmissionVerdict::SkipConsoleOnlySubsystem &&
+                decision.reason_text && std::strcmp(decision.reason_text, "cui_without_gui_dll") == 0 &&
+                cand.attempt == 0 && creation_time != 0 && ProcessAgeMs(creation_time) < 2000) {
+                if (ScheduleTransientRetry(cand, creation_time)) return;
+            }
             if (info.is_elevated &&
                 decision.verdict != broker::AdmissionVerdict::SkipBuiltInExcluded &&
                 decision.verdict != broker::AdmissionVerdict::SkipAlreadyLoaded &&
@@ -414,6 +507,7 @@ struct BrokerRuntime {
                     {"machine", info.machine},
                     {"subsystem", info.pe_subsystem},
                     {"verdict", static_cast<uint64_t>(decision.verdict)},
+                    {"detect_ms", cand.detect_ms},
                 });
             }
             MarkTrackedResult(cand.pid, creation_time, true);
@@ -440,10 +534,13 @@ struct BrokerRuntime {
                 rlog::TextEvent("process_verify_failed", {
                     {"image", info.basename},
                     {"path", stub64},
+                    {"source", SourceName(cand.source)},
                 }, {
                     {"pid", info.pid},
                     {"machine", decision.target_machine},
                     {"error", verify_err},
+                    {"detect_ms", cand.detect_ms},
+                    {"age_ms", ProcessAgeMs(creation_time)},
                 }, rlog::Level::Warning);
             }
         } else if (decision.target_machine == IMAGE_FILE_MACHINE_I386) {
@@ -460,10 +557,13 @@ struct BrokerRuntime {
                 rlog::TextEvent("process_verify_failed", {
                     {"image", info.basename},
                     {"path", verify_helper != ERROR_SUCCESS ? helper32 : stub32},
+                    {"source", SourceName(cand.source)},
                 }, {
                     {"pid", info.pid},
                     {"machine", decision.target_machine},
                     {"error", verify_stub},
+                    {"detect_ms", cand.detect_ms},
+                    {"age_ms", ProcessAgeMs(creation_time)},
                 }, rlog::Level::Warning);
             }
         }
@@ -495,6 +595,9 @@ struct BrokerRuntime {
             {"remote_return", res.activate_result},
             {"already_loaded", res.already_loaded ? 1u : 0u},
             {"attempt", cand.attempt},
+            {"detect_ms", cand.detect_ms},
+            {"age_ms", ProcessAgeMs(creation_time)},
+            {"refresh", cand.refresh_existing ? 1u : 0u},
         }, ok ? rlog::Level::Info : rlog::Level::Warning);
 
         if (!ok && cand.attempt == 0 && res.error != ERROR_EXE_MACHINE_TYPE_MISMATCH) {
@@ -507,7 +610,7 @@ struct BrokerRuntime {
         ++etw_start_attempts;
         const DWORD err = etw.Start([this](const broker::ProcessStartEvent& evt) {
             if (evt.session_id == 0) return;
-            EnqueueCandidate(evt.pid, 0, CandidateSource::Etw);
+            EnqueueCandidate(evt.pid, evt.create_time, CandidateSource::Etw);
         }, etw_session_name);
         const bool healthy = (err == ERROR_SUCCESS && etw.Healthy());
         rlog::TextEvent("etw_start", {
@@ -517,6 +620,7 @@ struct BrokerRuntime {
             {"error", err},
             {"attempt", etw_start_attempts},
             {"healthy", healthy ? 1u : 0u},
+            {"shared_buffering", etw.SharedBuffering() ? 1u : 0u},
         }, healthy ? rlog::Level::Info : rlog::Level::Warning);
         return err;
     }
@@ -561,7 +665,6 @@ struct BrokerRuntime {
         ULONGLONG next_etw_retry_tick = fallback_poll_active
             ? (start_tick + kEtwRetryBackoffMs[retry_backoff_index])
             : 0;
-        ULONGLONG last_fallback_scan_tick = start_tick;
 
         if (opts.console_mode) {
             std::printf("PulseDialogBroker console mode: bridge_root=%ls session=%ls etw_start_err=%lu stage=%s\n",
@@ -662,37 +765,44 @@ struct BrokerRuntime {
         });
 
         // Catch up already-running interactive GUI processes (including elevated apps that
-        // started before the Broker service started or upgraded).
-        ScanInteractiveProcesses(L"startup_scan", CandidateSource::StartupScan, true);
+        // started before the Broker service started or upgraded, and hot-reload existing Stubs).
+        ScanInteractiveProcesses(L"startup_scan", CandidateSource::StartupScan, true, true);
+        ULONGLONG last_refresh_tick = GetTickCount64();
+        ULONGLONG last_sweep_tick = last_refresh_tick;
+        ULONGLONG last_sweep_stats_tick = last_refresh_tick;
 
         for (;;) {
             HANDLE handles[2]{stop_evt, dir_watch};
             const DWORD count = (dir_watch && dir_watch != INVALID_HANDLE_VALUE) ? 2u : 1u;
-            const DWORD wait_timeout = fallback_poll_active ? kFallbackPollIntervalMs : kSteadyWaitIntervalMs;
-            const DWORD wait = WaitForMultipleObjects(count, handles, FALSE, wait_timeout);
+            const DWORD wait = WaitForMultipleObjects(count, handles, FALSE, kNewProcessSweepMs);
             if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) break;
 
             bool state_triggered_scan = false;
             const wchar_t* state_scan_reason = nullptr;
+            const DWORD refresh_interval = fallback_poll_active ? kFallbackPollIntervalMs : kSteadyWaitIntervalMs;
             if (count == 2 && wait == WAIT_OBJECT_0 + 1) {
                 if (WaitForSingleObject(stop_evt, 50) == WAIT_OBJECT_0) break;
                 const RefreshOutcome refreshed = RefreshFromDisk();
+                last_refresh_tick = GetTickCount64();
                 FindNextChangeNotification(dir_watch);
                 if (refreshed.became_enabled) {
                     ClearSettledTracking();
                     state_triggered_scan = true;
                     state_scan_reason = L"bridge_enabled_scan";
                 } else if (refreshed.generation_changed && refreshed.enabled) {
+                    ClearSettledTracking();
                     state_triggered_scan = true;
                     state_scan_reason = L"generation_changed_scan";
                 }
-            } else if (wait == WAIT_TIMEOUT) {
+            } else if (wait == WAIT_TIMEOUT && GetTickCount64() - last_refresh_tick >= refresh_interval) {
                 const RefreshOutcome refreshed = RefreshFromDisk();
+                last_refresh_tick = GetTickCount64();
                 if (refreshed.became_enabled) {
                     ClearSettledTracking();
                     state_triggered_scan = true;
                     state_scan_reason = L"bridge_enabled_scan";
                 } else if (refreshed.generation_changed && refreshed.enabled) {
+                    ClearSettledTracking();
                     state_triggered_scan = true;
                     state_scan_reason = L"generation_changed_scan";
                 }
@@ -720,7 +830,7 @@ struct BrokerRuntime {
                     {"next_etw_retry_ms", kEtwRetryBackoffMs[retry_backoff_index]},
                 }, rlog::Level::Warning);
                 ScanInteractiveProcesses(L"etw_degraded_scan", CandidateSource::FallbackPoll, true);
-                last_fallback_scan_tick = now;
+                last_sweep_tick = now;
             } else if (!etw_now_healthy && now >= next_etw_retry_tick) {
                 etw.Stop();
                 const DWORD retry_err = StartEtwWatcher();
@@ -735,7 +845,7 @@ struct BrokerRuntime {
                         {"next_etw_retry_ms", 0},
                     });
                     ScanInteractiveProcesses(L"etw_recovered_scan", CandidateSource::StartupScan, true);
-                    last_fallback_scan_tick = now;
+                    last_sweep_tick = now;
                     state_triggered_scan = false;
                 } else {
                     if (retry_backoff_index + 1 < kEtwRetryBackoffMs.size()) {
@@ -746,11 +856,23 @@ struct BrokerRuntime {
             }
 
             if (state_triggered_scan && state_scan_reason) {
-                ScanInteractiveProcesses(state_scan_reason, CandidateSource::StartupScan, true);
-                last_fallback_scan_tick = now;
-            } else if (fallback_poll_active && (now - last_fallback_scan_tick) >= kFallbackPollIntervalMs) {
-                ScanInteractiveProcesses(L"fallback_poll", CandidateSource::FallbackPoll, false);
-                last_fallback_scan_tick = now;
+                ScanInteractiveProcesses(state_scan_reason, CandidateSource::StartupScan, true, true);
+                last_sweep_tick = now;
+            } else if (now - last_sweep_tick >= kNewProcessSweepMs) {
+                SweepNewProcesses(fallback_poll_active ? CandidateSource::FallbackPoll : CandidateSource::Sweep);
+                last_sweep_tick = now;
+            }
+
+            if (now - last_sweep_stats_tick >= 10ull * 60ull * 1000ull) {
+                rlog::Event("sweep_stats", {
+                    {"runs", sweep_runs},
+                    {"enqueued", sweep_enqueued},
+                    {"avg_us", sweep_runs ? sweep_total_us / sweep_runs : 0},
+                    {"max_us", sweep_max_us},
+                    {"idle_avg_us", sweep_idle_runs ? sweep_idle_total_us / sweep_idle_runs : 0},
+                    {"tracked", static_cast<uint64_t>(TrackedCount())},
+                });
+                last_sweep_stats_tick = now;
             }
         }
 
@@ -767,6 +889,12 @@ struct BrokerRuntime {
             {"etw_events_received", total_etw_events},
             {"injected_ok", injected_ok.load(std::memory_order_relaxed)},
             {"injected_fail", injected_fail.load(std::memory_order_relaxed)},
+            {"sweep_runs", sweep_runs},
+            {"sweep_enqueued", sweep_enqueued},
+            {"sweep_avg_us", sweep_runs ? sweep_total_us / sweep_runs : 0},
+            {"sweep_max_us", sweep_max_us},
+            {"sweep_idle_runs", sweep_idle_runs},
+            {"sweep_idle_avg_us", sweep_idle_runs ? sweep_idle_total_us / sweep_idle_runs : 0},
         });
         rlog::Flush(2000);
         rlog::Shutdown();

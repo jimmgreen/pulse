@@ -8,6 +8,8 @@
 #include <vector>
 
 namespace pulse::shell_bridge::runtime {
+inline constexpr size_t kAutoImportCreateProcessIndex = 16;
+inline constexpr size_t kAutoImportHookCount = 17;
 struct AutoImportHook { void* original = nullptr; void* replacement = nullptr; };
 struct AutoImportResult {
     HRESULT status = E_PENDING;
@@ -28,8 +30,9 @@ public:
     ~AutoImportPatch();
     AutoImportPatch(const AutoImportPatch&) = delete;
     AutoImportPatch& operator=(const AutoImportPatch&) = delete;
-    // COM3 hooks, optionally followed by RoGetActivationFactory. Omitted WinRT
-    // remains native; its coverage bit is not the CreateProcessW bit.
+    // Legacy COM/Shell prefix tables remain supported. A full kAutoImportHookCount
+    // table may leave any pair null; slot 16 routes CreateProcessW independently.
+    // Both pointers in a populated pair are required and replacements must belong to owner.
     using Permit = bool (*)(void*) noexcept;
     AutoImportResult Install(HMODULE owner, std::span<const AutoImportHook> hooks, Permit permit = nullptr, void* context = nullptr) noexcept;
     AutoImportResult Rollback() noexcept;

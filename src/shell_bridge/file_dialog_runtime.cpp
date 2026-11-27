@@ -8,6 +8,7 @@
 #include "../common/process_token_restriction.h"
 #include "file_dialog_runtime.h"
 #include "dialog_sink_hooks.h"
+#include "explorer_process_route.h"
 #include "runtime_config.h"
 #if defined(PULSE_EXPERIMENTAL_WINRT_PICKER)
 #include "winrt_picker_activation.h"
@@ -1088,6 +1089,21 @@ bool PeerDirectRevealInstalled() noexcept {
     return query && query() != FALSE;
 }
 
+bool PeerExplorerProcessInstalled() noexcept {
+#if defined(_WIN64)
+    constexpr const wchar_t* names[]{L"PulseDialogAuto64.dll", L"PulseDialogCore64.dll"};
+#else
+    constexpr const wchar_t* names[]{L"PulseDialogAuto32.dll", L"PulseDialogCore32.dll"};
+#endif
+    using Query = BOOL(WINAPI*)() noexcept;
+    for (const auto* name : names) {
+        const HMODULE peer = GetModuleHandleW(name);
+        const auto query = peer ? reinterpret_cast<Query>(GetProcAddress(peer, "PulseIsExplorerProcessInstalled")) : nullptr;
+        if (query && query()) return true;
+    }
+    return false;
+}
+
 bool AutoDirectShellActive() noexcept {
     const auto* state = current.load(std::memory_order_acquire);
     return state && !Disabled(*state) && TokenSafe(state->admin) && !PeerDirectRevealInstalled();
@@ -1110,50 +1126,50 @@ struct AutoShellScope {
 HRESULT WINAPI HookSHOpenFolderAndSelectItems(PCIDLIST_ABSOLUTE folder, UINT count, PCUITEMID_CHILD_ARRAY children, DWORD flags) {
     AutoShellScope scope;
     if (scope.entered && AutoDirectShellActive()) {
-        if (config::DispatchDirectRevealPidl(folder, count, children, flags) == pulse::DirectRevealResult::Accepted)
-            return S_OK;
+        const auto result = config::DispatchDirectRevealPidl(folder, count, children, flags);
+        if (!pulse::ShouldUseNativeBrowse(result)) return config::CompleteDirectReveal(result);
     }
-    return original_reveal_items(folder, count, children, flags);
+    return shell::runtime::FallbackDirectRevealPidl(original_reveal_items, folder, count, children, flags);
 }
 
 HINSTANCE WINAPI HookShellExecuteW(HWND window, LPCWSTR verb, LPCWSTR file, LPCWSTR parameters, LPCWSTR directory, INT show) {
+    auto result = pulse::DirectRevealResult::NotHandled;
     AutoShellScope scope;
     if (scope.entered && AutoDirectShellActive()) {
-        if (config::DispatchDirectShellExecuteW(verb, file, parameters, directory, show) == pulse::DirectRevealResult::Accepted)
-            return reinterpret_cast<HINSTANCE>(33);
+        result = config::DispatchDirectShellExecuteW(verb, file, parameters, directory, show);
+        if (!pulse::ShouldUseNativeBrowse(result)) return config::CompleteDirectShellExecute(result);
     }
-    return original_shell_execute_w(window, verb, file, parameters, directory, show);
+    return config::FallbackShellExecuteW(result, original_shell_execute_w, window, verb, file, parameters, directory, show);
 }
 
 BOOL WINAPI HookShellExecuteExW(SHELLEXECUTEINFOW* info) {
+    auto result = pulse::DirectRevealResult::NotHandled;
     AutoShellScope scope;
     if (scope.entered && AutoDirectShellActive()) {
-        if (config::DispatchDirectShellExecuteExW(info) == pulse::DirectRevealResult::Accepted) {
-            info->hInstApp = reinterpret_cast<HINSTANCE>(33);
-            return TRUE;
-        }
+        result = config::DispatchDirectShellExecuteExW(info);
+        if (!pulse::ShouldUseNativeBrowse(result)) return config::CompleteDirectShellExecuteEx(info, result);
     }
-    return original_shell_execute_ex_w(info);
+    return config::FallbackShellExecuteExW(result, original_shell_execute_ex_w, info);
 }
 
 HINSTANCE WINAPI HookShellExecuteA(HWND window, LPCSTR verb, LPCSTR file, LPCSTR parameters, LPCSTR directory, INT show) {
+    auto result = pulse::DirectRevealResult::NotHandled;
     AutoShellScope scope;
     if (scope.entered && AutoDirectShellActive()) {
-        if (config::DispatchDirectShellExecuteA(verb, file, parameters, directory, show) == pulse::DirectRevealResult::Accepted)
-            return reinterpret_cast<HINSTANCE>(33);
+        result = config::DispatchDirectShellExecuteA(verb, file, parameters, directory, show);
+        if (!pulse::ShouldUseNativeBrowse(result)) return config::CompleteDirectShellExecute(result);
     }
-    return original_shell_execute_a(window, verb, file, parameters, directory, show);
+    return config::FallbackShellExecuteA(result, original_shell_execute_a, window, verb, file, parameters, directory, show);
 }
 
 BOOL WINAPI HookShellExecuteExA(SHELLEXECUTEINFOA* info) {
+    auto result = pulse::DirectRevealResult::NotHandled;
     AutoShellScope scope;
     if (scope.entered && AutoDirectShellActive()) {
-        if (config::DispatchDirectShellExecuteExA(info) == pulse::DirectRevealResult::Accepted) {
-            info->hInstApp = reinterpret_cast<HINSTANCE>(33);
-            return TRUE;
-        }
+        result = config::DispatchDirectShellExecuteExA(info);
+        if (!pulse::ShouldUseNativeBrowse(result)) return config::CompleteDirectShellExecuteEx(info, result);
     }
-    return original_shell_execute_ex_a(info);
+    return config::FallbackShellExecuteExA(result, original_shell_execute_ex_a, info);
 }
 
 constexpr uint32_t kUserAutoDetourMask = config::kCoCreateInstance | config::kCoCreateInstanceEx |
@@ -1238,6 +1254,7 @@ LONG AttachUserAutoHooks() noexcept {
     return NO_ERROR;
 }
 LONG DetachUserAutoHooks() noexcept {
+    shell::explorer_process::Disable();
     shell::sink_hooks::Uninstall();
     LONG result = DetourTransactionBegin();
     if (result != NO_ERROR) return result;
@@ -1266,10 +1283,25 @@ LONG DetachUserAutoHooks() noexcept {
     return result;
 }
 #endif
+bool RuntimeExplorerProcessEnabled() noexcept {
+    const auto* state = current.load(std::memory_order_acquire);
+    if (!state || Disabled(*state) || !TokenSafe(state->admin)) return false;
+#if defined(PULSE_RUNTIME_AUTO_ENTRY)
+    // Old peers report Shell hooks only; they do not own process-creation routing.
+    return !PeerExplorerProcessInstalled();
+#else
+    return true;
+#endif
+}
 [[maybe_unused]] DWORD WINAPI Initialize(void* parameter) noexcept {
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
     std::unique_ptr<config::PulseRuntimeAutoStartV1> explicit_request(static_cast<config::PulseRuntimeAutoStartV1*>(parameter));
     config::AutoImportPatch auto_import_patch;
+    std::array<config::AutoImportHook, config::kAutoImportHookCount> process_hooks{};
+    process_hooks[config::kAutoImportCreateProcessIndex] = {
+        reinterpret_cast<void*>(&::CreateProcessW), reinterpret_cast<void*>(&config::HookCreateProcessW)};
+    config::AutoModuleEpoch process_module_epoch;
+    bool process_imports_configured = false;
     bool user_detours_installed = false;
 #else
     (void)parameter;
@@ -1289,9 +1321,13 @@ LONG DetachUserAutoHooks() noexcept {
                 if (user_detours && *user_detours) {
                     const LONG detached = DetachUserAutoHooks();
                     *user_detours = false;
-                    config::AutoImportResult cleared{};
-                    cleared.status = detached == NO_ERROR ? S_OK : HRESULT_FROM_WIN32(detached);
-                    cleared.protection_restored = (detached == NO_ERROR);
+                    auto cleared = imports->Rollback();
+                    if (detached != NO_ERROR) {
+                        cleared.status = HRESULT_FROM_WIN32(detached);
+                        cleared.api_mask |= kUserAutoDetourMask;
+                        cleared.patched_slots += kUserAutoDetourCount;
+                        cleared.protection_restored = false;
+                    }
                     RecordAutoImports(cleared);
                 } else {
                     RecordAutoImports(imports->Rollback());
@@ -1478,6 +1514,24 @@ LONG DetachUserAutoHooks() noexcept {
             // complete. Child routing cannot observe current == nullptr here.
             if (!publication.Publish(state)) { initialization = HRESULT_FROM_WIN32(ERROR_ALREADY_INITIALIZED); return 0; }
             published = publication.value;
+            // Resolve and lease the bridge on this initialization worker, never in DllMain/CreateProcessW.
+            (void)shell::explorer_process::Configure(pinned, RuntimeExplorerProcessEnabled);
+#if defined(PULSE_RUNTIME_AUTO_ENTRY)
+            { // Armed routes must also reject recognized browsing when bridge readiness fails.
+                // AUTO_ENTRY owns IAT slots, not a second inline CreateProcessW detour.
+                process_module_epoch.Start();
+                const auto permit = [](void* context) noexcept { return !Disabled(*static_cast<Configuration*>(context)); };
+                auto process_coverage = auto_import_patch.Install(pinned, process_hooks, permit, published);
+                if (FAILED(process_coverage.status) && process_coverage.status != HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND)) {
+                    initialization = process_coverage.status; return 0;
+                }
+                process_imports_configured = true;
+                process_coverage.api_mask |= kUserAutoDetourMask;
+                process_coverage.patched_slots += kUserAutoDetourCount;
+                RecordAutoImports(process_coverage);
+                ready.installed_entries = process_coverage.api_mask;
+            }
+#endif
             child_configured = !published->admin && !published->user_auto && !runtime_dll.empty() && config::ConfigureChildRouting(control, runtime_dll, ChildEnabled, ChildLog, ChildDiagnostic);
         }
         const auto temporary = control + L"\\runtime-ready.tmp";
@@ -1501,6 +1555,7 @@ LONG DetachUserAutoHooks() noexcept {
         }
         publication.Commit();
 #if defined(PULSE_RUNTIME_AUTO_ENTRY)
+        if (process_imports_configured) auto_import_patch.Commit();
         finish_initialization.active = false;
 #endif
         initialization = ready.status;
@@ -1529,13 +1584,28 @@ LONG DetachUserAutoHooks() noexcept {
                 Configuration* expected = value; current.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel);
             };
             config::AutoImportResult restored{};
-            while (enabled(published)) Sleep(200);
-            revoke(published);
+            if (process_imports_configured) {
+                const auto observe = [](const config::AutoImportResult& value) noexcept {
+                    auto combined = value;
+                    combined.api_mask |= kUserAutoDetourMask;
+                    combined.patched_slots += kUserAutoDetourCount;
+                    RecordAutoImports(combined);
+                };
+                restored = config::MonitorAutoImports(pinned, process_hooks, auto_import_patch,
+                    process_module_epoch, enabled, published, enabled, revoke, observe);
+            } else {
+                while (enabled(published)) Sleep(200);
+                revoke(published);
+            }
             const LONG detached = DetachUserAutoHooks();
-            restored.status = detached == NO_ERROR ? HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED) : HRESULT_FROM_WIN32(detached);
-            restored.api_mask = detached == NO_ERROR ? 0u : kUserAutoDetourMask;
-            restored.patched_slots = detached == NO_ERROR ? 0u : kUserAutoDetourCount;
-            restored.protection_restored = (detached == NO_ERROR);
+            if (detached != NO_ERROR) {
+                restored.status = HRESULT_FROM_WIN32(detached);
+                restored.api_mask |= kUserAutoDetourMask;
+                restored.patched_slots += kUserAutoDetourCount;
+                restored.protection_restored = false;
+            } else if (SUCCEEDED(restored.status)) {
+                restored.status = HRESULT_FROM_WIN32(ERROR_PROCESS_ABORTED);
+            }
             RecordAutoImports(restored);
             install_result = ERROR_NOT_READY; initialization = restored.status;
             const bool rebound = !restored.api_mask && restored.protection_restored;

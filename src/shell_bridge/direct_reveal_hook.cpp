@@ -1,4 +1,8 @@
+#include "../common/native_browse_launch.h"
 #include "direct_reveal_hook.h"
+#include "explorer_process_route.h"
+#include "../common/browse_request.h"
+#include "../common/explorer_launch_request.h"
 #include "../common/direct_reveal_client.h"
 #include <detours.h>
 #include <tlhelp32.h>
@@ -159,7 +163,9 @@ bool ResolveShortcutFile(const std::wstring& lnk_path, DirectShellAction& action
             const auto explorer = SystemExplorerPath();
             if (explorer.empty() || CompareStringOrdinal(target.c_str(), -1, explorer.c_str(), -1, TRUE) != CSTR_EQUAL)
                 return false;
-            return ResolveExplorerParameters(std::wstring(args).c_str(), action, out_path, depth + 1);
+            const bool resolved = ResolveExplorerParameters(std::wstring(args).c_str(), action, out_path, depth + 1);
+            if (!resolved) action = DirectShellAction::Unsupported;
+            return resolved;
         }
 
         const DWORD attrs = GetFileAttributesW(target.c_str());
@@ -214,7 +220,7 @@ bool ResolveExplorerParameters(const wchar_t* parameters, DirectShellAction& act
             path.assign(args);
             return true;
         }
-        // Optional single /e, or /n, folder-open switch; any other Explorer switch stays native.
+        // Optional single /e, or /n, folder-open switch; other explicit Explorer browse shapes are unsupported.
         if (StartsWithInsensitive(args, L"/e,") || StartsWithInsensitive(args, L"/n,")) {
             args.remove_prefix(3);
             args = TrimWhitespace(args);
@@ -274,15 +280,15 @@ struct ReentrancyGuard {
 
 pulse::DirectRevealResult SendAction(DirectShellAction action, const std::wstring& path,
     DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
-    if (action == DirectShellAction::Reveal) {
-        return reveal_sender ? reveal_sender(path, 250) : pulse::DirectRevealResult::Rejected;
-    }
-    if (action == DirectShellAction::OpenFolder) {
-        return open_sender ? open_sender(path, 250) : pulse::DirectRevealResult::Rejected;
-    }
-    return pulse::DirectRevealResult::Rejected;
+    pulse::DirectRevealResult result = pulse::DirectRevealResult::Rejected;
+    if (action == DirectShellAction::Reveal && reveal_sender) result = reveal_sender(path, 250);
+    else if (action == DirectShellAction::OpenFolder && open_sender) result = open_sender(path, 250);
+    // Preserve the classified delivery status for diagnostics. Every non-Accepted
+    // result is eligible for one native fallback at the API boundary.
+    return result == pulse::DirectRevealResult::NotHandled ? pulse::DirectRevealResult::Rejected : result;
 }
 
+decltype(&CreateProcessW) original_create_process = &CreateProcessW;
 decltype(&SHOpenFolderAndSelectItems) original = &SHOpenFolderAndSelectItems;
 decltype(&ShellExecuteExW) original_execute_ex = &ShellExecuteExW;
 decltype(&ShellExecuteW) original_execute = &ShellExecuteW;
@@ -297,65 +303,82 @@ void Observed(const char* entry, pulse::DirectRevealResult result) noexcept {
     if (auto callback = observe.load(std::memory_order_acquire)) callback(entry, static_cast<unsigned>(result));
 }
 std::mutex install_mutex;
+bool ProcessRouteEnabled() noexcept {
+    const auto gate = enabled.load(std::memory_order_acquire);
+    return gate && gate();
+}
+BOOL WINAPI CreateExplorerProcess(LPCWSTR app, LPWSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
+    BOOL inherit, DWORD flags, LPVOID env, LPCWSTR cwd, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION pi) {
+    const DWORD incoming = GetLastError();
+    BOOL result = FALSE;
+    if (!g_entering_direct_shell && explorer_process::TryRoute(original_create_process, app, cmd, pa, ta, inherit, flags,
+            env, cwd, startup, pi, result)) return result;
+    SetLastError(incoming);
+    return explorer_process::FallbackCreateProcess(original_create_process, app, cmd, pa, ta, inherit, flags, env, cwd, startup, pi);
+}
 
 HRESULT WINAPI Reveal(PCIDLIST_ABSOLUTE folder, UINT count, PCUITEMID_CHILD_ARRAY children, DWORD flags) {
-    auto gate = enabled.load(std::memory_order_acquire);
+    const auto gate = enabled.load(std::memory_order_acquire);
     if (!g_entering_direct_shell && gate && gate()) {
         const auto result = DispatchDirectRevealPidl(folder, count, children, flags, send.load(std::memory_order_acquire));
         Observed("SHOpenFolderAndSelectItems", result);
-        // Pulse first; anything short of an acknowledged reveal stays native.
-        if (result == pulse::DirectRevealResult::Accepted) return S_OK;
+        if (!pulse::ShouldUseNativeBrowse(result)) return CompleteDirectReveal(result);
     }
-    return original(folder, count, children, flags);
+    return FallbackDirectRevealPidl(original, folder, count, children, flags);
 }
-
 BOOL WINAPI ExecuteEx(SHELLEXECUTEINFOW* info) {
-    auto gate = enabled.load(std::memory_order_acquire);
+    auto result = pulse::DirectRevealResult::NotHandled;
+    const auto gate = enabled.load(std::memory_order_acquire);
     if (!g_entering_direct_shell && gate && gate()) {
-        const auto result = DispatchDirectShellExecuteExW(info, send.load(std::memory_order_acquire),
-            open_send.load(std::memory_order_acquire));
-        if (result != pulse::DirectRevealResult::Rejected) Observed("ShellExecuteExW", result);
-        if (result == pulse::DirectRevealResult::Accepted) { info->hInstApp = reinterpret_cast<HINSTANCE>(33); return TRUE; }
+        result = DispatchDirectShellExecuteExW(info, send.load(std::memory_order_acquire), open_send.load(std::memory_order_acquire));
+        Observed("ShellExecuteExW", result);
+        if (!pulse::ShouldUseNativeBrowse(result)) {
+            return CompleteDirectShellExecuteEx(info, result);
+        }
     }
     ReentrancyGuard guard;
-    return original_execute_ex(info);
+    return FallbackShellExecuteExW(result, original_execute_ex, info);
 }
-
 HINSTANCE WINAPI Execute(HWND window, LPCWSTR verb, LPCWSTR file, LPCWSTR parameters, LPCWSTR directory, INT show) {
-    auto gate = enabled.load(std::memory_order_acquire);
+    auto result = pulse::DirectRevealResult::NotHandled;
+    const auto gate = enabled.load(std::memory_order_acquire);
     if (!g_entering_direct_shell && gate && gate()) {
-        const auto result = DispatchDirectShellExecuteW(verb, file, parameters, directory, show,
+        result = DispatchDirectShellExecuteW(verb, file, parameters, directory, show,
             send.load(std::memory_order_acquire), open_send.load(std::memory_order_acquire));
-        if (result != pulse::DirectRevealResult::Rejected) Observed("ShellExecuteW", result);
-        if (result == pulse::DirectRevealResult::Accepted) return reinterpret_cast<HINSTANCE>(33);
+        Observed("ShellExecuteW", result);
+        if (!pulse::ShouldUseNativeBrowse(result)) {
+            return CompleteDirectShellExecute(result);
+        }
     }
-    // Hold re-entrancy across the native fallback because ShellExecuteW calls ShellExecuteExW internally.
     ReentrancyGuard guard;
-    return original_execute(window, verb, file, parameters, directory, show);
+    return FallbackShellExecuteW(result, original_execute, window, verb, file, parameters, directory, show);
 }
-
 BOOL WINAPI ExecuteExA(SHELLEXECUTEINFOA* info) {
-    auto gate = enabled.load(std::memory_order_acquire);
+    auto result = pulse::DirectRevealResult::NotHandled;
+    const auto gate = enabled.load(std::memory_order_acquire);
     if (!g_entering_direct_shell && gate && gate()) {
-        const auto result = DispatchDirectShellExecuteExA(info, send.load(std::memory_order_acquire),
-            open_send.load(std::memory_order_acquire));
-        if (result != pulse::DirectRevealResult::Rejected) Observed("ShellExecuteExA", result);
-        if (result == pulse::DirectRevealResult::Accepted) { info->hInstApp = reinterpret_cast<HINSTANCE>(33); return TRUE; }
+        result = DispatchDirectShellExecuteExA(info, send.load(std::memory_order_acquire), open_send.load(std::memory_order_acquire));
+        Observed("ShellExecuteExA", result);
+        if (!pulse::ShouldUseNativeBrowse(result)) {
+            return CompleteDirectShellExecuteEx(info, result);
+        }
     }
     ReentrancyGuard guard;
-    return original_execute_ex_a(info);
+    return FallbackShellExecuteExA(result, original_execute_ex_a, info);
 }
-
 HINSTANCE WINAPI ExecuteA(HWND window, LPCSTR verb, LPCSTR file, LPCSTR parameters, LPCSTR directory, INT show) {
-    auto gate = enabled.load(std::memory_order_acquire);
+    auto result = pulse::DirectRevealResult::NotHandled;
+    const auto gate = enabled.load(std::memory_order_acquire);
     if (!g_entering_direct_shell && gate && gate()) {
-        const auto result = DispatchDirectShellExecuteA(verb, file, parameters, directory, show,
+        result = DispatchDirectShellExecuteA(verb, file, parameters, directory, show,
             send.load(std::memory_order_acquire), open_send.load(std::memory_order_acquire));
-        if (result != pulse::DirectRevealResult::Rejected) Observed("ShellExecuteA", result);
-        if (result == pulse::DirectRevealResult::Accepted) return reinterpret_cast<HINSTANCE>(33);
+        Observed("ShellExecuteA", result);
+        if (!pulse::ShouldUseNativeBrowse(result)) {
+            return CompleteDirectShellExecute(result);
+        }
     }
     ReentrancyGuard guard;
-    return original_execute_a(window, verb, file, parameters, directory, show);
+    return FallbackShellExecuteA(result, original_execute_a, window, verb, file, parameters, directory, show);
 }
 
 struct Threads {
@@ -416,7 +439,9 @@ bool ResolveDirectShellTarget(const wchar_t* verb, const wchar_t* file, const wc
         if (!empty_or_open && !explore) return false;
 
         if (empty_or_open && parameters && *parameters && IsSystemExplorerFile(file, directory)) {
-            return ResolveExplorerParameters(parameters, action, path, 0);
+            const bool resolved = ResolveExplorerParameters(parameters, action, path, 0);
+            if (!resolved) action = DirectShellAction::Unsupported;
+            return resolved;
         }
 
         // Direct folder / folder-shortcut open requires no extra parameters.
@@ -529,62 +554,312 @@ bool ResolveDirectShellExecuteExATarget(const SHELLEXECUTEINFOA& info,
     }
 }
 
+namespace {
+struct NativeShellError {
+    DWORD value = GetLastError();
+    ~NativeShellError() { SetLastError(value); }
+};
+bool NativeBrowseArguments(pulse::DirectRevealResult result, LPCWSTR verb, LPCWSTR file,
+    LPCWSTR parameters, LPCWSTR directory, std::wstring& explorer, std::wstring& arguments, browse::Request& request) noexcept {
+    if (result != pulse::DirectRevealResult::Rejected && result != pulse::DirectRevealResult::Indeterminate &&
+        result != pulse::DirectRevealResult::Unsupported) return false;
+    try {
+        DirectShellAction action = DirectShellAction::None;
+        std::wstring path;
+        if (!ResolveDirectShellTarget(verb, file, parameters, directory, action, path) ||
+            (action != DirectShellAction::OpenFolder && action != DirectShellAction::Reveal)) return false;
+        explorer = SystemExplorerPath();
+        if (explorer.empty()) return false;
+        request = {action == DirectShellAction::Reveal ? browse::Intent::Reveal : browse::Intent::OpenFolder, path};
+        arguments = (action == DirectShellAction::Reveal ? L"/select, " : L"") + explorer_launch::Quote(path);
+        return true;
+    } catch (...) { return false; }
+}
+bool WideToAnsiLossless(const std::wstring& wide, std::string& ansi) noexcept {
+    try {
+        const UINT page = GetACP();
+        const DWORD flags = page == CP_UTF8 ? WC_ERR_INVALID_CHARS : WC_NO_BEST_FIT_CHARS;
+        BOOL replaced = FALSE;
+        BOOL* used_default = page == CP_UTF8 ? nullptr : &replaced;
+        const int bytes = WideCharToMultiByte(page, flags, wide.c_str(), -1, nullptr, 0, nullptr, used_default);
+        if (bytes <= 0 || replaced) return false;
+        ansi.resize(static_cast<size_t>(bytes));
+        if (WideCharToMultiByte(page, flags, wide.c_str(), -1, ansi.data(), bytes, nullptr, used_default) != bytes || replaced) return false;
+        std::wstring roundtrip;
+        if (!AnsiToWide(ansi.c_str(), roundtrip) || roundtrip != wide) return false;
+        ansi.resize(static_cast<size_t>(bytes - 1));
+        return true;
+    } catch (...) { return false; }
+}
+bool NativeBrowseArgumentsA(pulse::DirectRevealResult result, LPCSTR verb, LPCSTR file,
+    LPCSTR parameters, LPCSTR directory, std::string& explorer, std::string& arguments, browse::Request& request) noexcept {
+    try {
+        std::wstring wverb, wfile, wparams, wdir, image, command;
+        if (!AnsiToWide(verb, wverb) || !AnsiToWide(file, wfile) || !AnsiToWide(parameters, wparams) || !AnsiToWide(directory, wdir)) return false;
+        return NativeBrowseArguments(result, verb ? wverb.c_str() : nullptr, file ? wfile.c_str() : nullptr,
+            parameters ? wparams.c_str() : nullptr, directory ? wdir.c_str() : nullptr, image, command, request) &&
+            WideToAnsiLossless(image, explorer) && WideToAnsiLossless(command, arguments);
+    } catch (...) { return false; }
+}
+bool NativeBrowseExArguments(pulse::DirectRevealResult result, const SHELLEXECUTEINFOW* info,
+    std::wstring& explorer, std::wstring& arguments, browse::Request& request) noexcept {
+    if (!info || info->cbSize != sizeof(*info)) return false;
+    // These masks override lpFile or its class. Keeping their native contract is
+    // incompatible with targeting a different image, even for a filesystem PIDL.
+    if (info->fMask & (SEE_MASK_IDLIST | SEE_MASK_CLASSNAME | SEE_MASK_CLASSKEY)) return false;
+    try {
+        std::wstring expanded;
+        LPCWSTR file = info->lpFile;
+        if (file && (info->fMask & SEE_MASK_DOENVSUBST) && wcschr(file, L'%')) {
+            if (!ExpandEnvIfNeeded(file, expanded)) return false;
+            file = expanded.c_str();
+        }
+        return NativeBrowseArguments(result, info->lpVerb, file, info->lpParameters, info->lpDirectory, explorer, arguments, request);
+    } catch (...) { return false; }
+}
+bool NativeBrowseExArgumentsA(pulse::DirectRevealResult result, const SHELLEXECUTEINFOA* info,
+    std::string& explorer, std::string& arguments, browse::Request& request) noexcept {
+    if (!info || info->cbSize != sizeof(*info)) return false;
+    try {
+        std::wstring verb, file, parameters, directory, image, command;
+        if (!AnsiToWide(info->lpVerb, verb) || !AnsiToWide(info->lpFile, file) ||
+            !AnsiToWide(info->lpParameters, parameters) || !AnsiToWide(info->lpDirectory, directory)) return false;
+        SHELLEXECUTEINFOW wide{};
+        wide.cbSize = sizeof(wide); wide.fMask = info->fMask;
+        wide.lpVerb = info->lpVerb ? verb.c_str() : nullptr; wide.lpFile = info->lpFile ? file.c_str() : nullptr;
+        wide.lpParameters = info->lpParameters ? parameters.c_str() : nullptr;
+        wide.lpDirectory = info->lpDirectory ? directory.c_str() : nullptr;
+        return NativeBrowseExArguments(result, &wide, image, command, request) &&
+            WideToAnsiLossless(image, explorer) && WideToAnsiLossless(command, arguments);
+    } catch (...) { return false; }
+}
+}
+HINSTANCE FallbackShellExecuteW(pulse::DirectRevealResult result, decltype(&::ShellExecuteW) original_call,
+    HWND window, LPCWSTR verb, LPCWSTR file, LPCWSTR parameters, LPCWSTR directory, INT show) noexcept {
+    NativeShellError error;
+    native_browse::Launch native_fallback;
+    browse::Request request;
+    std::wstring image, arguments;
+    const bool redirect = NativeBrowseArguments(result, verb, file, parameters, directory, image, arguments, request);
+    if (!request.path.empty()) native_fallback.Prepare(request);
+    SetLastError(error.value);
+    const auto answer = original_call(window, redirect ? L"open" : verb, redirect ? image.c_str() : file,
+        redirect ? arguments.c_str() : parameters, directory, show);
+    error.value = GetLastError();
+    native_fallback.Complete(reinterpret_cast<INT_PTR>(answer) > 32);
+    return answer;
+}
+HINSTANCE FallbackShellExecuteA(pulse::DirectRevealResult result, decltype(&::ShellExecuteA) original_call,
+    HWND window, LPCSTR verb, LPCSTR file, LPCSTR parameters, LPCSTR directory, INT show) noexcept {
+    NativeShellError error;
+    native_browse::Launch native_fallback;
+    browse::Request request;
+    std::string image, arguments;
+    const bool redirect = NativeBrowseArgumentsA(result, verb, file, parameters, directory, image, arguments, request);
+    if (!request.path.empty()) native_fallback.Prepare(request);
+    SetLastError(error.value);
+    const auto answer = original_call(window, redirect ? "open" : verb, redirect ? image.c_str() : file,
+        redirect ? arguments.c_str() : parameters, directory, show);
+    error.value = GetLastError();
+    native_fallback.Complete(reinterpret_cast<INT_PTR>(answer) > 32);
+    return answer;
+}
+BOOL FallbackShellExecuteExW(pulse::DirectRevealResult result, decltype(&::ShellExecuteExW) original_call,
+    SHELLEXECUTEINFOW* info) noexcept {
+    NativeShellError error;
+    native_browse::Launch native_fallback;
+    browse::Request request;
+    std::wstring image, arguments;
+    const bool redirect = NativeBrowseExArguments(result, info, image, arguments, request);
+    if (!redirect && result != pulse::DirectRevealResult::NotHandled && info) {
+        DirectShellAction action = DirectShellAction::None;
+        std::wstring path;
+        if (ResolveDirectShellExecuteExTarget(*info, action, path) &&
+            (action == DirectShellAction::OpenFolder || action == DirectShellAction::Reveal)) {
+            request = {action == DirectShellAction::Reveal ? browse::Intent::Reveal : browse::Intent::OpenFolder, std::move(path)};
+        }
+    }
+    SHELLEXECUTEINFOW copy{};
+    if (redirect) { copy = *info; copy.lpVerb = L"open"; copy.lpFile = image.c_str(); copy.lpParameters = arguments.c_str(); }
+    if (!request.path.empty()) native_fallback.Prepare(request);
+    SetLastError(error.value);
+    const BOOL answer = original_call(redirect ? &copy : info);
+    error.value = GetLastError();
+    native_fallback.Complete(answer != FALSE);
+    if (redirect) { info->hInstApp = copy.hInstApp; info->hProcess = copy.hProcess; }
+    return answer;
+}
+BOOL FallbackShellExecuteExA(pulse::DirectRevealResult result, decltype(&::ShellExecuteExA) original_call,
+    SHELLEXECUTEINFOA* info) noexcept {
+    NativeShellError error;
+    native_browse::Launch native_fallback;
+    browse::Request request;
+    std::string image, arguments;
+    const bool redirect = NativeBrowseExArgumentsA(result, info, image, arguments, request);
+    if (!redirect && result != pulse::DirectRevealResult::NotHandled && info) {
+        DirectShellAction action = DirectShellAction::None;
+        std::wstring path;
+        if (ResolveDirectShellExecuteExATarget(*info, action, path) &&
+            (action == DirectShellAction::OpenFolder || action == DirectShellAction::Reveal)) {
+            request = {action == DirectShellAction::Reveal ? browse::Intent::Reveal : browse::Intent::OpenFolder, std::move(path)};
+        }
+    }
+    SHELLEXECUTEINFOA copy{};
+    if (redirect) { copy = *info; copy.lpVerb = "open"; copy.lpFile = image.c_str(); copy.lpParameters = arguments.c_str(); }
+    if (!request.path.empty()) native_fallback.Prepare(request);
+    SetLastError(error.value);
+    const BOOL answer = original_call(redirect ? &copy : info);
+    error.value = GetLastError();
+    native_fallback.Complete(answer != FALSE);
+    if (redirect) { info->hInstApp = copy.hInstApp; info->hProcess = copy.hProcess; }
+    return answer;
+}
+
+HRESULT FallbackDirectRevealPidl(decltype(&::SHOpenFolderAndSelectItems) original_call,
+    PCIDLIST_ABSOLUTE folder, UINT count, PCUITEMID_CHILD_ARRAY children, DWORD flags) noexcept {
+    NativeShellError error;
+    native_browse::Launch native_fallback;
+    try {
+        std::wstring path;
+        if (DirectRevealPath(folder, count, children, 0, path)) {
+            native_fallback.Prepare({browse::Intent::Reveal, path});
+        } else if (count > 1 && folder) {
+            path.resize(32768);
+            if (SHGetPathFromIDListEx(folder, path.data(), static_cast<DWORD>(path.size()), GPFIDL_DEFAULT)) {
+                path.resize(wcslen(path.c_str()));
+                native_fallback.Prepare({browse::Intent::OpenFolder, path});
+            }
+        }
+    } catch (...) {}
+    SetLastError(error.value);
+    const HRESULT result = original_call(folder, count, children, flags);
+    error.value = GetLastError();
+    native_fallback.Complete(SUCCEEDED(result));
+    return result;
+}
+
+pulse::DirectRevealResult DefaultDirectRevealSend(const std::wstring& path, DWORD timeout) noexcept {
+    try { return explorer_process::SubmitBrowse({browse::Intent::Reveal, path}, timeout); }
+    catch (...) { return pulse::DirectRevealResult::Rejected; }
+}
+pulse::DirectRevealResult DefaultDirectOpenFolderSend(const std::wstring& path, DWORD timeout) noexcept {
+    try { return explorer_process::SubmitBrowse({browse::Intent::OpenFolder, path}, timeout); }
+    catch (...) { return pulse::DirectRevealResult::Rejected; }
+}
+namespace {
+bool BrowseVerb(const wchar_t* verb) noexcept {
+    return !verb || !*verb || _wcsicmp(verb, L"open") == 0 || _wcsicmp(verb, L"explore") == 0;
+}
+bool ExplicitBrowseIntent(const wchar_t* verb, const wchar_t* file, const wchar_t* parameters,
+    const wchar_t* directory) noexcept {
+    if (!file || !*file || !BrowseVerb(verb)) return false;
+    if (verb && _wcsicmp(verb, L"explore") == 0) return true;
+    if (IsSystemExplorerFile(file, directory))
+        return parameters && !TrimWhitespace(parameters).empty(); // no-args Explorer may create the desktop shell
+    if (StartsWithInsensitive(file, L"shell:") || StartsWithInsensitive(file, L"::{")) return true;
+    // A folder/shortcut with extra arguments is still browsing, but unsupported.
+    if (parameters && !TrimWhitespace(parameters).empty()) {
+        DirectShellAction action = DirectShellAction::None;
+        std::wstring path;
+        if (ResolveDirectShellTarget(verb, file, nullptr, directory, action, path) ||
+            action == DirectShellAction::Unsupported) return true;
+    }
+    return false;
+}
+pulse::DirectRevealResult DispatchWide(LPCWSTR verb, LPCWSTR file, LPCWSTR parameters, LPCWSTR directory,
+    INT show, bool supported_contract, DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
+    if (!BrowseVerb(verb)) return pulse::DirectRevealResult::NotHandled;
+    DirectShellAction action = DirectShellAction::None;
+    std::wstring path;
+    if (!ResolveDirectShellTarget(verb, file, parameters, directory, action, path)) {
+        return action == DirectShellAction::Unsupported || ExplicitBrowseIntent(verb, file, parameters, directory)
+            ? pulse::DirectRevealResult::Unsupported : pulse::DirectRevealResult::NotHandled;
+    }
+    if (!supported_contract || show == SW_HIDE) return pulse::DirectRevealResult::Unsupported;
+    return SendAction(action, path, reveal_sender, open_sender);
+}
+pulse::DirectRevealResult DispatchExWide(const SHELLEXECUTEINFOW* info,
+    DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
+    if (!info || info->cbSize != sizeof(*info) || !BrowseVerb(info->lpVerb)) return pulse::DirectRevealResult::NotHandled;
+    try {
+        const bool supported_contract = (info->fMask & ~kSafeExecuteExMask) == 0;
+        if ((info->fMask & SEE_MASK_IDLIST) && info->lpIDList) {
+            std::wstring path(32768, L'\0');
+            if (!SHGetPathFromIDListEx(reinterpret_cast<PCIDLIST_ABSOLUTE>(info->lpIDList), path.data(),
+                    static_cast<DWORD>(path.size()), GPFIDL_DEFAULT)) return pulse::DirectRevealResult::Unsupported;
+            path.resize(wcslen(path.c_str()));
+            return DispatchWide(info->lpVerb, path.c_str(), info->lpParameters, info->lpDirectory,
+                info->nShow, supported_contract, reveal_sender, open_sender);
+        }
+        std::wstring expanded;
+        const wchar_t* file = info->lpFile;
+        if (file && (info->fMask & SEE_MASK_DOENVSUBST) && wcschr(file, L'%')) {
+            if (!ExpandEnvIfNeeded(file, expanded)) return pulse::DirectRevealResult::Unsupported;
+            file = expanded.c_str();
+        }
+        return DispatchWide(info->lpVerb, file, info->lpParameters, info->lpDirectory,
+            info->nShow, supported_contract, reveal_sender, open_sender);
+    } catch (...) { return pulse::DirectRevealResult::Rejected; }
+}
+}
 pulse::DirectRevealResult DispatchDirectRevealPidl(PCIDLIST_ABSOLUTE folder, UINT count,
     PCUITEMID_CHILD_ARRAY children, DWORD flags, DirectRevealSender reveal_sender) noexcept {
     ReentrancyGuard guard;
-    if (!guard.entered || ShiftHeld()) return pulse::DirectRevealResult::Rejected;
+    if (explorer_process::NativeFallbackActive() || !guard.entered || ShiftHeld()) return pulse::DirectRevealResult::NotHandled;
     std::wstring path;
     return DirectRevealPath(folder, count, children, flags, path)
         ? SendAction(DirectShellAction::Reveal, path, reveal_sender, nullptr)
-        : pulse::DirectRevealResult::Rejected;
+        : pulse::DirectRevealResult::Unsupported;
 }
-
 pulse::DirectRevealResult DispatchDirectShellExecuteW(LPCWSTR verb, LPCWSTR file, LPCWSTR parameters,
     LPCWSTR directory, INT show, DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
     ReentrancyGuard guard;
-    if (!guard.entered || show == SW_HIDE || ShiftHeld()) return pulse::DirectRevealResult::Rejected;
-    DirectShellAction action = DirectShellAction::None;
-    std::wstring path;
-    if (!ResolveDirectShellTarget(verb, file, parameters, directory, action, path))
-        return pulse::DirectRevealResult::Rejected;
-    return SendAction(action, path, reveal_sender, open_sender);
+    if (explorer_process::NativeFallbackActive() || !guard.entered || ShiftHeld()) return pulse::DirectRevealResult::NotHandled;
+    return DispatchWide(verb, file, parameters, directory, show, true, reveal_sender, open_sender);
 }
-
 pulse::DirectRevealResult DispatchDirectShellExecuteExW(const SHELLEXECUTEINFOW* info,
     DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
     ReentrancyGuard guard;
-    if (!guard.entered || !info || ShiftHeld()) return pulse::DirectRevealResult::Rejected;
-    DirectShellAction action = DirectShellAction::None;
-    std::wstring path;
-    if (!ResolveDirectShellExecuteExTarget(*info, action, path))
-        return pulse::DirectRevealResult::Rejected;
-    return SendAction(action, path, reveal_sender, open_sender);
+    if (explorer_process::NativeFallbackActive() || !guard.entered || ShiftHeld()) return pulse::DirectRevealResult::NotHandled;
+    return DispatchExWide(info, reveal_sender, open_sender);
 }
-
 pulse::DirectRevealResult DispatchDirectShellExecuteA(LPCSTR verb, LPCSTR file, LPCSTR parameters,
     LPCSTR directory, INT show, DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
     ReentrancyGuard guard;
-    if (!guard.entered || show == SW_HIDE || ShiftHeld()) return pulse::DirectRevealResult::Rejected;
-    DirectShellAction action = DirectShellAction::None;
-    std::wstring path;
-    if (!ResolveDirectShellExecuteATarget(verb, file, parameters, directory, action, path))
-        return pulse::DirectRevealResult::Rejected;
-    return SendAction(action, path, reveal_sender, open_sender);
+    if (explorer_process::NativeFallbackActive() || !guard.entered || ShiftHeld()) return pulse::DirectRevealResult::NotHandled;
+    try {
+        std::wstring wverb, wfile, wparams, wdir;
+        if (!AnsiToWide(verb, wverb) || !AnsiToWide(file, wfile) || !AnsiToWide(parameters, wparams) || !AnsiToWide(directory, wdir))
+            return pulse::DirectRevealResult::NotHandled;
+        return DispatchWide(verb ? wverb.c_str() : nullptr, file ? wfile.c_str() : nullptr,
+            parameters ? wparams.c_str() : nullptr, directory ? wdir.c_str() : nullptr, show, true, reveal_sender, open_sender);
+    } catch (...) { return pulse::DirectRevealResult::Rejected; }
 }
-
 pulse::DirectRevealResult DispatchDirectShellExecuteExA(const SHELLEXECUTEINFOA* info,
     DirectRevealSender reveal_sender, DirectRevealSender open_sender) noexcept {
     ReentrancyGuard guard;
-    if (!guard.entered || !info || ShiftHeld()) return pulse::DirectRevealResult::Rejected;
-    DirectShellAction action = DirectShellAction::None;
-    std::wstring path;
-    if (!ResolveDirectShellExecuteExATarget(*info, action, path))
-        return pulse::DirectRevealResult::Rejected;
-    return SendAction(action, path, reveal_sender, open_sender);
+    if (explorer_process::NativeFallbackActive() || !guard.entered || ShiftHeld() || !info || info->cbSize != sizeof(*info)) return pulse::DirectRevealResult::NotHandled;
+    try {
+        std::wstring verb, file, params, dir;
+        if (!AnsiToWide(info->lpVerb, verb) || !AnsiToWide(info->lpFile, file) ||
+            !AnsiToWide(info->lpParameters, params) || !AnsiToWide(info->lpDirectory, dir)) return pulse::DirectRevealResult::NotHandled;
+        SHELLEXECUTEINFOW wide{};
+        wide.cbSize = sizeof(wide); wide.fMask = info->fMask; wide.nShow = info->nShow;
+        wide.lpVerb = info->lpVerb ? verb.c_str() : nullptr;
+        wide.lpFile = info->lpFile ? file.c_str() : nullptr;
+        wide.lpParameters = info->lpParameters ? params.c_str() : nullptr;
+        wide.lpDirectory = info->lpDirectory ? dir.c_str() : nullptr;
+        wide.lpIDList = info->lpIDList;
+        return DispatchExWide(&wide, reveal_sender, open_sender);
+    } catch (...) { return pulse::DirectRevealResult::Rejected; }
 }
 
 bool IsDirectRevealHookInstalled() noexcept {
     return installed_flag.load(std::memory_order_acquire);
+}
+
+bool IsExplorerProcessHookInstalled() noexcept {
+    return installed_flag.load(std::memory_order_acquire) && explorer_process::IsReady();
 }
 
 LONG InstallDirectRevealHook(HMODULE owner, DirectRevealGate gate, DirectRevealObserver observer, DirectRevealSender sender, pulse::DirectRevealInstallDiagnostic* diagnostic, DirectRevealSender open_sender) noexcept {
@@ -601,11 +876,17 @@ LONG InstallDirectRevealHook(HMODULE owner, DirectRevealGate gate, DirectRevealO
         const DirectRevealSender effective_open = open_sender ? open_sender :
             (sender == &DefaultDirectRevealSend ? &DefaultDirectOpenFolderSend : nullptr);
         open_send.store(effective_open, std::memory_order_release);
-        if (installed_flag.load(std::memory_order_acquire)) { enabled.store(gate, std::memory_order_release); return NO_ERROR; }
+        if (installed_flag.load(std::memory_order_acquire)) {
+            enabled.store(gate, std::memory_order_release);
+            (void)explorer_process::Configure(owner, ProcessRouteEnabled);
+            return NO_ERROR;
+        }
         diagnostic->stage = 2;
         HMODULE pinned = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
             reinterpret_cast<LPCWSTR>(&Reveal), &pinned) || pinned != owner) return finish(ERROR_INVALID_HANDLE);
+        // Missing/untrusted bridge disables only process routing; Shell hooks remain available.
+        (void)explorer_process::Configure(owner, ProcessRouteEnabled);
         Threads threads;
         diagnostic->stage = 3;
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
@@ -641,6 +922,7 @@ LONG InstallDirectRevealHook(HMODULE owner, DirectRevealGate gate, DirectRevealO
         if (status == NO_ERROR) { diagnostic->stage = 9; status = DetourAttach(reinterpret_cast<PVOID*>(&original_execute), reinterpret_cast<PVOID>(&Execute)); }
         if (status == NO_ERROR) { diagnostic->stage = 10; status = DetourAttach(reinterpret_cast<PVOID*>(&original_execute_ex_a), reinterpret_cast<PVOID>(&ExecuteExA)); }
         if (status == NO_ERROR) { diagnostic->stage = 11; status = DetourAttach(reinterpret_cast<PVOID*>(&original_execute_a), reinterpret_cast<PVOID>(&ExecuteA)); }
+        if (status == NO_ERROR) { diagnostic->stage = 13; status = DetourAttach(reinterpret_cast<PVOID*>(&original_create_process), reinterpret_cast<PVOID>(&CreateExplorerProcess)); }
         if (status == NO_ERROR) { diagnostic->stage = 12; status = DetourTransactionCommit(); }
         else DetourTransactionAbort();
         if (status == NO_ERROR) { installed_flag.store(true, std::memory_order_release); enabled.store(gate, std::memory_order_release); }

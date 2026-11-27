@@ -19,6 +19,7 @@ inline constexpr uint32_t kSinkShell32Browse          = 0x00000010u; // shell32!
 inline constexpr uint32_t kSinkShell32DirectReveal    = 0x00000020u; // shell32!SHOpenFolderAndSelectItems + ShellExecute*
 inline constexpr uint32_t kSinkCombaseWinRtFactory    = 0x00000040u; // combase!RoGetActivationFactory
 inline constexpr uint32_t kSinkCombaseWinRtActivate   = 0x00000080u; // combase!RoActivateInstance
+inline constexpr uint32_t kSinkKernel32CreateProcessW = 0x00000100u; // kernel32!CreateProcessW
 
 inline constexpr uint32_t kSinkGroupComDlgAll =
     kSinkComDlgClassObject | kSinkComDlgOpenSaveW | kSinkComDlgOpenSaveA | kSinkComDlgExtendedError;
@@ -27,7 +28,7 @@ inline constexpr uint32_t kSinkGroupShell32All =
 inline constexpr uint32_t kSinkGroupCombaseAll =
     kSinkCombaseWinRtFactory | kSinkCombaseWinRtActivate;
 inline constexpr uint32_t kSinkGroupAll =
-    kSinkGroupComDlgAll | kSinkGroupShell32All | kSinkGroupCombaseAll;
+    kSinkGroupComDlgAll | kSinkGroupShell32All | kSinkGroupCombaseAll | kSinkKernel32CreateProcessW;
 
 using ComDlgGetClassObjectFn = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
 using GetOpenFileNameWFn = BOOL (WINAPI*)(LPOPENFILENAMEW);
@@ -42,6 +43,7 @@ using ShellExecuteWFn = HINSTANCE (WINAPI*)(HWND, LPCWSTR, LPCWSTR, LPCWSTR, LPC
 using ShellExecuteExWFn = BOOL (WINAPI*)(SHELLEXECUTEINFOW*);
 using ShellExecuteAFn = HINSTANCE (WINAPI*)(HWND, LPCSTR, LPCSTR, LPCSTR, LPCSTR, INT);
 using ShellExecuteExAFn = BOOL (WINAPI*)(SHELLEXECUTEINFOA*);
+using CreateProcessWFn = decltype(&::CreateProcessW);
 using RoGetActivationFactoryFn = HRESULT (WINAPI*)(HSTRING, REFIID, void**);
 using RoActivateInstanceFn = HRESULT (WINAPI*)(HSTRING, IInspectable**);
 
@@ -70,6 +72,10 @@ struct SinkCallbacks {
     std::function<HINSTANCE(HWND hwnd, LPCSTR verb, LPCSTR file, LPCSTR params, LPCSTR dir, INT show,
                             ShellExecuteAFn original)> on_shell_execute_a;
     std::function<BOOL(SHELLEXECUTEINFOA* info, ShellExecuteExAFn original)> on_shell_execute_ex_a;
+
+    std::function<BOOL(LPCWSTR app, LPWSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
+                       BOOL inherit, DWORD flags, LPVOID env, LPCWSTR cwd, LPSTARTUPINFOW startup,
+                       LPPROCESS_INFORMATION pi, CreateProcessWFn original)> on_create_process_w;
 
     std::function<HRESULT(HSTRING class_id, REFIID iid, void** factory,
                           RoGetActivationFactoryFn original)> on_ro_get_activation_factory;

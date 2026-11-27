@@ -4,4 +4,5 @@ EXPORTS
     DllCanUnloadNow PRIVATE
     PulseInitializeDirectReveal
     PulseIsDirectRevealInstalled
+    PulseIsExplorerProcessInstalled
     PulseDialogCoreQueryV1

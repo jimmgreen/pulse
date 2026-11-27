@@ -1,6 +1,7 @@
 #include "runtime_child_process.h"
 #include "runtime_child_session.h"
 #include "runtime_child_injection.h"
+#include "explorer_process_route.h"
 #include <atomic>
 #include <memory>
 namespace pulse::shell_bridge::runtime {
@@ -227,14 +228,18 @@ BOOL RouteChildCreation(ChildCallEntry entry, void* context, ChildNativeCall inv
 BOOL WINAPI HookCreateProcessW(LPCWSTR application, LPWSTR command, LPSECURITY_ATTRIBUTES process_attributes,
     LPSECURITY_ATTRIBUTES thread_attributes, BOOL inherit_handles, DWORD flags, LPVOID environment,
     LPCWSTR directory, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION information) noexcept {
+    BOOL redirected = FALSE;
+    if (explorer_process::TryRoute(original_create_process, application, command, process_attributes,
+        thread_attributes, inherit_handles, flags, environment, directory, startup, information, redirected)) return redirected;
     struct Arguments {
         LPCWSTR application; LPWSTR command; LPSECURITY_ATTRIBUTES process_attributes, thread_attributes;
         BOOL inherit; LPCWSTR directory; LPSTARTUPINFOW startup; LPPROCESS_INFORMATION information;
     } args{application, command, process_attributes, thread_attributes, inherit_handles, directory, startup, information};
     const auto invoke = [](void* opaque, DWORD call_flags, LPVOID call_environment) noexcept -> BOOL {
         const auto& a = *static_cast<Arguments*>(opaque);
-        return original_create_process(a.application, a.command, a.process_attributes, a.thread_attributes,
-            a.inherit, call_flags, call_environment, a.directory, a.startup, a.information);
+        return explorer_process::FallbackCreateProcess(original_create_process, a.application, a.command,
+            a.process_attributes, a.thread_attributes, a.inherit, call_flags, call_environment,
+            a.directory, a.startup, a.information);
     };
     return RouteChildCreation(ChildCallEntry::CreateProcessW, &args, invoke, nullptr, flags, environment, startup, information);
 }

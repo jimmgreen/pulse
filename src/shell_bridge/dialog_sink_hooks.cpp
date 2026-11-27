@@ -67,6 +67,7 @@ ShellExecuteExWFn g_orig_shell_execute_ex_w = nullptr;
 ShellExecuteAFn g_orig_shell_execute_a = nullptr;
 ShellExecuteExAFn g_orig_shell_execute_ex_a = nullptr;
 
+CreateProcessWFn g_orig_create_process_w = nullptr;
 RoGetActivationFactoryFn g_orig_ro_factory = nullptr;
 RoActivateInstanceFn g_orig_ro_activate = nullptr;
 
@@ -206,6 +207,30 @@ BOOL WINAPI HookShellExecuteExA(SHELLEXECUTEINFOA* info) {
     try { return cb->on_shell_execute_ex_a(info, orig); } catch (...) { return orig(info); }
 }
 
+BOOL WINAPI HookCreateProcessW(LPCWSTR app, LPWSTR cmd, LPSECURITY_ATTRIBUTES pa, LPSECURITY_ATTRIBUTES ta,
+    BOOL inherit, DWORD flags, LPVOID env, LPCWSTR cwd, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION pi) {
+    const DWORD incoming = GetLastError();
+    const auto orig = g_orig_create_process_w;
+    if (!orig) { SetLastError(ERROR_PROC_NOT_FOUND); return FALSE; }
+    struct LastError {
+        DWORD value;
+        ~LastError() { SetLastError(value); }
+    } error{incoming};
+    const auto cb = LoadCallbacks();
+    if (cb && cb->on_create_process_w) {
+        SetLastError(incoming);
+        try {
+            const BOOL result = cb->on_create_process_w(app, cmd, pa, ta, inherit, flags, env, cwd, startup, pi, orig);
+            error.value = GetLastError();
+            return result;
+        } catch (...) {}
+    }
+    SetLastError(incoming);
+    const BOOL result = orig(app, cmd, pa, ta, inherit, flags, env, cwd, startup, pi);
+    error.value = GetLastError();
+    return result;
+}
+
 HRESULT WINAPI HookRoGetActivationFactory(HSTRING class_id, REFIID iid, void** factory) {
     const auto orig = g_orig_ro_factory;
     if (!orig) return E_FAIL;
@@ -274,9 +299,10 @@ bool TryAttachExport(HMODULE mod, const char* name, Fn& orig_slot, Fn hook_fn, u
 template <typename Fn>
 void TryDetachSlot(Fn& orig_slot, Fn hook_fn) noexcept {
     if (!orig_slot) return;
-    if (DetourDetach(reinterpret_cast<PVOID*>(&orig_slot), reinterpret_cast<PVOID>(hook_fn)) == NO_ERROR) {
-        orig_slot = nullptr;
-    }
+    // Do NOT clear orig_slot before DetourTransactionCommit(): Detours writes
+    // the original unhooked target address back into *ppPointer during Commit.
+    // All g_orig_* pointers are cleared after DetourTransactionCommit() succeeds.
+    DetourDetach(reinterpret_cast<PVOID*>(&orig_slot), reinterpret_cast<PVOID>(hook_fn));
 }
 
 // Attaches any missing sink hooks for currently loaded target system DLLs.
@@ -285,6 +311,7 @@ InstallStatus AttachLoadedSinksLockedOuter(bool preload_comdlg32 = false) noexce
     HMODULE cand_comdlg = nullptr;
     HMODULE cand_shell = nullptr;
     HMODULE cand_combase = nullptr;
+    const HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
 
     // Acquire module references outside g_hook_lock so loader lock is never taken under g_hook_lock.
     if ((g_requested_mask & kSinkGroupComDlgAll) && !g_mod_comdlg32) {
@@ -327,7 +354,8 @@ InstallStatus AttachLoadedSinksLockedOuter(bool preload_comdlg32 = false) noexce
     const bool need_shell  = g_mod_shell32 && ((want & kSinkGroupShell32All) & ~active);
     const bool need_combase = g_mod_combase && ((want & kSinkGroupCombaseAll) & ~active);
 
-    if (need_comdlg || need_shell || need_combase) {
+    const bool need_process = kernel && (want & kSinkKernel32CreateProcessW) && !(active & kSinkKernel32CreateProcessW);
+    if (need_comdlg || need_shell || need_combase || need_process) {
         LONG tx = DetourTransactionBegin();
         if (tx == NO_ERROR) {
             tx = DetourUpdateThread(GetCurrentThread());
@@ -368,6 +396,8 @@ InstallStatus AttachLoadedSinksLockedOuter(bool preload_comdlg32 = false) noexce
                     if (ok_sel || ok_sw || ok_exw || ok_sa || ok_exa) added_bits |= kSinkShell32DirectReveal;
                 }
             }
+            if (need_process && TryAttachExport(kernel, "CreateProcessW", g_orig_create_process_w, &HookCreateProcessW, added_count))
+                added_bits |= kSinkKernel32CreateProcessW;
             if (need_combase) {
                 if ((want & kSinkCombaseWinRtFactory) && !(active & kSinkCombaseWinRtFactory)) {
                     if (TryAttachExport(g_mod_combase, "RoGetActivationFactory", g_orig_ro_factory, &HookRoGetActivationFactory, added_count))
@@ -399,6 +429,7 @@ InstallStatus AttachLoadedSinksLockedOuter(bool preload_comdlg32 = false) noexce
                         g_orig_shell_execute_a = nullptr;
                         g_orig_shell_execute_ex_a = nullptr;
                     }
+                    if (added_bits & kSinkKernel32CreateProcessW) g_orig_create_process_w = nullptr;
                     if (added_bits & kSinkCombaseWinRtFactory) g_orig_ro_factory = nullptr;
                     if (added_bits & kSinkCombaseWinRtActivate) g_orig_ro_activate = nullptr;
                     status.error = static_cast<DWORD>(tx);
@@ -601,11 +632,28 @@ DWORD Uninstall() noexcept {
             TryDetachSlot(g_orig_shell_execute_a, &HookShellExecuteA);
             TryDetachSlot(g_orig_shell_execute_ex_a, &HookShellExecuteExA);
 
+            TryDetachSlot(g_orig_create_process_w, &HookCreateProcessW);
             TryDetachSlot(g_orig_ro_factory, &HookRoGetActivationFactory);
             TryDetachSlot(g_orig_ro_activate, &HookRoActivateInstance);
 
             tx = DetourTransactionCommit();
             if (tx == NO_ERROR) {
+                g_orig_comdlg_class_object = nullptr;
+                g_orig_get_open_w = nullptr;
+                g_orig_get_save_w = nullptr;
+                g_orig_get_open_a = nullptr;
+                g_orig_get_save_a = nullptr;
+                g_orig_commdlg_error = nullptr;
+                g_orig_browse_w = nullptr;
+                g_orig_browse_a = nullptr;
+                g_orig_reveal_items = nullptr;
+                g_orig_shell_execute_w = nullptr;
+                g_orig_shell_execute_ex_w = nullptr;
+                g_orig_shell_execute_a = nullptr;
+                g_orig_shell_execute_ex_a = nullptr;
+                g_orig_create_process_w = nullptr;
+                g_orig_ro_factory = nullptr;
+                g_orig_ro_activate = nullptr;
                 g_active_mask.store(0, std::memory_order_release);
                 g_hooked_count.store(0, std::memory_order_release);
             } else {

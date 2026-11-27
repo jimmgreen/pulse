@@ -17,6 +17,27 @@ constexpr USHORT kEventIdProcessStart = 1;
 
 } // namespace
 
+bool ParseProcessStartPayload(uint8_t version, const void* data, uint32_t length,
+                              ProcessStartEvent& out) noexcept {
+    out = {};
+    if (!data) return false;
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    if (version >= 3) {
+        if (length < 36) return false;
+        std::memcpy(&out.pid, bytes + 0, sizeof(uint32_t));
+        std::memcpy(&out.create_time, bytes + 12, sizeof(uint64_t));
+        std::memcpy(&out.parent_pid, bytes + 20, sizeof(uint32_t));
+        std::memcpy(&out.session_id, bytes + 32, sizeof(uint32_t));
+        return true;
+    }
+    if (length < 20) return false;
+    std::memcpy(&out.pid, bytes + 0, sizeof(uint32_t));
+    std::memcpy(&out.create_time, bytes + 4, sizeof(uint64_t));
+    std::memcpy(&out.parent_pid, bytes + 12, sizeof(uint32_t));
+    std::memcpy(&out.session_id, bytes + 16, sizeof(uint32_t));
+    return true;
+}
+
 EtwProcessWatcher::~EtwProcessWatcher() { Stop(); }
 
 void WINAPI EtwProcessWatcher::OnEventRecord(PEVENT_RECORD record) {
@@ -28,18 +49,10 @@ void WINAPI EtwProcessWatcher::OnEventRecord(PEVENT_RECORD record) {
     if (!self->running_.load(std::memory_order_acquire) || !self->callback_) return;
 
     ProcessStartEvent evt{};
-    // ProcessStart (v1/v2/v3) payload starts with:
-    //   uint32_t ProcessID (offset 0)
-    //   uint64_t CreateTime (offset 4)
-    //   uint32_t ParentProcessID (offset 12)
-    //   uint32_t SessionID (offset 16)
-    if (record->UserData && record->UserDataLength >= 20) {
-        const auto* bytes = static_cast<const uint8_t*>(record->UserData);
-        std::memcpy(&evt.pid, bytes + 0, sizeof(uint32_t));
-        std::memcpy(&evt.parent_pid, bytes + 12, sizeof(uint32_t));
-        std::memcpy(&evt.session_id, bytes + 16, sizeof(uint32_t));
-    } else {
+    if (!ParseProcessStartPayload(record->EventHeader.EventDescriptor.Version,
+                                  record->UserData, record->UserDataLength, evt)) {
         evt.pid = record->EventHeader.ProcessId;
+        evt.session_id = 1; // unknown session; let ProcessCandidate verify via ProcessIdToSessionId
     }
 
     if (evt.pid <= 4) return;
@@ -88,23 +101,37 @@ DWORD EtwProcessWatcher::Start(Callback on_process_start, const std::wstring& se
         // Stop any orphaned session of the same name from a prior crash before starting fresh.
         ControlTraceW(0, session_name_.c_str(), props, EVENT_TRACE_CONTROL_STOP);
 
-        std::memset(prop_buf.data(), 0, prop_bytes);
-        props->Wnode.BufferSize = static_cast<ULONG>(prop_bytes);
-        props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
-        props->Wnode.ClientContext = 1;
-        props->LogFileMode = EVENT_TRACE_REAL_TIME_MODE;
-        props->BufferSize = 64;
-        // Let ETW size MinimumBuffers/MaximumBuffers for the host logical CPU count.
-        props->MinimumBuffers = 0;
-        props->MaximumBuffers = 0;
-        props->FlushTimer = 1;
-        props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
-        std::memcpy(prop_buf.data() + props->LoggerNameOffset, session_name_.c_str(), name_bytes);
+        // Process starts are rare. With per-CPU buffers an event can wait in an idle
+        // CPU's partially filled buffer; broker logs showed 10-50 s from process start
+        // to injection on a 20-CPU machine despite FlushTimer=1, so new elevated apps
+        // were injected after their first file dialog. One shared buffer set lets the
+        // flush timer bound delivery; retry without it if the system rejects the mode.
+        const auto start_session = [&](ULONG mode, TRACEHANDLE& session) {
+            std::memset(prop_buf.data(), 0, prop_bytes);
+            props->Wnode.BufferSize = static_cast<ULONG>(prop_bytes);
+            props->Wnode.Flags = WNODE_FLAG_TRACED_GUID;
+            props->Wnode.ClientContext = 1;
+            props->LogFileMode = mode;
+            props->BufferSize = 64;
+            // Let ETW size MinimumBuffers/MaximumBuffers for the host logical CPU count.
+            props->MinimumBuffers = 0;
+            props->MaximumBuffers = 0;
+            props->FlushTimer = 1;
+            props->LoggerNameOffset = sizeof(EVENT_TRACE_PROPERTIES);
+            std::memcpy(prop_buf.data() + props->LoggerNameOffset, session_name_.c_str(), name_bytes);
+            return StartTraceW(&session, session_name_.c_str(), props);
+        };
 
         last_start_stage_ = "start_trace";
         TRACEHANDLE session = 0;
-        ULONG err = StartTraceW(&session, session_name_.c_str(), props);
-        if (err != ERROR_SUCCESS) return err;
+        shared_buffering_ = true;
+        ULONG err = start_session(EVENT_TRACE_REAL_TIME_MODE | EVENT_TRACE_NO_PER_PROCESSOR_BUFFERING, session);
+        if (err == ERROR_INVALID_PARAMETER || err == ERROR_NOT_SUPPORTED) {
+            shared_buffering_ = false;
+            session = 0;
+            err = start_session(EVENT_TRACE_REAL_TIME_MODE, session);
+        }
+        if (err != ERROR_SUCCESS) { shared_buffering_ = false; return err; }
         session_handle_ = static_cast<uint64_t>(session);
 
         last_start_stage_ = "enable_trace_ex2";

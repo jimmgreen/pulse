@@ -13,13 +13,14 @@ namespace pulse::picker_inprocess {
 struct JumpContextOptions {
     std::function<picker_places::Snapshot()> read_places;
     std::wstring history_root;
-    std::wstring pulse_places_file; // Optional isolated places.json source for tests.
     bool enumerate_explorer = true;
 };
 class JumpContext {
 public:
     explicit JumpContext(DWORD process_id, int mode, JumpContextOptions options = {});
     void Accepted(const std::wstring& path);
+    // The user removed this folder from the program's 常用 list: drop it from the history.
+    void Forget(const std::wstring& path);
     std::vector<ui::PickerJumpResult> Search(const std::wstring& query);
     ~JumpContext();
     bool Poll(ui::FolderPickerSpec& spec);

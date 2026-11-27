@@ -58,6 +58,10 @@ bool QueryProcessCreationTime(DWORD pid, uint64_t& creation_time_out) noexcept;
 // Enumerates PIDs running in interactive sessions (SessionId != 0), excluding System/Idle and self.
 std::vector<DWORD> EnumerateInteractiveProcessIds() noexcept;
 
+// Fast interactive-session PID enumeration reusing a caller-owned NtQuerySystemInformation
+// scratch buffer (avoids per-call 1 MB kernel-snapshot allocation and Toolhelp32 overhead).
+std::vector<DWORD> EnumerateInteractiveProcessIdsFast(std::vector<uint8_t>& scratch) noexcept;
+
 // Returns true when `basename` matches critical OS, AV/EDR, anti-cheat, or Pulse self processes.
 bool IsBuiltInExcludedProcess(std::wstring_view basename) noexcept;
 

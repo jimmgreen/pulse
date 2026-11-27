@@ -151,6 +151,27 @@ bool ResolveExistingFallbackDirectory(std::u16string& output) {
     }
     return false;
 }
+bool ResolveExistingAncestorOrFallback(const wchar_t* path, std::u16string& output) {
+    if (path && path[0] && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
+        std::wstring candidate(path);
+        while (candidate.size() > 3 && (candidate.back() == L'\\' || candidate.back() == L'/')) {
+            candidate.pop_back();
+        }
+        while (candidate.size() >= 3) {
+            const DWORD attrs = GetFileAttributesW(candidate.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                candidate.size() <= wire::kMaxStringUnits) {
+                output.assign(candidate.begin(), candidate.end());
+                return true;
+            }
+            if (candidate.size() <= 3) break;
+            const auto slash = candidate.find_last_of(L"\\/");
+            if (slash == std::wstring::npos || slash < 2) break;
+            candidate.resize(slash == 2 ? 3 : slash);
+        }
+    }
+    return ResolveExistingFallbackDirectory(output);
+}
 class FileDialog final : public IFileOpenDialog, public IFileSaveDialog, public IFileDialogCustomize, public IFileDialog2, public IOleWindow, public IObjectWithSite, public IServiceProvider, public IFolderView {
 public:
     FileDialog(DialogFactory factory, ComPtr<IFileDialog> native, ComPtr<IFileDialog2> native2, FileDialogBridgeServices services)
@@ -446,8 +467,12 @@ public:
                 PWSTR path = nullptr;
                 SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
                 const HRESULT folder_hr = native_->GetFolder(&folder);
-                if (SUCCEEDED(folder_hr) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
-                    (attributes & SFGAO_FOLDER)) {
+                HRESULT attrs_hr = E_FAIL;
+                HRESULT display_hr = E_FAIL;
+                if (SUCCEEDED(folder_hr) && folder) {
+                    attrs_hr = folder->GetAttributes(attributes, &attributes);
+                }
+                if (SUCCEEDED(folder_hr) && folder && SUCCEEDED(attrs_hr) && (attributes & SFGAO_FOLDER)) {
                     if (!(attributes & SFGAO_FILESYSTEM)) {
                         ComPtr<IShellItem> library_folder;
                         if (ResolveSingleFolderLibrary(folder.Get(), library_folder) ||
@@ -469,24 +494,67 @@ public:
                             return true;
                         }
                     }
-                    if (((attributes & SFGAO_FILESYSTEM) || c.native_options_supported || computer_ok) &&
-                        SUCCEEDED(folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
-                        std::u16string resolved;
-                        bool copied = false;
-                        const bool stale_mru = !explicit_folder_ && (attributes & SFGAO_FILESYSTEM) && IsStaleLocalDirectory(path);
-                        try { copied = CopyText(path, resolved); }
-                        catch (...) { CoTaskMemFree(path); throw; }
-                        CoTaskMemFree(path);
-                        if (!copied) return false;
-                        if (stale_mru) {
-                            if (!ResolveExistingFallbackDirectory(resolved)) return false;
-                            ObserveNativeReason("initial-folder-stale-mru-fallback");
+                    if ((attributes & SFGAO_FILESYSTEM) || c.native_options_supported || computer_ok) {
+                        display_hr = folder->GetDisplayName(
+                            (attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path);
+                        if (SUCCEEDED(display_hr) && path) {
+                            std::u16string resolved;
+                            bool copied = false;
+                            const bool stale_local = (attributes & SFGAO_FILESYSTEM) && IsStaleLocalDirectory(path);
+                            std::wstring original_path;
+                            try {
+                                copied = CopyText(path, resolved);
+                                if (stale_local && explicit_folder_) original_path.assign(path);
+                            } catch (...) { CoTaskMemFree(path); throw; }
+                            CoTaskMemFree(path);
+                            if (!copied) return false;
+                            if (stale_local) {
+                                if (explicit_folder_) {
+                                    if (!ResolveExistingAncestorOrFallback(original_path.c_str(), resolved)) return false;
+                                    ObserveNativeReason("initial-folder-stale-explicit-fallback");
+                                } else {
+                                    if (!ResolveExistingFallbackDirectory(resolved)) return false;
+                                    ObserveNativeReason("initial-folder-stale-mru-fallback");
+                                }
+                            }
+                            c.resolved_initial_directory = std::move(resolved);
+                            return true;
                         }
-                        c.resolved_initial_directory = std::move(resolved);
-                        return true;
                     }
                 }
                 CoTaskMemFree(path);
+                const bool valid_non_fs_virtual = SUCCEEDED(folder_hr) && folder &&
+                    SUCCEEDED(attrs_hr) && (attributes & SFGAO_FOLDER) && !(attributes & SFGAO_FILESYSTEM);
+                if (!valid_non_fs_virtual) {
+                    std::wstring explicit_hint;
+                    for (auto it = calls_.rbegin(); it != calls_.rend(); ++it) {
+                        if (it->setting == Setting::Folder && it->filesystem_folder && !it->text.empty()) {
+                            explicit_hint.assign(it->text.begin(), it->text.end());
+                            break;
+                        }
+                    }
+                    std::u16string recovered;
+                    if (ResolveExistingAncestorOrFallback(explicit_hint.empty() ? nullptr : explicit_hint.c_str(), recovered)) {
+                        char detail[192]{};
+                        std::snprintf(detail, sizeof(detail),
+                            "initial-folder-recovered-fallback folder_hr=0x%08lX attrs_hr=0x%08lX attrs=0x%08lX display_hr=0x%08lX explicit=%u",
+                            static_cast<unsigned long>(folder_hr), static_cast<unsigned long>(attrs_hr),
+                            static_cast<unsigned long>(attributes), static_cast<unsigned long>(display_hr),
+                            explicit_folder_ ? 1u : 0u);
+                        ObserveNativeReason(detail);
+                        c.resolved_initial_directory = std::move(recovered);
+                        return true;
+                    }
+                }
+                {
+                    char detail[192]{};
+                    std::snprintf(detail, sizeof(detail),
+                        "initial-folder-unavailable folder_hr=0x%08lX attrs_hr=0x%08lX attrs=0x%08lX display_hr=0x%08lX explicit=%u",
+                        static_cast<unsigned long>(folder_hr), static_cast<unsigned long>(attrs_hr),
+                        static_cast<unsigned long>(attributes), static_cast<unsigned long>(display_hr),
+                        explicit_folder_ ? 1u : 0u);
+                    ObserveNativeReason(detail);
+                }
                 return false;
             };
             std::optional<wire::Message> bridge_request;
@@ -900,19 +968,26 @@ public:
         if (call.native_result == S_OK) explicit_folder_ = explicit_set_folder_ = true;
         PWSTR path = nullptr;
         SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
-        if (SUCCEEDED(call.native_result) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
-            (attributes & SFGAO_FOLDER)) {
-            ComPtr<IShellItem> snapshot_folder = folder;
-            if (!(attributes & SFGAO_FILESYSTEM)) {
-                ComPtr<IShellItem> library_folder;
-                if (ResolveSingleFolderLibrary(folder, library_folder) ||
-                    ResolveLibraryPlaceFolder(folder, library_folder)) {
-                    snapshot_folder = std::move(library_folder);
-                    attributes |= SFGAO_FILESYSTEM;
+        if (SUCCEEDED(call.native_result) && folder) {
+            if (SUCCEEDED(folder->GetAttributes(attributes, &attributes)) && (attributes & SFGAO_FOLDER)) {
+                ComPtr<IShellItem> snapshot_folder = folder;
+                if (!(attributes & SFGAO_FILESYSTEM)) {
+                    ComPtr<IShellItem> library_folder;
+                    if (ResolveSingleFolderLibrary(folder, library_folder) ||
+                        ResolveLibraryPlaceFolder(folder, library_folder)) {
+                        snapshot_folder = std::move(library_folder);
+                        attributes |= SFGAO_FILESYSTEM;
+                    }
                 }
-            }
-            if (SUCCEEDED(snapshot_folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
-                try { const bool copied = CopyText(path, call.text); call.filesystem_folder = copied && (attributes & SFGAO_FILESYSTEM); }
+                if (SUCCEEDED(snapshot_folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
+                    try { const bool copied = CopyText(path, call.text); call.filesystem_folder = copied && (attributes & SFGAO_FILESYSTEM); }
+                    catch (...) { CoTaskMemFree(path); MarkNativeOnly("folder-snapshot-allocation"); return E_OUTOFMEMORY; }
+                }
+            } else if (SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path &&
+                       path[0] && path[1] == L':' && (path[2] == L'\\' || path[2] == L'/')) {
+                // Deleted/simple-PIDL filesystem folder where GetAttributes fails: retain its
+                // path as a filesystem folder so Show can safely resolve its existing ancestor.
+                try { call.filesystem_folder = CopyText(path, call.text); }
                 catch (...) { CoTaskMemFree(path); MarkNativeOnly("folder-snapshot-allocation"); return E_OUTOFMEMORY; }
             }
         }

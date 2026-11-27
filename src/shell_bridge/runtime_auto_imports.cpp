@@ -16,11 +16,11 @@ constexpr size_t kMaxImage = 512 * 1024 * 1024, kMaxSlots = 16384;
 // GetProcAddress name after them is never a caller hook; it is handled below.
 constexpr const char* kNames[]{"CoCreateInstance", "CoCreateInstanceEx", "CoGetClassObject", "RoGetActivationFactory",
     "GetOpenFileNameW", "GetSaveFileNameW", "GetOpenFileNameA", "GetSaveFileNameA", "CommDlgExtendedError", "SHBrowseForFolderW", "SHBrowseForFolderA",
-    "SHOpenFolderAndSelectItems", "ShellExecuteW", "ShellExecuteExW", "ShellExecuteA", "ShellExecuteExA", "GetProcAddress"};
+    "SHOpenFolderAndSelectItems", "ShellExecuteW", "ShellExecuteExW", "ShellExecuteA", "ShellExecuteExA", "CreateProcessW", "GetProcAddress"};
 constexpr uint32_t kMasks[]{kCoCreateInstance, kCoCreateInstanceEx, kCoGetClassObject, kRoGetActivationFactory,
     kGetOpenFileNameW, kGetSaveFileNameW, kGetOpenFileNameA, kGetSaveFileNameA, kCommDlgExtendedError, kSHBrowseForFolderW, kSHBrowseForFolderA,
-    kSHOpenFolderAndSelectItems, kShellExecuteW, kShellExecuteExW, kShellExecuteA, kShellExecuteExA, kGetProcAddress};
-constexpr uint32_t kHookCount = 16, kGetProcAddressIndex = 16;
+    kSHOpenFolderAndSelectItems, kShellExecuteW, kShellExecuteExW, kShellExecuteA, kShellExecuteExA, kCreateProcessW, kGetProcAddress};
+constexpr uint32_t kHookCount = static_cast<uint32_t>(kAutoImportHookCount), kGetProcAddressIndex = kHookCount;
 static_assert(std::size(kNames) == kHookCount + 1 && std::size(kMasks) == std::size(kNames));
 // GetProcAddress route. The table is published once per owner module and never
 // changes afterwards (the owner is pinned), so the wrapper reads it lock-free.
@@ -359,15 +359,18 @@ AutoImportResult AutoImportPatch::Install(HMODULE owner, std::span<const AutoImp
         impl_ = std::make_unique<Impl>();
         auto& state = *impl_;
         const auto fail = [&](HRESULT error) { state.result.status = error; return Rollback(); };
-        if (!owner || (hooks.size() != 3 && hooks.size() != 4 && hooks.size() != 11 && hooks.size() != kHookCount)) return fail(E_INVALIDARG);
+        if (!owner || (hooks.size() != 3 && hooks.size() != 4 && hooks.size() != 11 && hooks.size() != 16 && hooks.size() != kHookCount)) return fail(E_INVALIDARG);
+        void* first_replacement = nullptr;
         for (size_t index = 0; index < hooks.size(); ++index) {
             const auto& hook = hooks[index];
-            if (index == 3 && hooks.size() >= 11 && !hook.original && !hook.replacement) continue;
+            if ((hooks.size() == kHookCount || (index == 3 && hooks.size() >= 11)) && !hook.original && !hook.replacement) continue;
             if (!hook.original || !hook.replacement || hook.original == hook.replacement) return fail(E_INVALIDARG);
+            if (!first_replacement) first_replacement = hook.replacement;
         }
+        if (!first_replacement) return fail(E_INVALIDARG);
         HMODULE pinned = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(hooks[0].replacement), &pinned) || pinned != owner) return fail(E_ACCESSDENIED);
+            reinterpret_cast<LPCWSTR>(first_replacement), &pinned) || pinned != owner) return fail(E_ACCESSDENIED);
         for (const auto& hook : hooks) {
             if (!hook.original) continue;
             HMODULE actual = nullptr;

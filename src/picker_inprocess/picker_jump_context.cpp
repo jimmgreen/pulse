@@ -228,19 +228,18 @@ struct JumpContext::State {
     std::atomic<bool> cancelled{false};
     unsigned revision = 0, query_generation = 0;
     std::wstring name, query, completed_query, accepted, last_location;
+    std::vector<std::wstring> forget;
     common::MenuIconRef icon;
     std::vector<ui::PickerOpenFolder> folders;
     std::vector<ui::PickerRecentPlace> recent;
-    std::vector<ui::PickerRecentFile> files;
     int index_status = 0;
     bool history_loaded = false;
-    bool pulse_files = false, search_complete = false;
+    bool search_complete = false;
     uint64_t search_elapsed_ms = 0;
     std::vector<ui::PickerJumpResult> results;
     ui::PickerOptions filter;
     ui::PickerMode mode = ui::PickerMode::Folder;
     picker_places::Snapshot shared;
-    ~State() { for (const auto& file : files) if (file.thumbnail) DeleteObject(file.thumbnail); }
 };
 namespace {
 std::wstring HistoryFile(const std::wstring& executable, int mode, const std::wstring& override_root) {
@@ -256,6 +255,27 @@ std::wstring HistoryFile(const std::wstring& executable, int mode, const std::ws
     uint64_t hash = 14695981039346656037ull;
     for (wchar_t ch : executable) { hash ^= static_cast<uint64_t>(towlower(ch)); hash *= 1099511628211ull; }
     return root + L"\\" + std::to_wstring(hash) + L"-" + std::to_wstring(mode) + L".tsv";
+}
+// The folder's real location, so one folder reached two ways is one history entry:
+// a mapped drive becomes its share path, a junction or subst drive its target,
+// a short 8.3 name the long one. Only for a folder just accepted (it is
+// reachable); any failure keeps the path as given. Called on the worker thread.
+std::wstring CanonicalFolder(const std::wstring& path) {
+    HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return path;
+    std::wstring out(MAX_PATH, L'\0');
+    DWORD length = GetFinalPathNameByHandleW(handle, out.data(), static_cast<DWORD>(out.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    if (length >= out.size() && length < 32768) {
+        out.assign(length + 1, L'\0');
+        length = GetFinalPathNameByHandleW(handle, out.data(), static_cast<DWORD>(out.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    }
+    CloseHandle(handle);
+    if (!length || length >= out.size()) return path;
+    out.resize(length);
+    if (out.rfind(L"\\\\?\\UNC\\", 0) == 0) out = L"\\\\" + out.substr(8);
+    else if (out.rfind(L"\\\\?\\", 0) == 0) out = out.substr(4);
+    return out.empty() ? path : out;
 }
 std::wstring Parent(const std::wstring& path) {
     const auto slash = path.find_last_of(L"\\/");
@@ -307,35 +327,6 @@ std::wstring VisitDate(int64_t seconds, int64_t now = app::JumpHistory::Now()) {
     if (!GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &date, nullptr, text, 96, nullptr)) return {};
     return text;
 }
-struct RecentSource { std::wstring path; int64_t used = 0; bool pulse = false; };
-std::vector<RecentSource> PulseRecentFiles(const JumpContextOptions& options) {
-    std::wstring path = options.pulse_places_file;
-    if (path.empty()) {
-        // Isolated history tests never read the user's real recent files.
-        if (!options.history_root.empty()) return {};
-        PWSTR local = nullptr;
-        if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, nullptr, &local))) return {};
-        path = std::wstring(local) + L"\\Pulse\\places.json"; CoTaskMemFree(local);
-    }
-    std::wstring text;
-    if (!ReadUtf8File(path, text) || !json::ValidConfigObject(text, true)) return {};
-    std::vector<RecentSource> files;
-    json::ForEachElement(json::ExtractArray(text, L"recent_items"), [&](const std::wstring& raw) {
-        if (files.size() >= 100 || json::ExtractString(raw, L"kind") != L"file") return;
-        // Pulse stores extended paths (\\?\C:\...). Shell items and thumbnails reject
-        // them, and they would never match the same file from the dialog's own history:
-        // drop the prefix whenever the plain path still fits.
-        auto file = json::ExtractString(raw, L"path");
-        if (auto plain = path::StripExtendedPathPrefix(file); plain.size() < MAX_PATH) file = std::move(plain);
-        if (!picker_places::detail::DiskPath(file)) return;
-        const auto value = json::ExtractString(raw, L"opened_at");
-        const auto ticks = std::wcstoull(value.c_str(), nullptr, 10);
-        const auto seconds = ticks >= 116444736000000000ULL ? (ticks - 116444736000000000ULL) / 10000000ULL : 0;
-        if (seconds > 253402300799ULL) return;
-        files.push_back({file, static_cast<int64_t>(seconds), true});
-    });
-    return files;
-}
 std::wstring AppCaption(l10n::StringId id, const std::wstring& name) {
     std::wstring text = l10n::Get(id);
     const auto at = text.find(L"{name}");
@@ -368,31 +359,6 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                 const auto history_file = remember ? HistoryFile(executable, mode, options.history_root) : std::wstring{};
                 app::JumpHistory history;
                 if (!history_file.empty()) history.Open(history_file);
-                std::vector<ui::PickerRecentFile> files;
-                const bool file_mode = mode == static_cast<int>(ui::PickerMode::File) || mode == static_cast<int>(ui::PickerMode::Image);
-                bool has_pulse_files = false;
-                if (!history_file.empty() && file_mode) {
-                    app::JumpHistory file_history; file_history.Open(history_file + L".files");
-                    auto ordered = PulseRecentFiles(options);
-                    for (const auto& file : file_history.Top({}, app::JumpHistory::kMaxEntries))
-                        ordered.push_back({file, file_history.LastUsed(file), false});
-                    std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) { return a.used > b.used; });
-                    for (const auto& entry : ordered) {
-                        if (state->cancelled.load()) break;
-                        const auto& file = entry.path;
-                        if (std::any_of(files.begin(), files.end(), [&](const auto& old) { return _wcsicmp(old.path.c_str(), file.c_str()) == 0; })) continue;
-                        WIN32_FILE_ATTRIBUTE_DATA info{};
-                        if (!GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &info) ||
-                            (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-                        const auto date = VisitDate(entry.used);
-                        ui::PickerRecentFile card{file, Parent(path::FriendlyPathText(file)) + (date.empty() ? L"" : L" · " + date), nullptr};
-                        card.attributes = info.dwFileAttributes;
-                        card.modified = (static_cast<uint64_t>(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
-                        card.size = (static_cast<uint64_t>(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
-                        files.push_back(std::move(card));
-                        has_pulse_files = has_pulse_files || entry.pulse;
-                    }
-                }
                 std::vector<ui::PickerRecentPlace> recent;
                 std::wstring last_location;
                 int64_t last_visit = 0;
@@ -406,14 +372,13 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                 }
                 {
                     std::lock_guard lock(state->mutex);
-                    state->name = name; state->folders = folders; state->shared = shared; state->recent = recent; state->files = files;
-                    state->pulse_files = has_pulse_files;
+                    state->name = name; state->folders = folders; state->shared = shared; state->recent = recent;
                     state->last_location = std::move(last_location); state->history_loaded = true; ++state->revision;
                 }
                 // A separate STA isolates hung Explorer providers from search/history.
-                if (options.enumerate_explorer || !files.empty()) {
+                if (options.enumerate_explorer) {
                 if (active_shell_workers.fetch_add(1) < 2) {
-                try { std::thread([state, executable, aumid, files, enumerate_explorer = options.enumerate_explorer] {
+                try { std::thread([state, executable, aumid, enumerate_explorer = options.enumerate_explorer] {
                     struct ShellSlot { ~ShellSlot() { active_shell_workers.fetch_sub(1); } } shell_slot;
                     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
                     struct ComScope { HRESULT hr; ~ComScope() { if (SUCCEEDED(hr)) CoUninitialize(); } } com_scope{com};
@@ -443,17 +408,6 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                         }
                         { std::lock_guard lock(state->mutex); state->icon = std::move(icon); ++state->revision; }
                         if (SUCCEEDED(com) && !state->cancelled.load()) {
-                            for (size_t i = 0; i < std::min<size_t>(files.size(), 32) && !state->cancelled.load(); ++i) {
-                                ComPtr<IShellItemImageFactory> factory;
-                                if (FAILED(SHCreateItemFromParsingName(files[i].path.c_str(), nullptr, IID_PPV_ARGS(&factory)))) continue;
-                                HBITMAP bitmap = nullptr;
-                                HRESULT hr = factory->GetImage({96, 72}, SIIGBF_THUMBNAILONLY | SIIGBF_INCACHEONLY, &bitmap);
-                                if (bitmap) {
-                                    std::lock_guard lock(state->mutex);
-                                    if (SUCCEEDED(hr) && !state->cancelled.load()) { state->files[i].thumbnail = bitmap; ++state->revision; }
-                                    else DeleteObject(bitmap);
-                                }
-                            }
                             auto explorer = enumerate_explorer ? ExplorerFolders(state->cancelled) : std::vector<ui::PickerOpenFolder>{};
                             std::lock_guard lock(state->mutex);
                             for (auto& entry : explorer) Add(state->folders, std::move(entry));
@@ -472,13 +426,35 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                 uint32_t request = 0;
                 std::wstring active_query;
                 std::vector<ui::PickerJumpResult> known;
+                picker_places::Snapshot tray_snapshot;
+                picker_places::RefreshTraySnapshot(tray_snapshot, shared);
                 for (;;) {
                     std::wstring query, accepted;
+                    std::vector<std::wstring> forget;
                     unsigned wanted = 0;
                     {
                         std::unique_lock lock(state->mutex);
-                        state->wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return state->cancelled.load() || !state->accepted.empty() || generation != state->query_generation; });
-                        query = state->query; wanted = state->query_generation; accepted.swap(state->accepted);
+                        state->wake.wait_for(lock, std::chrono::milliseconds(100), [&] { return state->cancelled.load() || !state->accepted.empty() || !state->forget.empty() || generation != state->query_generation; });
+                        query = state->query; wanted = state->query_generation; accepted.swap(state->accepted); forget.swap(state->forget);
+                    }
+                    if (!forget.empty() && !history_file.empty()) {
+                        const auto mutex_name = picker_places::detail::Name() + L".JumpHistory";
+                        HANDLE mutex = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
+                        const DWORD wait = mutex ? WaitForSingleObject(mutex, 1000) : WAIT_FAILED;
+                        if (wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED) {
+                            app::JumpHistory updated; updated.Open(history_file);
+                            for (const auto& path : forget) updated.Remove(path);
+                            ReleaseMutex(mutex);
+                        }
+                        if (mutex) CloseHandle(mutex);
+                        std::lock_guard lock(state->mutex);
+                        const auto before = state->recent.size();
+                        std::erase_if(state->recent, [&](const auto& place) {
+                            return std::any_of(forget.begin(), forget.end(), [&](const auto& path) { return ui::SamePickerPath(place.path, path); });
+                        });
+                        if (std::any_of(forget.begin(), forget.end(), [&](const auto& path) { return ui::SamePickerPath(state->last_location, path); }))
+                            state->last_location.clear();
+                        if (state->recent.size() != before) ++state->revision;
                     }
                     if (!accepted.empty() && !history_file.empty()) {
                         // Re-read while holding a cross-process lock to avoid lost visits.
@@ -489,20 +465,29 @@ JumpContext::JumpContext(DWORD process_id, int mode, JumpContextOptions options)
                             const auto latest = options.read_places ? options.read_places() : picker_places::Read();
                             if (latest.jump_policy_available && latest.remember) {
                                 app::JumpHistory updated; updated.Open(history_file);
-                                const auto directory = mode == static_cast<int>(ui::PickerMode::Folder) ? accepted : Parent(accepted);
+                                const auto directory = CanonicalFolder(mode == static_cast<int>(ui::PickerMode::Folder) ? accepted : Parent(accepted));
                                 if (picker_places::detail::DiskPath(directory)) updated.Record(directory, {});
-                                if (file_mode && picker_places::detail::DiskPath(accepted)) {
-                                    const DWORD attributes = GetFileAttributesW(accepted.c_str());
-                                    if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                                        app::JumpHistory file_history; file_history.Open(history_file + L".files"); file_history.Record(accepted, {});
-                                    }
-                                }
                             }
                             ReleaseMutex(mutex);
                         }
                         if (mutex) CloseHandle(mutex);
                     }
                     if (state->cancelled.load()) break;
+                    // Refresh only memory-backed selection IPC on this worker; Poll never does IPC.
+                    auto selection = options.read_places ? options.read_places() : picker_places::Snapshot{};
+                    if (!options.read_places) { picker_places::ReadSelection(selection); picker_places::ReadTray(tray_snapshot); }
+                    {
+                        std::lock_guard lock(state->mutex);
+                        if (picker_places::RefreshTraySnapshot(state->shared, options.read_places ? selection : tray_snapshot)) ++state->revision;
+                        if (state->shared.selection_available != selection.selection_available ||
+                            state->shared.selected_items != selection.selected_items ||
+                            state->shared.selection_source != selection.selection_source) {
+                            state->shared.selection_available = selection.selection_available;
+                            state->shared.selection_source = selection.selection_source;
+                            state->shared.selected_items = std::move(selection.selected_items);
+                            ++state->revision;
+                        }
+                    }
                     if (wanted != generation) {
                         generation = wanted; active_query = query; known.clear(); query_started = GetTickCount64();
                         if (index_started) client.CancelSession(1);
@@ -561,21 +546,27 @@ bool JumpContext::Poll(ui::FolderPickerSpec& spec) {
     const bool first = revision_ == 0;
     revision_ = state_->revision; filter_index_ = spec.filter_index;
     spec.host_app_name = state_->name; spec.host_app_icon_pixels = state_->icon; spec.open_folders = state_->folders;
+    spec.pulse_tray_available = state_->shared.tray_available;
+    spec.pulse_tray_items = spec.pulse_tray_available ? state_->shared.tray_items : std::vector<picker_places::TrayItem>{};
+    spec.pulse_tray_shelf_id = state_->shared.tray_shelf_id;
+    spec.pulse_tray_shelf_name = state_->shared.tray_shelf_name;
+    spec.pulse_tray_revision = state_->shared.tray_revision;
+    spec.pulse_tray_total_count = state_->shared.tray_total_count;
+    spec.pulse_tray_publisher_pid = state_->shared.tray_publisher_pid;
+    spec.pulse_tray_source = state_->shared.tray_source;
+    spec.pulse_tray_endpoint = state_->shared.endpoint;
+    spec.pulse_tray_endpoint_pid = state_->shared.endpoint_pid;
+    spec.pulse_selection_available = state_->shared.selection_available;
+    spec.pulse_selected_items = state_->shared.selection_available ? state_->shared.selected_items : std::vector<picker_places::SelectedItem>{};
     spec.app_recent_places = state_->recent; spec.jump_index_status = state_->index_status;
     spec.jump_search_query = state_->query;
     spec.jump_search_elapsed_ms = state_->completed_query == state_->query ? state_->search_elapsed_ms : 0;
     spec.jump_search_complete = state_->completed_query == state_->query && state_->search_complete;
-    ui::PickerOptions filter; filter.filters = spec.filters; filter.filter_index = spec.filter_index;
-    spec.recent_files.clear();
-    for (const auto& file : state_->files) {
-        if (spec.recent_files.size() < 8 && ui::PickerMatchesFilter(file.path.substr(file.path.find_last_of(L"\\/") + 1), spec.mode, filter)) spec.recent_files.push_back(file);
-    }
     if (!state_->last_location.empty()) {
         spec.last_location = {state_->last_location, {}, false};
-        spec.last_location_source = AppCaption(l10n::StringId::PickerAppLastLocation, state_->name);
+        spec.last_location_source = AppCaption(state_->mode == ui::PickerMode::Save ?
+            l10n::StringId::PickerAppLastSaveLocation : l10n::StringId::PickerAppLastLocation, state_->name);
     }
-    if (!spec.recent_files.empty())
-        spec.recent_files_caption = AppCaption(state_->pulse_files ? l10n::StringId::PickerRecentFilesFromAppAndPulse : l10n::StringId::PickerRecentFilesFromApp, state_->name);
     if (first && spec.allow_auto_jump && state_->shared.jump_policy_available && state_->shared.auto_jump &&
         picker_places::detail::DiskPath(state_->shared.current) && _wcsicmp(spec.initial_path.c_str(), state_->shared.current.c_str())) {
         spec.auto_jump_from = spec.initial_path; spec.initial_path = state_->shared.current;
@@ -584,6 +575,10 @@ bool JumpContext::Poll(ui::FolderPickerSpec& spec) {
 }
 void JumpContext::Accepted(const std::wstring& path) {
     std::lock_guard lock(state_->mutex); state_->accepted = path; state_->wake.notify_one();
+}
+void JumpContext::Forget(const std::wstring& path) {
+    if (path.empty()) return;
+    std::lock_guard lock(state_->mutex); state_->forget.push_back(path); state_->wake.notify_one();
 }
 std::vector<ui::PickerJumpResult> JumpContext::Search(const std::wstring& query) {
     std::unique_lock lock(state_->mutex, std::try_to_lock);
@@ -602,9 +597,19 @@ std::vector<ui::PickerJumpResult> FilterJumpResults(std::vector<ui::PickerJumpRe
 }
 std::shared_ptr<JumpContext> AttachJumpContext(ui::FolderPickerSpec& spec, DWORD process_id) {
     try {
-        auto context = std::make_shared<JumpContext>(process_id, static_cast<int>(spec.mode));
+        JumpContextOptions options;
+#if defined(PULSE_PICKER_JUMP_UI_TEST_HOOKS)
+        wchar_t test_root[32768]{};
+        const auto length = GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", test_root, static_cast<DWORD>(std::size(test_root)));
+        if (length && length < std::size(test_root)) {
+            options.history_root.assign(test_root, length);
+            options.enumerate_explorer = false;
+        }
+#endif
+        auto context = std::make_shared<JumpContext>(process_id, static_cast<int>(spec.mode), std::move(options));
         spec.poll_jump_context = [context](ui::FolderPickerSpec& target) { return context->Poll(target); };
         spec.jump_search = [context](const std::wstring& query) { return context->Search(query); };
+        spec.forget_recent_place = [context](const std::wstring& path) { context->Forget(path); };
         return context;
     } catch (...) { return {}; }
 }

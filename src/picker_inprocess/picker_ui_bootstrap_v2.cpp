@@ -443,6 +443,9 @@ HRESULT Prepare(const PulsePickerUiV2Config* input, pulse::ui::FolderPickerSpec&
     if (properties) { properties->fields = std::move(fields); properties->Build(spec.custom_controls); }
     spec.mode = folder ? pulse::ui::PickerMode::Folder : save ? pulse::ui::PickerMode::Save : pulse::ui::PickerMode::File;
     spec.persist_layout = true;
+    spec.enable_tray_consume = true;
+    spec.enable_archive_selection = !folder && !save;
+    spec.enable_save_followup = save;
     spec.filter_index = input->filter_index;
     spec.skip_access_validation = caller_save || (!save && (input->open_options & PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION));
     spec.validate_local_open_access_v1 = !folder && !save && !spec.skip_access_validation;
@@ -764,6 +767,7 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     LogOwnerContext(owner_guard, owner);
     if (owner_guard.Error()) { result->win32_error = owner_guard.Error(); return HRESULT_FROM_WIN32(owner_guard.Error()); }
     auto& env = session->environment;
+    pulse::app::RefreshPickerListPreferences(env.appearance, pulse::app::ReadUserPickerAppearanceReadOnly());
     pulse::app::ApplyPickerAppearanceToSpec(env.appearance, spec);
     struct TypographyScope {
         int scale = pulse::ui::typography::UiFontScalePercent();
@@ -835,11 +839,8 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     struct ActiveScope { ~ActiveScope() { session->active = nullptr; } } active_scope;
     const auto jump_context = pulse::picker_inprocess::AttachJumpContext(spec, remote_parent_pid ? remote_parent_pid : GetCurrentProcessId());
     const auto outcome = pulse::ui::ShowFilePickerDetailed(owner, spec, colors.dark, pulse::ui::HexColor(colors.accent_rgb));
-    ProofContextFailure("after-show-detailed", static_cast<DWORD>(GetTickCount64()));
     monitor.Stop();
-    ProofContextFailure("after-monitor-stop", static_cast<DWORD>(GetTickCount64()));
     LogOwnerContext(owner_guard, owner, true);
-    ProofContextFailure("after-log-owner", static_cast<DWORD>(GetTickCount64()));
     frame.window = nullptr;
     if (frame.shown || frame.callback_dispatched || frame.closed ||
         outcome.status == pulse::ui::FilePickerStatus::Accepted ||
@@ -872,8 +873,10 @@ HRESULT ShowCore(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     if(result->paths.data) { std::copy(packed.begin(),packed.end(),result->paths.data);result->paths.data[packed.size()]=0; }
     result->paths.units=static_cast<uint32_t>(packed.size());result->path_count=static_cast<uint32_t>(outcome.result.paths.size());
     result->path.units = static_cast<uint32_t>(path.size()); result->status = PULSE_PICKER_UI_V2_ACCEPTED;
-    if (jump_context) jump_context->Accepted(path);
-    result->win32_error = 0; return S_OK;
+    if (jump_context) jump_context->Accepted(outcome.result.navigation_source.empty() ? path : outcome.result.navigation_source);
+    result->win32_error = 0;
+    if (outcome.result.on_result_delivered) outcome.result.on_result_delivered();
+    return S_OK;
 }
 HRESULT WINAPI Show(PulsePickerUiV2Session id, const PulsePickerUiV2Config* input,
     const PulsePickerUiV2Callbacks* callbacks, PulsePickerUiV2Result* result) {

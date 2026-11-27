@@ -4,4 +4,5 @@ EXPORTS
     DllCanUnloadNow=_DllCanUnloadNow@0 PRIVATE
     PulseInitializeDirectReveal=_PulseInitializeDirectReveal@4
     PulseIsDirectRevealInstalled=_PulseIsDirectRevealInstalled@0
+    PulseIsExplorerProcessInstalled=_PulseIsExplorerProcessInstalled@0
     PulseDialogCoreQueryV1=_PulseDialogCoreQueryV1@4

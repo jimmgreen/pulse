@@ -143,18 +143,106 @@ DWORD FindExportRva(const std::wstring& dll_path, const char* export_name, DWORD
     return ERROR_PROC_NOT_FOUND;
 }
 
+DWORD FindRemoteExportRva(HANDLE process, HMODULE remote_mod, const char* export_name, DWORD& rva_out) noexcept {
+    rva_out = 0;
+    if (!process || !remote_mod || !export_name || !*export_name) return ERROR_INVALID_PARAMETER;
+
+    const auto* base = reinterpret_cast<const uint8_t*>(remote_mod);
+    auto read_exact = [&](size_t offset, void* dst, size_t size) -> bool {
+        SIZE_T got = 0;
+        return ReadProcessMemory(process, base + offset, dst, size, &got) && got == size;
+    };
+
+    IMAGE_DOS_HEADER dos{};
+    if (!read_exact(0, &dos, sizeof(dos)) || dos.e_magic != IMAGE_DOS_SIGNATURE ||
+        dos.e_lfanew <= 0 || dos.e_lfanew > 4 * 1024 * 1024) {
+        return ERROR_BAD_EXE_FORMAT;
+    }
+
+    const size_t nt_off = static_cast<size_t>(dos.e_lfanew);
+    DWORD sig = 0;
+    IMAGE_FILE_HEADER fh{};
+    if (!read_exact(nt_off, &sig, sizeof(sig)) || sig != IMAGE_NT_SIGNATURE) return ERROR_BAD_EXE_FORMAT;
+    if (!read_exact(nt_off + sizeof(DWORD), &fh, sizeof(fh))) return ERROR_BAD_EXE_FORMAT;
+
+    const size_t opt_off = nt_off + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
+    WORD opt_magic = 0;
+    if (!read_exact(opt_off, &opt_magic, sizeof(opt_magic))) return ERROR_BAD_EXE_FORMAT;
+
+    IMAGE_DATA_DIRECTORY exp_dir{};
+    DWORD size_of_image = 0;
+    if (opt_magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && fh.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER64)) {
+        IMAGE_OPTIONAL_HEADER64 opt{};
+        if (!read_exact(opt_off, &opt, sizeof(opt))) return ERROR_BAD_EXE_FORMAT;
+        exp_dir = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        size_of_image = opt.SizeOfImage;
+    } else if (opt_magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC && fh.SizeOfOptionalHeader >= sizeof(IMAGE_OPTIONAL_HEADER32)) {
+        IMAGE_OPTIONAL_HEADER32 opt{};
+        if (!read_exact(opt_off, &opt, sizeof(opt))) return ERROR_BAD_EXE_FORMAT;
+        exp_dir = opt.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        size_of_image = opt.SizeOfImage;
+    } else {
+        return ERROR_BAD_EXE_FORMAT;
+    }
+
+    if (exp_dir.VirtualAddress == 0 || exp_dir.Size < sizeof(IMAGE_EXPORT_DIRECTORY) ||
+        exp_dir.VirtualAddress >= size_of_image ||
+        exp_dir.Size > size_of_image - exp_dir.VirtualAddress) {
+        return ERROR_PROC_NOT_FOUND;
+    }
+
+    IMAGE_EXPORT_DIRECTORY exports{};
+    if (!read_exact(exp_dir.VirtualAddress, &exports, sizeof(exports)) ||
+        exports.NumberOfNames == 0 || exports.NumberOfNames > 65536 ||
+        exports.NumberOfFunctions == 0 || exports.NumberOfFunctions > 65536) {
+        return ERROR_PROC_NOT_FOUND;
+    }
+
+    const size_t names_bytes = static_cast<size_t>(exports.NumberOfNames) * sizeof(DWORD);
+    const size_t ords_bytes = static_cast<size_t>(exports.NumberOfNames) * sizeof(WORD);
+    const size_t funcs_bytes = static_cast<size_t>(exports.NumberOfFunctions) * sizeof(DWORD);
+    if (exports.AddressOfNames >= size_of_image || names_bytes > size_of_image - exports.AddressOfNames ||
+        exports.AddressOfNameOrdinals >= size_of_image || ords_bytes > size_of_image - exports.AddressOfNameOrdinals ||
+        exports.AddressOfFunctions >= size_of_image || funcs_bytes > size_of_image - exports.AddressOfFunctions) {
+        return ERROR_BAD_EXE_FORMAT;
+    }
+
+    std::vector<DWORD> names(exports.NumberOfNames);
+    std::vector<WORD> ordinals(exports.NumberOfNames);
+    std::vector<DWORD> funcs(exports.NumberOfFunctions);
+    if (!read_exact(exports.AddressOfNames, names.data(), names_bytes) ||
+        !read_exact(exports.AddressOfNameOrdinals, ordinals.data(), ords_bytes) ||
+        !read_exact(exports.AddressOfFunctions, funcs.data(), funcs_bytes)) {
+        return ERROR_BAD_EXE_FORMAT;
+    }
+
+    const size_t target_len = std::strlen(export_name);
+    if (target_len >= 256) return ERROR_INVALID_PARAMETER;
+    char name_buf[257]{};
+    for (DWORD i = 0; i < exports.NumberOfNames; ++i) {
+        const DWORD name_rva = names[i];
+        if (name_rva == 0 || name_rva >= size_of_image || target_len + 1 > size_of_image - name_rva) continue;
+        if (!read_exact(name_rva, name_buf, target_len + 1)) continue;
+        if (std::memcmp(name_buf, export_name, target_len + 1) == 0) {
+            const WORD ord = ordinals[i];
+            if (ord >= exports.NumberOfFunctions) return ERROR_BAD_EXE_FORMAT;
+            const DWORD fn_rva = funcs[ord];
+            if (fn_rva >= exp_dir.VirtualAddress && fn_rva < exp_dir.VirtualAddress + exp_dir.Size) {
+                return ERROR_BAD_EXE_FORMAT;
+            }
+            if (fn_rva == 0 || fn_rva >= size_of_image) return ERROR_BAD_EXE_FORMAT;
+            rva_out = fn_rva;
+            return ERROR_SUCCESS;
+        }
+    }
+    return ERROR_PROC_NOT_FOUND;
+}
+
 InjectionResult InjectSameArchStub(DWORD pid, const std::wstring& stub_dll_path,
                                    uint32_t activate_flags, DWORD timeout_ms) noexcept {
     InjectionResult out{};
     if (pid <= 4 || stub_dll_path.empty()) {
         out.error = ERROR_INVALID_PARAMETER;
-        return out;
-    }
-
-    DWORD activate_rva = 0;
-    const DWORD rva_err = FindExportRva(stub_dll_path, "PulseStubActivate", activate_rva);
-    if (rva_err != ERROR_SUCCESS) {
-        out.error = rva_err;
         return out;
     }
 
@@ -205,6 +293,18 @@ InjectionResult InjectSameArchStub(DWORD pid, const std::wstring& stub_dll_path,
             out.error = ERROR_MOD_NOT_FOUND;
             return out;
         }
+    }
+
+    // Resolve PulseStubActivate directly from the remote process's mapped image so
+    // an upgraded/renamed Stub (.old.<tick>) still invokes its exact in-memory export.
+    DWORD activate_rva = 0;
+    DWORD rva_err = FindRemoteExportRva(proc.h, remote_mod, "PulseStubActivate", activate_rva);
+    if (rva_err != ERROR_SUCCESS && !out.already_loaded) {
+        rva_err = FindExportRva(stub_dll_path, "PulseStubActivate", activate_rva);
+    }
+    if (rva_err != ERROR_SUCCESS) {
+        out.error = rva_err;
+        return out;
     }
 
     // Call PulseStubActivate(activate_flags) inside the remote process.

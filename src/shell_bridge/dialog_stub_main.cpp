@@ -32,6 +32,7 @@ struct CoreSlot {
     HMODULE module = nullptr;
     PulseDialogCoreV1 table{};
     uint64_t generation = 0;
+    uint32_t initialized_flags = 0;
     std::wstring core_dir;
     std::wstring host_exe;
     std::wstring bridge_root;
@@ -234,13 +235,15 @@ HRESULT NativeComDlgGetClassObject(REFCLSID clsid, REFIID iid, void** out) noexc
 }
 
 // Ensures g_active_slot matches active-bridge.json, hot-swapping to a newer Core DLL
-// when generation or core_dir changes, or retiring the old Core when disabled.
+// when generation, core_dir, or host_exe changes, or retiring the old Core when disabled.
 CoreGuard AcquireCurrentCore(bool force_check, uint32_t init_flags) noexcept {
     ReapRetiredSlots();
     CoreGuard guard;
     std::wstring root;
     uint64_t cur_gen = 0;
     std::wstring cur_dir;
+    std::wstring cur_host;
+    uint32_t saved_flags = 0;
     bool need_check = force_check;
 
     AcquireSRWLockShared(&g_slot_lock);
@@ -252,9 +255,11 @@ CoreGuard AcquireCurrentCore(bool force_check, uint32_t init_flags) noexcept {
         return guard;
     }
     root = SelfDirectory();
+    saved_flags = g_last_activate_flags;
     if (g_active_slot) {
         cur_gen = g_active_slot->generation;
         cur_dir = g_active_slot->core_dir;
+        cur_host = g_active_slot->host_exe;
     }
     need_check = true;
     ReleaseSRWLockShared(&g_slot_lock);
@@ -283,7 +288,8 @@ CoreGuard AcquireCurrentCore(bool force_check, uint32_t init_flags) noexcept {
 
     // No change since currently active core.
     if (!cur_dir.empty() && ptr.generation == cur_gen &&
-        CompareStringOrdinal(ptr.core_dir.c_str(), -1, cur_dir.c_str(), -1, TRUE) == CSTR_EQUAL) {
+        CompareStringOrdinal(ptr.core_dir.c_str(), -1, cur_dir.c_str(), -1, TRUE) == CSTR_EQUAL &&
+        CompareStringOrdinal(ptr.host_exe.c_str(), -1, cur_host.c_str(), -1, TRUE) == CSTR_EQUAL) {
         AcquireSRWLockExclusive(&g_slot_lock);
         g_last_check_tick = GetTickCount64();
         g_last_error = ERROR_SUCCESS;
@@ -364,10 +370,17 @@ CoreGuard AcquireCurrentCore(bool force_check, uint32_t init_flags) noexcept {
         retired = nullptr;
     }
 
+    // Preserve previously granted Broker activation flags across passive hot-swaps
+    // (e.g. DllGetClassObject passing PULSE_STUB_FLAG_COM_ONLY must never drop sink hooks).
+    uint32_t effective_flags = saved_flags;
+    const uint32_t capability_flags = init_flags & ~PULSE_STUB_FLAG_COM_ONLY;
+    if (capability_flags) effective_flags |= capability_flags;
+    if (!effective_flags) effective_flags = init_flags ? init_flags : PULSE_STUB_FLAG_COM_ONLY;
+
     PulseStubConfigV1 cfg{};
     cfg.size = sizeof(cfg);
     cfg.version = PULSE_DIALOG_CORE_ABI_VERSION;
-    cfg.flags = init_flags ? init_flags : (g_last_activate_flags ? g_last_activate_flags : PULSE_STUB_FLAG_COM_ONLY);
+    cfg.flags = effective_flags;
     cfg.generation = fresh->generation;
     cfg.bridge_root = fresh->bridge_root.c_str();
     cfg.core_dir = fresh->core_dir.c_str();
@@ -384,6 +397,7 @@ CoreGuard AcquireCurrentCore(bool force_check, uint32_t init_flags) noexcept {
             return guard;
         }
         fresh->initialized = true;
+        fresh->initialized_flags = cfg.flags;
     }
 
     AcquireSRWLockExclusive(&g_slot_lock);
@@ -430,10 +444,12 @@ extern "C" HRESULT WINAPI DllCanUnloadNow() {
 
 extern "C" DWORD WINAPI PulseStubActivate(uint32_t flags) {
     PinSelf();
-    const uint32_t effective_flags = flags ? flags
+    const uint32_t requested_flags = flags ? flags
         : (PULSE_STUB_FLAG_INSTALL_SINK_HOOKS | PULSE_STUB_FLAG_WINRT_ENABLED | PULSE_STUB_FLAG_DIRECT_REVEAL);
+    uint32_t effective_flags = requested_flags;
     AcquireSRWLockExclusive(&g_slot_lock);
-    g_last_activate_flags = effective_flags;
+    g_last_activate_flags |= requested_flags;
+    effective_flags = g_last_activate_flags;
     ReleaseSRWLockExclusive(&g_slot_lock);
 
     CoreGuard core = AcquireCurrentCore(true, effective_flags);
@@ -445,6 +461,15 @@ extern "C" DWORD WINAPI PulseStubActivate(uint32_t flags) {
     }
     if (!core->table.activate_process) return ERROR_SUCCESS;
 
+    const bool already_initialized_with_hooks =
+        core->initialized &&
+        (core->initialized_flags & effective_flags) == effective_flags &&
+        core->table.get_active_hook_mask &&
+        core->table.get_active_hook_mask() != 0;
+    if (already_initialized_with_hooks) {
+        return ERROR_SUCCESS;
+    }
+
     PulseStubConfigV1 cfg{};
     cfg.size = sizeof(cfg);
     cfg.version = PULSE_DIALOG_CORE_ABI_VERSION;
@@ -453,7 +478,13 @@ extern "C" DWORD WINAPI PulseStubActivate(uint32_t flags) {
     cfg.bridge_root = core->bridge_root.c_str();
     cfg.core_dir = core->core_dir.c_str();
     cfg.host_exe = core->host_exe.c_str();
-    return core->table.activate_process(&cfg);
+    const DWORD act_err = core->table.activate_process(&cfg);
+    if (act_err == ERROR_SUCCESS) {
+        AcquireSRWLockExclusive(&g_slot_lock);
+        core->initialized_flags |= effective_flags;
+        ReleaseSRWLockExclusive(&g_slot_lock);
+    }
+    return act_err;
 }
 
 extern "C" DWORD WINAPI PulseStubHotReload() {

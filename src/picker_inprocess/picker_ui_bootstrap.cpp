@@ -162,6 +162,7 @@ HRESULT WINAPI Show(const PulsePickerUiConfig* config, const PulsePickerUiCallba
         pulse::PickerOwnerGuard owner_guard(config->owner);
         if (owner_guard.Error()) { result->win32_error = owner_guard.Error(); return HRESULT_FROM_WIN32(owner_guard.Error()); }
         pulse::ui::FolderPickerSpec spec; spec.mode = pulse::ui::PickerMode::File;
+        pulse::app::RefreshPickerListPreferences(appearance, pulse::app::ReadUserPickerAppearanceReadOnly());
         pulse::app::ApplyPickerAppearanceToSpec(appearance, spec);
         struct TypographyScope {
             int scale = pulse::ui::typography::UiFontScalePercent();

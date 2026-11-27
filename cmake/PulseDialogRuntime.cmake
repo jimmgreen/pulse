@@ -147,7 +147,10 @@ target_link_libraries(pulse_dialog_management_controller_test PRIVATE
     pulse_dialog_admin_auto_task pulse_crash_reporter pulse_dialog_user_auto user32 ole32 advapi32)
 add_executable(pulse_dialog_controller_dual_test EXCLUDE_FROM_ALL
     src/bench/dialog_controller_dual_test.cpp src/app/dialog_management_controller.cpp
-    src/common/dialog_auto_arch_status.cpp src/dialog_launcher/managed_launch_profile.cpp)
+    src/common/dialog_auto_arch_status.cpp src/dialog_launcher/managed_launch_profile.cpp
+    src/bench/dialog_controller_registry_views.cpp)
+target_compile_options(pulse_dialog_controller_dual_test PRIVATE
+    /FI${CMAKE_CURRENT_SOURCE_DIR}/src/bench/dialog_controller_registry_views.h)
 target_link_libraries(pulse_dialog_controller_dual_test PRIVATE pulse_dialog_process_diagnostics pulse_dialog_log_excerpt
     pulse_dialog_admin_auto_task pulse_crash_reporter pulse_dialog_user_auto)
 target_link_libraries(pulse_dialog_controller_dual_test PRIVATE
@@ -414,6 +417,12 @@ target_link_libraries(pulse_dialog_manual_acceptance_test PRIVATE
 add_executable(pulse_dialog_auto_disabled_rebind_test EXCLUDE_FROM_ALL
     src/bench/dialog_auto_disabled_rebind_test.cpp)
 target_link_libraries(pulse_dialog_auto_disabled_rebind_test PRIVATE advapi32)
+add_executable(pulse_dialog_auto_retired_rebind_test EXCLUDE_FROM_ALL
+    src/bench/dialog_auto_retired_rebind_test.cpp)
+target_link_libraries(pulse_dialog_auto_retired_rebind_test PRIVATE advapi32)
+add_executable(pulse_dialog_auto_missing_journal_test EXCLUDE_FROM_ALL
+    src/bench/dialog_auto_missing_journal_test.cpp)
+target_link_libraries(pulse_dialog_auto_missing_journal_test PRIVATE advapi32)
 
 add_executable(pulse_caller_callback_invocation_test EXCLUDE_FROM_ALL
     src/bench/caller_callback_invocation_test.cpp)
