@@ -107,6 +107,16 @@ using namespace pulse;
 
 namespace pulse {
 namespace {
+// A click on a sidebar row opens it in a new tab when Ctrl is held or
+// 设置 > 标签页与窗口 > 侧栏单击在新标签页中打开 is on; otherwise the current
+// tab follows it. OpenFolderTab reuses a tab already on that location.
+bool SidebarClickOpensNewTab(const AppState& s) {
+    return s.appPrefs.sidebar_new_tab || (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+}
+void OpenSidebarPath(AppState& s, const std::wstring& path) {
+    if (!path.empty() && !IsVerticalTabPath(path) && SidebarClickOpensNewTab(s)) OpenFolderTab(s, path);
+    else NavigateTo(s, path);
+}
 // Target cells already match hit geometry during view feedback. Input ends
 // only the contained artwork settle; it never reinterprets a travelling row.
 void FinishContentMotionForInput(AppState* state) {
@@ -4916,7 +4926,7 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
                 s->pinGapVisible = false;
                 SetCapture(hwnd);
             } else if (!hit.path.empty()) {
-                NavigateTo(*s, hit.path);
+                OpenSidebarPath(*s, hit.path);  // 磁盘 / 网络位置 / 云盘 / 已保存的搜索
             }
         } else if (hit.region == ui::HitTestResult::StatusBarCancelSearch) {
             if (auto* tab = ActiveTab(*s)) CancelActiveContentSearch(*s, *tab);
@@ -5316,7 +5326,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (!was_active) {
                     // A row of a header-less section navigates on release; a
                     // header folds its section (masks are keyed by id).
-                    if (navigate || !path.empty()) NavigateTo(*s, path);
+                    if (navigate || !path.empty()) OpenSidebarPath(*s, path);
                     else if (section >= 0) s->sidebarCollapsedMask ^= 1u << section;
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -5353,24 +5363,21 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 }
                 ResetSidebarPinDrag(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
-                // Ctrl / Shift on a tag row combines it into the open tag view;
-                // Ctrl on a quick-access row opens it in a new tab (#58-2), as the
-                // middle button does.
-                const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                // Ctrl / Shift on a tag row combines it into the open tag view.
+                // Otherwise Ctrl (#58-2, like the middle button) or the
+                // 侧栏单击在新标签页中打开 setting opens the row in a new tab.
+                const bool new_tab = SidebarClickOpensNewTab(*s);
                 if (!was_active && OpenSidebarKnownFolder(*s, app::BuiltinQuickAccessFromKey(qa_drag_key),
-                        ctrl ? SidebarFolderOpenMode::NewTab : SidebarFolderOpenMode::Current)) {
+                        new_tab ? SidebarFolderOpenMode::NewTab : SidebarFolderOpenMode::Current)) {
                     // The worker resolves the currently configured destination.
                 } else if (!was_active && workspace_parent >= 0) {
-                    if (ctrl) OpenFolderTab(*s, path);
+                    if (new_tab) OpenFolderTab(*s, path);
                     else ActivateWorkspacePane(*s, workspace_parent, workspace_pane);
-                } else if (!was_active && WorkspaceIndexFromPath(path) >= 0 && ctrl)
+                } else if (!was_active && WorkspaceIndexFromPath(path) >= 0 && new_tab)
                     OpenWorkspaceNewTab(*s, WorkspaceIndexFromPath(path));
-                else if (!was_active && !path.empty() && !tab_row && ctrl && !qa_drag_key.empty() &&
-                    !IsSidebarTagPath(path))
-                    OpenFolderTab(*s, path);
                 else if (!was_active && !path.empty() && !tab_row &&
                     !(IsSidebarTagPath(path) && CombineSidebarTagClick(*s, path)))
-                    NavigateTo(*s, path);
+                    OpenSidebarPath(*s, path);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -5397,7 +5404,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 }
                 ResetSidebarStarDrag(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
-                if (!was_active && !path.empty()) NavigateTo(*s, path);
+                if (!was_active && !path.empty()) OpenSidebarPath(*s, path);  // 收藏
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }

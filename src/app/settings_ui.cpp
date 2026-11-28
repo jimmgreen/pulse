@@ -88,7 +88,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsArrangeGap,10,0},
     {I::SettingsTabActiveStyle,10,0},{I::SettingsTabLayout,10,0},{I::SettingsTabRows,10,0},
     {I::SettingsHomeFolder,10,0},{I::SettingsStartupOpen,10,0},{I::SettingsNewTabOpen,10,0},{I::SettingsExternalOpen,10,0},
-    {I::SettingsVerticalTabs,10,0},{I::PinnedNames,10,0},{I::SettingsCloseTabDoubleClick,10,0},{I::SettingsCloseLastTab,10,0},
+    {I::SettingsVerticalTabs,10,0},{I::PinnedNames,10,0},{I::SettingsCloseTabDoubleClick,10,0},{I::SettingsSidebarNewTab,10,0},{I::SettingsCloseLastTab,10,0},
     // 11 启动与集成
     {I::StartupDialogsTitle,11,0},{I::SettingsIntegration,11,0},{I::SettingsDefaultManager,11,0},{I::SettingsOpenFolders,11,0},{I::SettingsWinE,11,0},{I::SettingsThisPc,11,0},
     {I::SettingsRecycleBin,11,0},{I::SettingsExplorerWindows,11,0},
@@ -168,6 +168,7 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::SettingsVerticalTabs: haystack += L" " + l10n::Get(I::SettingsVerticalTabsDesc); break;
         case I::PinnedNames: haystack += L" " + l10n::Get(I::PinnedNamesDesc); break;
         case I::SettingsCloseTabDoubleClick: haystack += L" " + l10n::Get(I::SettingsCloseTabDoubleClickDesc); break;
+        case I::SettingsSidebarNewTab: haystack += L" " + l10n::Get(I::SettingsSidebarNewTabDesc); break;
         case I::SettingsCloseLastTab: haystack += L" " + l10n::Get(I::SettingsCloseLastTabDesc); break;
         case I::SettingsDefaultManager: haystack += L" " + l10n::Get(I::SettingsDefaultManagerDesc); break;
         case I::SettingsOpenFolders: haystack += L" " + l10n::Get(I::SettingsOpenFoldersDesc); break;

@@ -1129,6 +1129,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         toggle(lay.vertical_tabs_row,I::SettingsVerticalTabs,I::SettingsVerticalTabsDesc,L"\xE8A0",vm.settings_vertical_tabs,23);
         toggle(lay.pinned_names_row,I::PinnedNames,I::PinnedNamesDesc,L"\xE718",vm.show_pinned_tab_names,6);
         toggle(lay.close_tab_double_click_row,I::SettingsCloseTabDoubleClick,I::SettingsCloseTabDoubleClickDesc,L"\xEA39",vm.settings_close_tab_double_click,35);
+        toggle(lay.sidebar_new_tab_row,I::SettingsSidebarNewTab,I::SettingsSidebarNewTabDesc,L"\xE8A7",vm.settings_sidebar_new_tab,85);
         toggle(lay.close_last_tab_row,I::SettingsCloseLastTab,I::SettingsCloseLastTabDesc,L"\xE89F",vm.settings_close_last_tab,26);
         }
         if(page==9) {

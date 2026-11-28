@@ -2705,6 +2705,22 @@ int wmain(int argc, wchar_t** argv) {
     parsed_prefs.ResetToDefaults();
     passed &= Report("reset turns double-click tab close off",
         !parsed_prefs.close_tab_on_double_click);
+    passed &= Report("sidebar new-tab setting has localized text",
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTab).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabDesc).empty());
+    passed &= Report("sidebar clicks follow the current tab by default", !prefs.sidebar_new_tab);
+    settings_ui.ToggleUi(85);
+    passed &= Report("sidebar new-tab setting enables and persists",
+        prefs.sidebar_new_tab && parsed_prefs.FromJson(prefs.ToJson()) && parsed_prefs.sidebar_new_tab);
+    settings_ui.ToggleUi(85);
+    passed &= Report("sidebar new-tab setting disables and persists",
+        !prefs.sidebar_new_tab && parsed_prefs.FromJson(prefs.ToJson()) && !parsed_prefs.sidebar_new_tab);
+    parsed_prefs.sidebar_new_tab = true;
+    passed &= Report("older preferences keep sidebar clicks in the current tab",
+        parsed_prefs.FromJson(L"{}") && !parsed_prefs.sidebar_new_tab);
+    parsed_prefs.sidebar_new_tab = true;
+    parsed_prefs.ResetToDefaults();
+    passed &= Report("reset turns the sidebar new-tab setting off", !parsed_prefs.sidebar_new_tab);
     passed &= Report("confirm before deleting setting has localized text",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDelete).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDeleteDesc).empty() &&

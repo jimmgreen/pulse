@@ -6629,6 +6629,8 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "移动到「%s」"
     IDS_DOCK_SPRING_COPY_FORMAT "复制到「%s」"
     IDS_DOCK_SPRING_DROPPED "已放入「%s」"
+    IDS_SETTINGS_SIDEBAR_NEW_TAB "侧栏单击在新标签页中打开"
+    IDS_SETTINGS_SIDEBAR_NEW_TAB_DESC "收藏、快速访问、磁盘、网络等侧栏项目都新开标签页，已打开的位置直接切换过去"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13257,6 +13259,8 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "Move to %s"
     IDS_DOCK_SPRING_COPY_FORMAT "Copy to %s"
     IDS_DOCK_SPRING_DROPPED "Moved to %s"
+    IDS_SETTINGS_SIDEBAR_NEW_TAB "Open sidebar items in a new tab"
+    IDS_SETTINGS_SIDEBAR_NEW_TAB_DESC "Starred, Quick access, drives, network and other sidebar items open in a new tab; a location that is already open is switched to"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

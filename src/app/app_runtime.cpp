@@ -3089,6 +3089,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_external_open = s.appPrefs.external_open;
     vm.settings_close_last_tab = s.appPrefs.close_window_with_last_tab;
     vm.settings_close_tab_double_click = s.appPrefs.close_tab_on_double_click;
+    vm.settings_sidebar_new_tab = s.appPrefs.sidebar_new_tab;
     vm.settings_confirm_delete = s.appPrefs.confirm_recycle_delete;
     vm.settings_home_folder = s.appPrefs.home_folder;
     vm.settings_text_render = s.appPrefs.text_render;

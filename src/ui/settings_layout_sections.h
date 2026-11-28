@@ -383,6 +383,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.vertical_tabs_row=row(64);
         l.pinned_names_row=row(64);
         l.close_tab_double_click_row=row(64);
+        l.sidebar_new_tab_row=row(64);
         l.close_last_tab_row=row(64);
 
         section(I::SettingsSecOpenLocation);

@@ -135,6 +135,10 @@ struct AppPrefs {
     bool close_window_with_last_tab = true;
     // Double-clicking a tab closes it, like its close button (app/last_tab_close.h).
     bool close_tab_on_double_click = false;
+    // A plain click on a sidebar row (收藏, 快速访问, 磁盘, 网络, 云盘, 标签,
+    // 工作区, 已保存的搜索) opens it in a new tab; a tab already on that
+    // location is reused. Ctrl+click and the middle button always do.
+    bool sidebar_new_tab = false;
     bool confirm_recycle_delete = false; // ask before Delete moves items to the Recycle Bin
     // Sign-in launches (Run value with --startup) stay hidden behind the tray icon.
     bool start_in_tray = false;

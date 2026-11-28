@@ -119,6 +119,7 @@ const SetDef kSettingDefs[] = {
     SET_SW("vertical_tabs", SettingsVerticalTabs, 10, 0, 23, vertical_tabs),
     SET_SW("pinned_tab_names", PinnedNames, 10, 0, 6, show_pinned_tab_names),
     SET_SW("double_click_closes_tab", SettingsCloseTabDoubleClick, 10, 0, 35, close_tab_on_double_click),
+    SET_SW("sidebar_new_tab", SettingsSidebarNewTab, 10, 0, 85, sidebar_new_tab),
     SET_SW("close_window_with_last_tab", SettingsCloseLastTab, 10, 0, 26, close_window_with_last_tab),
     // 启动与集成
     SET_SW("launch_at_signin", SettingsLaunch, 11, kSetSys, 1, launch_on_startup),

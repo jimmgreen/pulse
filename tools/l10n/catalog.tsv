@@ -6656,3 +6656,5 @@ DockPreviewSetting	IDS_DOCK_PREVIEW_SETTING	8029	悬停显示窗口预览	Show w
 DockSpringMoveFormat	IDS_DOCK_SPRING_MOVE_FORMAT	8030	移动到「%s」	Move to %s	移動到「%s」
 DockSpringCopyFormat	IDS_DOCK_SPRING_COPY_FORMAT	8031	复制到「%s」	Copy to %s	複製到「%s」
 DockSpringDropped	IDS_DOCK_SPRING_DROPPED	8032	已放入「%s」	Moved to %s	已放入「%s」
+SettingsSidebarNewTab	IDS_SETTINGS_SIDEBAR_NEW_TAB	8033	侧栏单击在新标签页中打开	Open sidebar items in a new tab	側欄按一下在新分頁中開啟
+SettingsSidebarNewTabDesc	IDS_SETTINGS_SIDEBAR_NEW_TAB_DESC	8034	收藏、快速访问、磁盘、网络等侧栏项目都新开标签页，已打开的位置直接切换过去	Starred, Quick access, drives, network and other sidebar items open in a new tab; a location that is already open is switched to	收藏、快速存取、磁碟、網路等側欄項目都新開分頁，已開啟的位置直接切換過去
