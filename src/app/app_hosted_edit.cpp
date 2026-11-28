@@ -1715,6 +1715,10 @@ static LRESULT RenameEditProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         return 0;
     }
     if (s && HandleHostedEditMessage(*s, hwnd, msg, wParam, lParam, handled)) return handled;
+    // TranslateMessage queues a WM_CHAR for the key that just closed this editor.
+    // A single-line EDIT beeps on an unhandled Return or Escape, so swallow it
+    // the same way WorkspaceRenameEditProc does.
+    if (msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE)) return 0;
     switch (msg) {
     case WM_KEYDOWN:
         if (wParam == VK_RETURN) {
