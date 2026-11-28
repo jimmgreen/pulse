@@ -1225,6 +1225,9 @@ void MainRenderer::DrawTextRect(ID2D1DeviceContext* dc, IDWriteTextFormat* fmt,
             text, fmt, rc, br->GetColor(), text_background_, fmt->GetTextAlignment())) {
         return;
     }
+    // 保留矩形、格式和绘制选项，让文本通道拒绝后仍使用布局通道。
+    if (compositor_ && dc == compositor_->Dc() &&
+        DrawAutoTextLayout(compositor_, fmt, br, text, rc, opts)) return;
     dc->DrawText(text.data(), (UINT32)text.size(), fmt, &rc, br, opts, DWRITE_MEASURING_MODE_NATURAL);
 }
 void MainRenderer::UpdateBrushes(const Theme& theme) {

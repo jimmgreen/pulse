@@ -867,6 +867,8 @@ void MainRenderer::DrawSidebarPass(const WindowViewModel& vm, const D2D1_RECT_F&
                     fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                     fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
                     MakeBrush(dc, theme.accent_text, brText_);
+                    // 数量保持原来的居中格式和矩形，Auto 使用布局通道绘制。
+                    if (!DrawAutoTextLayout(compositor_, fmt, brText_.get(), num, b, D2D1_DRAW_TEXT_OPTIONS_NONE))
                     dc->DrawText(num, static_cast<UINT32>(wcslen(num)), fmt, b, brText_.get(),
                                  D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                     fmt->SetTextAlignment(oldAlign);
@@ -913,6 +915,8 @@ void MainRenderer::DrawSidebarPass(const WindowViewModel& vm, const D2D1_RECT_F&
                 MakeBrush(dc, theme.text_secondary, brText_);
                 if (IsHighContrast() || !compositor_->DrawLumaText(label, fmt, chip, theme.text_secondary,
                                                                    theme.bg, DWRITE_TEXT_ALIGNMENT_CENTER))
+                    // 文本通道拒绝时保留原居中格式和矩形，先尝试布局通道。
+                    if (!DrawAutoTextLayout(compositor_, fmt, brText_.get(), label, chip, D2D1_DRAW_TEXT_OPTIONS_NONE))
                     dc->DrawText(label, static_cast<UINT32>(wcslen(label)), fmt, chip, brText_.get(),
                                  D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
                 fmt->SetTextAlignment(oldAlign);
@@ -983,6 +987,8 @@ void MainRenderer::DrawSidebarPass(const WindowViewModel& vm, const D2D1_RECT_F&
                 if (IsHighContrast() || !compositor_->DrawLumaText(std::wstring_view(num, 1), fmt, b,
                                                                    HexColor(0xFFFFFF), theme.bg,
                                                                    DWRITE_TEXT_ALIGNMENT_CENTER))
+                    // 序号继续使用原居中格式和矩形，文本通道拒绝后先绘制布局。
+                    if (!DrawAutoTextLayout(compositor_, fmt, brText_.get(), std::wstring_view(num, 1), b, D2D1_DRAW_TEXT_OPTIONS_NONE))
                     dc->DrawText(num, 1, fmt, b, brText_.get(), D2D1_DRAW_TEXT_OPTIONS_NONE,
                                  DWRITE_MEASURING_MODE_NATURAL);
                 fmt->SetTextAlignment(oldAlign);

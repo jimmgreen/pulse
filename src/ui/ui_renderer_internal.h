@@ -2466,13 +2466,27 @@ std::wstring FolderOf(const std::wstring& path) {
     return p.substr(0, slash);
 }
 
+// 保留原格式和矩形创建布局，避免文本通道拒绝后直接切换栅格化方式。
+bool DrawAutoTextLayout(Compositor* compositor, IDWriteTextFormat* fmt, ID2D1SolidColorBrush* br,
+                        std::wstring_view text, const D2D1_RECT_F& rc, D2D1_DRAW_TEXT_OPTIONS options) {
+    if (!compositor || !compositor->DwriteFactory() || !br || IsHighContrast() ||
+        !typography::UseLumaTextForUi()) return false;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(compositor->DwriteFactory()->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), fmt,
+            rc.right - rc.left, rc.bottom - rc.top, &layout)) || !layout.get()) return false;
+    compositor->DrawTextLayout(D2D1::Point2F(rc.left, rc.top), layout.get(), br, options);
+    return true;
+}
+
 // Single-line text with end ellipsis (character granularity) when too wide.
 void DrawTextEndEllipsis(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
     IDWriteTextFormat* fmt, ID2D1SolidColorBrush* br, const std::wstring& text,
-    float x, float y, float w, float h) {
+    float x, float y, float w, float h, Compositor* compositor = nullptr) {
     if (!dc || !fmt || text.empty() || w <= 1.0f || h <= 0.0f) return;
     const D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, y + h);
     if (!factory || MeasureTextWidth(factory, fmt, text) <= w) {
+        // 未超宽时保留原格式，使用布局通道而不改变省略规则。
+        if (DrawAutoTextLayout(compositor, fmt, br, text, rc, D2D1_DRAW_TEXT_OPTIONS_CLIP)) return;
         dc->DrawText(text.c_str(), (UINT32)text.size(), fmt, &rc, br,
                      D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
         return;
@@ -2490,6 +2504,11 @@ void DrawTextEndEllipsis(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
     ComPtr<IDWriteInlineObject> ellipsis;
     factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
     layout->SetTrimming(&trimming, ellipsis.get());
+    // 已有的省略布局直接交给布局通道，省略位置由原布局决定。
+    if (compositor && !IsHighContrast() && typography::UseLumaTextForUi()) {
+        compositor->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        return;
+    }
     dc->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
@@ -2508,7 +2527,7 @@ void DrawTextEndEllipsis(Compositor* compositor, IDWriteTextFormat* fmt,
     }
     auto* layout=CachedEllipsisLayout(factory,fmt,text,w,h);
     if (!layout) {
-        DrawTextEndEllipsis(compositor->Dc(), factory, fmt, br, text, x, y, w, h);
+        DrawTextEndEllipsis(compositor->Dc(), factory, fmt, br, text, x, y, w, h, compositor);
         return;
     }
     compositor->DrawTextLayout(D2D1::Point2F(x, y), layout, br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -2517,11 +2536,13 @@ void DrawTextEndEllipsis(Compositor* compositor, IDWriteTextFormat* fmt,
 void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
                          IDWriteTextFormat* fmt, ID2D1SolidColorBrush* br,
                          const std::wstring& text, float x, float y, float w, float h,
-                         float scale) {
+                         float scale, Compositor* compositor) {
     if (!dc || !fmt || text.empty() || w <= 1.0f || h <= 1.0f) return;
     const D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, y + h);
     const float fullW = MeasureTextWidth(factory, fmt, text);
     if (fullW <= w) {
+        // 标题放得下时沿用原文字和矩形，避免回到原生文字绘制。
+        if (DrawAutoTextLayout(compositor, fmt, br, text, rc, D2D1_DRAW_TEXT_OPTIONS_CLIP)) return;
         dc->DrawText(text.c_str(), (UINT32)text.size(), fmt, &rc, br,
                      D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
         return;
@@ -2543,6 +2564,11 @@ void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
         ComPtr<IDWriteInlineObject> ellipsis;
         factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
         layout->SetTrimming(&trimming, ellipsis.get());
+        // 保留原有词干省略布局，只改变其绘制通道。
+        if (compositor && !IsHighContrast() && typography::UseLumaTextForUi()) {
+            compositor->DrawTextLayout(D2D1::Point2F(left, y), layout.get(), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            return;
+        }
         dc->DrawTextLayout(D2D1::Point2F(left, y), layout.get(), br,
                            D2D1_DRAW_TEXT_OPTIONS_CLIP);
     };
@@ -2560,6 +2586,8 @@ void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
     if (!ext.empty() && extW + 20.0f * scale < w) {
         draw_ellipsis(stem, x, w - extW);
         const D2D1_RECT_F ext_rc = D2D1::RectF(x + w - extW, y, x + w, y + h);
+        // 短扩展名仍在原矩形内独立绘制，保留它的显示位置。
+        if (DrawAutoTextLayout(compositor, fmt, br, ext, ext_rc, D2D1_DRAW_TEXT_OPTIONS_CLIP)) return;
         dc->DrawText(ext.c_str(), (UINT32)ext.size(), fmt, &ext_rc, br,
                      D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
         return;
@@ -2589,6 +2617,8 @@ void DrawTabTitle(Compositor* compositor, IDWriteTextFormat* fmt, ID2D1SolidColo
             const float pad = 4.0f * scale;
             if (!luma(ext, x + w - extW - pad, extW + pad, DWRITE_TEXT_ALIGNMENT_TRAILING)) {
                 const D2D1_RECT_F ext_rc = D2D1::RectF(x + w - extW, y, x + w, y + h);
+                // 词干已经绘制，只补画扩展名，避免重复绘制词干。
+                if (DrawAutoTextLayout(compositor, fmt, br, ext, ext_rc, D2D1_DRAW_TEXT_OPTIONS_CLIP)) return;
                 compositor->Dc()->DrawText(ext.c_str(), (UINT32)ext.size(), fmt, &ext_rc, br,
                                            D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
             }
@@ -2596,7 +2626,7 @@ void DrawTabTitle(Compositor* compositor, IDWriteTextFormat* fmt, ID2D1SolidColo
         }
     }
     if (luma(text, x, w, fmt->GetTextAlignment())) return;
-    DrawTabTitle(compositor->Dc(), factory, fmt, br, text, x, y, w, h, scale);
+    DrawTabTitle(compositor->Dc(), factory, fmt, br, text, x, y, w, h, scale, compositor);
 }
 
 // Edge-style: a title too long for its tab fades out over its last few
@@ -3814,6 +3844,11 @@ void DrawChangeBadge(Compositor* compositor, fluent::Painter&, const ChangeBadge
     auto text = rc; text.left += 23 * scale;
     if (badge.has_deleted) text.right -= 14 * scale;
     brush->SetColor(color);
+    // 变更徽标在 Auto 下使用合成器，其余模式保留原路径。
+    if (!IsHighContrast() && typography::UseLumaTextForUi())
+        DrawTextEndEllipsis(compositor, compositor->SmallFormat(), brush.get(),
+            badge.label, text.left, text.top, std::max(0.0f, text.right - text.left), text.bottom - text.top);
+    else
     DrawTextEndEllipsis(dc, compositor->DwriteFactory(), compositor->SmallFormat(), brush.get(),
         badge.label, text.left, text.top, std::max(0.0f, text.right - text.left), text.bottom - text.top);
     if (badge.has_deleted) {

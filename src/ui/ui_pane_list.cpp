@@ -4860,6 +4860,8 @@ bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
         DrawNameHighlightBackground(compositor_, highlighted.get(), {x, y_snap}, rc, visible_matches, theme, scale_);
         compositor_->DrawTextLayout({x, y_snap}, highlighted.get(), brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     } else if (!drawn) {
+        // 未高亮文件名沿用原格式和裁剪矩形，文本通道拒绝后改走布局通道。
+        if (!DrawAutoTextLayout(compositor_, fmt, brText_.get(), shown, rc, D2D1_DRAW_TEXT_OPTIONS_CLIP))
         dc->DrawText(shown.c_str(), (UINT32)shown.size(), fmt, &rc, brText_.get(),
                      D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
     }
@@ -7410,19 +7412,28 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         if (mtimeFresh && mtAvail > 1.0f) {
                             // Changed today: semibold in the text color.
                             IDWriteTextFormat* mtBold = NameSemiboldFormat();
-                            ComPtr<IDWriteTextLayout> mtLayout;
                             const std::wstring mtShown = fit(date, mtAvail * 0.94f);
-                            if (mtBold && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(mtShown.c_str(),
-                                    static_cast<UINT32>(mtShown.size()), mtBold, mtAvail, cell.bottom - cell.top - 2.0f * scale_,
-                                    &mtLayout))) {
-                                mtLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                                mtLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                                mtLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                                MakeBrush(dc, cut ? WithAlpha(theme.text, 0.55f) : theme.text, brText_);
-                                compositor_->DrawTextLayout(D2D1::Point2F(mtLeft, cell.top + scale_), mtLayout.get(), brText_.get(),
-                                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                            } else {
-                                draw_detail_text(fit(date, mtAvail), mtLeft, mtAvail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                            // 仅 Auto 且非高对比度尝试文本通道；成功后本格文字已绘制。
+                            // 文本通道拒绝时保留半粗布局，其他模式直接走原布局以维持强调效果。
+                            const bool mtDrawn = !IsHighContrast() && typography::UseLumaTextForUi() &&
+                                compositor_->DrawLumaText(mtShown, mtBold,
+                                    D2D1::RectF(mtLeft, cell.top + scale_, mtLeft + mtAvail, cell.bottom - scale_),
+                                    cut ? WithAlpha(theme.text, 0.55f) : theme.text, theme.bg,
+                                    DWRITE_TEXT_ALIGNMENT_LEADING);
+                            if (!mtDrawn) {
+                                ComPtr<IDWriteTextLayout> mtLayout;
+                                if (mtBold && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(mtShown.c_str(),
+                                        static_cast<UINT32>(mtShown.size()), mtBold, mtAvail, cell.bottom - cell.top - 2.0f * scale_,
+                                        &mtLayout))) {
+                                    mtLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                                    mtLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                                    mtLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                                    MakeBrush(dc, cut ? WithAlpha(theme.text, 0.55f) : theme.text, brText_);
+                                    compositor_->DrawTextLayout(D2D1::Point2F(mtLeft, cell.top + scale_), mtLayout.get(), brText_.get(),
+                                                       D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                                } else {
+                                    draw_detail_text(fit(date, mtAvail), mtLeft, mtAvail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                                }
                             }
                         } else if (mtimeOld) {
                             // Outside the range: a step lighter, so recent dates lead.
@@ -7651,10 +7662,22 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 MakeBrush(dc, theme.text_secondary, brTextSecondary_);
                 if (e.device & fs::kPcDevicePlaceholder) {
                     // No phone: how to connect one (opening the tile shows the help).
+                    // Auto 使用合成器通道，其余模式保留设备上下文路径。
+                    if (!IsHighContrast() && typography::UseLumaTextForUi())
+                        DrawTextEndEllipsis(compositor_, device_fmt, brTextSecondary_.get(),
+                            e.type_text, nameRc.left, nameRc.top + 25.0f * scale_, textW, 20.0f * scale_);
+                    else
                     DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), device_fmt, brTextSecondary_.get(),
                         e.type_text, nameRc.left, nameRc.top + 25.0f * scale_, textW, 20.0f * scale_);
                 } else if (e.device & fs::kPcDeviceLocked) {
                     // What to do on the phone; the tile updates by itself.
+                    // Auto 使用合成器通道，其余模式保留设备上下文路径。
+                    if (!IsHighContrast() && typography::UseLumaTextForUi())
+                        DrawTextEndEllipsis(compositor_, device_fmt, brTextSecondary_.get(),
+                            l10n::Get((e.device & fs::kPcDeviceIPhone) ? l10n::StringId::DeviceUnlockHintIPhone
+                                                                       : l10n::StringId::DeviceUnlockHintAndroid),
+                            nameRc.left, nameRc.top + 25.0f * scale_, textW, 20.0f * scale_);
+                    else
                     DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), device_fmt, brTextSecondary_.get(),
                         l10n::Get((e.device & fs::kPcDeviceIPhone) ? l10n::StringId::DeviceUnlockHintIPhone
                                                                    : l10n::StringId::DeviceUnlockHintAndroid),
@@ -7668,6 +7691,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     const size_t rows = std::min<size_t>(2, e.device_bars.size());
                     for (size_t b = 0; b < rows; ++b) {
                         const auto& bar = e.device_bars[b];
+                        // Auto 使用合成器通道，其余模式保留设备上下文路径。
+                        if (!IsHighContrast() && typography::UseLumaTextForUi())
+                            DrawTextEndEllipsis(compositor_, device_fmt, brTextSecondary_.get(),
+                                bar.label, nameRc.left, rowY, labelW, rowH);
+                        else
                         DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), device_fmt, brTextSecondary_.get(),
                             bar.label, nameRc.left, rowY, labelW, rowH);
                         const float barL = nameRc.left + labelW + 6.0f * scale_;
@@ -7676,6 +7704,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         if (bar.used >= 0.0f && barR - barL > 8.0f * scale_)
                             painter_.DrawCapacityBar(D2D1::RectF(barL, mid - 2.5f * scale_, barR, mid + 2.5f * scale_),
                                                      bar.used, theme.accent);
+                        // 容量说明也采用相同模式判断，保留原矩形和文字。
+                        if (!IsHighContrast() && typography::UseLumaTextForUi())
+                            DrawTextEndEllipsis(compositor_, device_fmt, brTextSecondary_.get(),
+                                bar.free_text, barR + 6.0f * scale_, rowY, freeW, rowH);
+                        else
                         DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), device_fmt, brTextSecondary_.get(),
                             bar.free_text, barR + 6.0f * scale_, rowY, freeW, rowH);
                         rowY += rowH + 2.0f * scale_;
@@ -7697,6 +7730,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                              chipW - 12.0f * scale_ + 1.0f, chipH);
                 const float noteX = nameRc.left + chipW + 6.0f * scale_;
                 MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+                // 挂载盘说明在 Auto 下使用合成器，其余模式保留原路径。
+                if (!IsHighContrast() && typography::UseLumaTextForUi())
+                    DrawTextEndEllipsis(compositor_, chip_fmt, brTextSecondary_.get(),
+                        l10n::Get(l10n::StringId::MountedDriveNote), noteX, top,
+                        std::max(0.0f, nameRc.right - noteX), chipH);
+                else
                 DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), chip_fmt, brTextSecondary_.get(),
                     l10n::Get(l10n::StringId::MountedDriveNote), noteX, top,
                     std::max(0.0f, nameRc.right - noteX), chipH);
@@ -8194,6 +8233,10 @@ void MainRenderer::DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& l
                                          MeasureLayoutText(compositor_, factory, small_fmt, dup_part[2]) + 1.0f);
             if (why_w > 48.0f * scale_) {
                 MakeBrush(dc, WithAlpha(theme.text_secondary, 0.82f), brFillHover_);
+                // 分组理由在 Auto 下使用合成器，其余模式保留原路径。
+                if (!IsHighContrast() && typography::UseLumaTextForUi())
+                    DrawTextEndEllipsis(compositor_, small_fmt, brFillHover_.get(), dup_part[2], x, hr.top, why_w, h);
+                else
                 DrawTextEndEllipsis(dc, factory, small_fmt, brFillHover_.get(), dup_part[2], x, hr.top, why_w, h);
                 x += why_w + 10.0f * scale_;
             }
@@ -8204,6 +8247,10 @@ void MainRenderer::DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& l
             const float note_w = std::min(std::max(0.0f, text_right - x),
                                           MeasureLayoutText(compositor_, factory, small_fmt, note) + 1.0f);
             if (note_w > 48.0f * scale_) {
+                // 网盘分组说明在 Auto 下使用合成器，其余模式保留原路径。
+                if (!IsHighContrast() && typography::UseLumaTextForUi())
+                    DrawTextEndEllipsis(compositor_, small_fmt, brTextSecondary_.get(), note, x, hr.top, note_w, h);
+                else
                 DrawTextEndEllipsis(dc, factory, small_fmt, brTextSecondary_.get(), note, x, hr.top, note_w, h);
                 x += note_w + 10.0f * scale_;
             }
