@@ -355,6 +355,7 @@ struct DesktopGroup {
     int tab_order = 0;
     bool tab_active = true;
     bool focus_visible = false;                // kept expanded & full-opacity in Focus scene
+    bool locked = false;                       // 锁定分组: the card keeps its place and size
     int x = 24;
     int y = 24;
     int cols = 4;                              // 2..7
@@ -707,6 +708,25 @@ private:
     std::vector<Entry> undo_;
     std::vector<Entry> redo_;
 };
+
+// 布局快照 (layout_snapshot.cpp): copies of the saved layout kept beside it, made by hand or once a day.
+// File names carry the time: snap-20261126-143005.json (by hand) or auto-20261126-090000.json (daily).
+struct LayoutSnapshotName {
+    bool automatic = false;
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+};
+std::wstring MakeLayoutSnapshotFileName(const LayoutSnapshotName& name);
+std::optional<LayoutSnapshotName> ParseLayoutSnapshotFileName(std::wstring_view file_name) noexcept;
+// Snapshot files only, newest first.
+std::vector<std::wstring> SortLayoutSnapshots(std::vector<std::wstring> file_names);
+// The files to delete so that at most keep_manual hand-made and keep_auto daily snapshots remain.
+std::vector<std::wstring> LayoutSnapshotsToPrune(const std::vector<std::wstring>& file_names,
+                                                 size_t keep_manual, size_t keep_auto);
+// A daily snapshot is due when none was taken on today's date.
+bool DailyLayoutSnapshotDue(const std::vector<std::wstring>& file_names, const LayoutSnapshotName& today) noexcept;
+// Puts a snapshot's groups, widgets and file placement back. Files are matched by path; a file the snapshot
+// does not know keeps its place (or leaves a group that no longer exists). Returns how many files it placed.
+size_t ApplyLayoutSnapshot(const DesktopModelState& snapshot, DesktopModelState& state);
 
 std::string SerializeModelStateJson(const DesktopModelState& state);
 bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_state);

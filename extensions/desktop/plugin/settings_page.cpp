@@ -880,7 +880,7 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     status_node.role = a.OptStr("caption");
     auto master_title = a.MakeNode(PULSE_UI_MODEL_TEXT, "master-title");
     master_title.text = a.OptStr("启用桌面整理");
-    auto master_desc = make_caption("master-desc", "散落的文件按规则收进分组，常用位置变成磁贴。只改显示位置，文件都还在桌面文件夹里；关掉就回到 Windows 桌面。");
+    auto master_desc = make_caption("master-desc", "散落的文件按规则收进分组，也可以只摆小组件。只改显示位置，文件都还在桌面文件夹里；关掉就回到 Windows 桌面。");
     auto master_left = a.MakeNode(PULSE_UI_MODEL_STACK, "master-left");
     master_left.gap = a.OptInt(2);
     master_left.flex = a.OptInt(1);

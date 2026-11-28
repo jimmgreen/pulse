@@ -1094,6 +1094,7 @@ std::string SerializeModelStateJson(const DesktopModelState& state) {
         w.Key("tab_order"); w.WriteInt64(g.tab_order);
         w.Key("tab_active"); w.WriteBool(g.tab_active);
         w.Key("focus_visible"); w.WriteBool(g.focus_visible);
+        w.Key("locked"); w.WriteBool(g.locked);
         w.Key("x"); w.WriteInt64(g.x);
         w.Key("y"); w.WriteInt64(g.y);
         w.Key("cols"); w.WriteInt64(g.cols);
@@ -1479,6 +1480,7 @@ bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_sta
                 !ReadIntField(gv, "tab_order", g.tab_order) ||
                 !ReadBoolField(gv, "tab_active", g.tab_active) ||
                 !ReadBoolField(gv, "focus_visible", g.focus_visible) ||
+                !ReadBoolField(gv, "locked", g.locked) ||
                 !ReadIntField(gv, "x", g.x) ||
                 !ReadIntField(gv, "y", g.y) ||
                 !ReadIntField(gv, "cols", g.cols) ||

@@ -6624,5 +6624,20 @@
 #define IDS_QUICK_LOOK_FILTER_VIDEOS                                                     7996
 #define IDS_QUICK_LOOK_IMMERSIVE                                                         7997
 #define IDS_DOCK_STACK_REMOVE                                                            7993
+#define IDS_DESKTOP_GROUP_LOCK                                                           8008
+#define IDS_DESKTOP_GROUP_LOCKED_HINT                                                    8009
+#define IDS_DOCK_OPEN_WITH_FORMAT                                                        8010
+#define IDS_DOCK_OPEN_WITH_FAILED                                                        8011
+#define IDS_LAYOUT_SNAPSHOTS                                                             8012
+#define IDS_LAYOUT_SNAPSHOT_SAVE                                                         8013
+#define IDS_LAYOUT_SNAPSHOT_OPEN_FOLDER                                                  8014
+#define IDS_LAYOUT_SNAPSHOT_AUTO                                                         8015
+#define IDS_LAYOUT_SNAPSHOT_MANUAL                                                       8016
+#define IDS_LAYOUT_SNAPSHOT_SAVED                                                        8017
+#define IDS_LAYOUT_SNAPSHOT_RESTORE                                                      8018
+#define IDS_LAYOUT_SNAPSHOT_RESTORED_FORMAT                                              8019
+#define IDS_LAYOUT_SNAPSHOT_RECOVERED                                                    8020
+#define IDS_LAYOUT_SNAPSHOT_FAILED                                                       8021
+#define IDS_LAYOUT_SNAPSHOT_NONE                                                         8022
 
 #endif  // PULSE_STRING_IDS_H

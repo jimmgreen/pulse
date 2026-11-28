@@ -23,6 +23,7 @@ add_library(pulse_desktop_model STATIC
     host/model/layout_groups.cpp
     host/model/group_tabs.cpp
     host/model/group_drop.cpp
+    host/model/layout_snapshot.cpp
     host/model/loose_icons.cpp
     host/model/tile_board.cpp
     host/model/tile_reorder.cpp

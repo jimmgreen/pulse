@@ -461,6 +461,109 @@ struct DesktopGroupHostTestPeer {
         check(host.drag_flip_group_.empty() && !host.drop_insert_index_ && host.interaction_.drop_insert_caret.empty(),
               "capture loss clears the caret, the slot and the page flip");
 
+        // 锁定分组: a locked card ignores drags and resizes but still takes header clicks.
+        Prepare(host);
+        {
+            overlays::ContextMenuSpec lspec{};
+            host.FillGroupContextMenuSpec(0, lspec);
+            check(!lspec.group_locked, "a group starts unlocked");
+            host.ExecuteContextMenuCommand("toggle-lock", lspec);
+            check(host.state_.groups[0].locked && !host.test_saved_model_.empty(), "锁定分组 locks the card and saves");
+            host.FillGroupContextMenuSpec(0, lspec);
+            check(lspec.group_locked, "the menu shows the lock as checked");
+            const int x0 = host.state_.groups[0].x, y0 = host.state_.groups[0].y, c0 = host.state_.groups[0].cols;
+            host.test_info_toasts_.clear();
+            host.BeginGroupDrag(0, 60, 95, false);
+            send(WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(200, 300));
+            send(WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(260, 320));
+            send(WM_LBUTTONUP, 0, MAKELPARAM(260, 320));
+            check(host.state_.groups[0].x == x0 && host.state_.groups[0].y == y0 && !host.group_drag_session_.Pending() &&
+                  host.undo_.UndoDepth() == 0, "a locked card does not move");
+            check(host.test_info_toasts_.size() == 1, "dragging a locked card says once why it stays");
+            host.BeginGroupDrag(0, 300, 300, true);
+            check(!host.group_drag_session_.Pending() && host.state_.groups[0].cols == c0, "a locked card does not resize");
+            host.ExecuteContextMenuCommand("group-cols:5", lspec);
+            check(host.state_.groups[0].cols == c0, "nor change its width from the menu");
+            host.ExecuteContextMenuCommand("toggle-lock", lspec);
+            host.BeginGroupDrag(0, 60, 95, false);
+            send(WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(200, 300));
+            send(WM_LBUTTONUP, 0, MAKELPARAM(200, 300));
+            check(!host.state_.groups[0].locked && (host.state_.groups[0].x != x0 || host.state_.groups[0].y != y0),
+                  "unlocked, it moves again");
+        }
+
+        // Dock: files dropped on an app open with it; the wheel steps through an app's windows.
+        {
+            render::DockBarItem app;
+            app.kind = render::DockBarItemKind::App; app.key = L"c:\\apps\\editor.exe";
+            app.launch_path = L"C:\\Apps\\Editor.exe"; app.title = L"Editor"; app.pinned = true;
+            render::DockBarItem link = app;
+            link.key = L"ms-settings:"; link.launch_path = L"ms-settings:"; link.title = L"Settings";
+            render::DockBarItem viewer = app;
+            viewer.key = L"c:\\apps\\viewer.exe"; viewer.launch_path = L"C:\\Apps\\Viewer.exe";
+            viewer.windows = {reinterpret_cast<HWND>(0x10), reinterpret_cast<HWND>(0x20), reinterpret_cast<HWND>(0x30)};
+            const auto keep_items = host.live_data_.dock.items;
+            host.live_data_.dock.items = {app, link, viewer};
+            check(host.DockItemOpensFiles(app) && !host.DockItemOpensFiles(link) && host.DockItemOpensFiles(viewer),
+                  "an exe or a running app takes files; a settings link does not");
+            check(host.DockOpenWithLabel(app).find(L"Editor") != std::wstring::npos, "the drop pill names the app");
+            check(host.IsAppLikePath(L"C:\\x\\Tool.EXE") && host.IsAppLikePath(L"C:\\x\\a.lnk") && !host.IsAppLikePath(L"C:\\x\\a.txt"),
+                  "programs and shortcuts are pinned rather than opened");
+            check(host.QuoteCommandArgument(L"C:\\a b\\x.txt") == L"\"C:\\a b\\x.txt\"" &&
+                  host.QuoteCommandArgument(L"C:\\") == L"\"C:\\\\\"", "file arguments are quoted the way the app reads them");
+            host.test_dock_activations_.clear();
+            host.DropPathsOnDockApp(app.key, {L"C:\\d\\a b.txt", L"C:\\d\\c.md"});
+            check(host.test_dock_activations_.size() == 1 &&
+                  host.test_dock_activations_[0] == L"open-with:C:\\Apps\\Editor.exe|C:\\d\\a b.txt|C:\\d\\c.md",
+                  "files dropped on a Dock app open with it");
+            host.test_dock_activations_.clear();
+            host.dock_wheel_key_.clear();
+            for (int i = 0; i < 4; ++i) host.CycleDockAppWindows(2, -WHEEL_DELTA);
+            check(host.test_dock_activations_ == std::vector<std::wstring>{L"cycle:0", L"cycle:1", L"cycle:2", L"cycle:0"},
+                  "wheel down steps through the app's windows and wraps");
+            host.CycleDockAppWindows(2, WHEEL_DELTA);
+            check(host.test_dock_activations_.back() == L"cycle:2", "wheel up steps back");
+            host.CycleDockAppWindows(2, -40); host.CycleDockAppWindows(2, -40);
+            check(host.test_dock_activations_.size() == 5, "small touchpad steps add up first");
+            host.CycleDockAppWindows(2, -40);
+            check(host.test_dock_activations_.size() == 6 && host.test_dock_activations_.back() == L"cycle:0",
+                  "a full notch of them moves one window");
+            check(!host.CycleDockAppWindows(0, -WHEEL_DELTA), "an app with no windows leaves the wheel to the desktop");
+            host.live_data_.dock.items = keep_items;
+        }
+
+        // 布局快照: save, list, restore as one undo, the daily snapshot, and nothing outside the folder.
+        Prepare(host);
+        {
+            const std::filesystem::path dir = std::filesystem::current_path() /
+                (L"group_host_snapshots_" + std::to_wstring(GetCurrentProcessId()));
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+            host.snapshot_dir_override_ = dir.wstring();
+            host.state_.groups[1].locked = true;
+            check(host.SaveLayoutSnapshot(false), "保存当前布局 writes a snapshot");
+            const auto files = host.ListLayoutSnapshots();
+            const auto name = files.empty() ? std::nullopt : model::ParseLayoutSnapshotFileName(files[0]);
+            check(files.size() == 1 && name && !name->automatic, "the snapshot is listed by its time");
+            check(host.LayoutSnapshotMenuEntries().size() == 1, "the desktop menu lists it");
+            host.state_.groups[1].locked = false;
+            host.state_.groups.pop_back();
+            host.state_.items[0].pinned_group_id = "group-1";
+            host.undo_.Clear();
+            const bool restored = !files.empty() && host.RestoreLayoutSnapshot(files[0]);
+            check(restored && host.state_.groups.size() == 3 && host.state_.groups[1].locked &&
+                  host.state_.items[0].pinned_group_id == "group-0", "restoring puts the groups and file places back");
+            check(host.undo_.UndoDepth() == 1 && host.undo_.Undo(host.state_) && host.state_.groups.size() == 2,
+                  "the restore undoes in one step");
+            check(!host.RestoreLayoutSnapshot(L"..\\layout_state.json"), "only snapshot names are restored");
+            host.MaybeTakeDailyLayoutSnapshot();
+            check(host.ListLayoutSnapshots().size() == 2, "the first start of the day takes a daily snapshot");
+            host.MaybeTakeDailyLayoutSnapshot();
+            check(host.ListLayoutSnapshots().size() == 2, "and only one a day");
+            std::filesystem::remove_all(dir, ec);
+            host.snapshot_dir_override_.clear();
+        }
+
         std::printf("Group host interaction: %d cases, %d failures\n", count, failed);
         return failed ? 1 : 0;
     }

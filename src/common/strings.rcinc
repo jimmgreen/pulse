@@ -6604,6 +6604,21 @@ BEGIN
     IDS_DESKTOP_VIEW_SWITCHED_WIDGETS "已切换到只显示小组件"
     IDS_DESKTOP_WIDGETS_SHOWN "已显示桌面小组件"
     IDS_DESKTOP_WIDGETS_HIDDEN "已隐藏桌面小组件"
+    IDS_DESKTOP_GROUP_LOCK "锁定分组"
+    IDS_DESKTOP_GROUP_LOCKED_HINT "分组已锁定，解锁后才能移动或调整大小"
+    IDS_DOCK_OPEN_WITH_FORMAT "用「%s」打开"
+    IDS_DOCK_OPEN_WITH_FAILED "无法用这个应用打开"
+    IDS_LAYOUT_SNAPSHOTS "布局快照"
+    IDS_LAYOUT_SNAPSHOT_SAVE "保存当前布局"
+    IDS_LAYOUT_SNAPSHOT_OPEN_FOLDER "打开快照文件夹"
+    IDS_LAYOUT_SNAPSHOT_AUTO "每日自动"
+    IDS_LAYOUT_SNAPSHOT_MANUAL "手动"
+    IDS_LAYOUT_SNAPSHOT_SAVED "已保存布局快照"
+    IDS_LAYOUT_SNAPSHOT_RESTORE "恢复布局快照"
+    IDS_LAYOUT_SNAPSHOT_RESTORED_FORMAT "已恢复 %s 的布局"
+    IDS_LAYOUT_SNAPSHOT_RECOVERED "布局文件损坏，已从最近的快照恢复"
+    IDS_LAYOUT_SNAPSHOT_FAILED "无法读取这个快照"
+    IDS_LAYOUT_SNAPSHOT_NONE "还没有快照"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13207,6 +13222,21 @@ BEGIN
     IDS_DESKTOP_VIEW_SWITCHED_WIDGETS "Switched to Widgets only"
     IDS_DESKTOP_WIDGETS_SHOWN "Desktop widgets shown"
     IDS_DESKTOP_WIDGETS_HIDDEN "Desktop widgets hidden"
+    IDS_DESKTOP_GROUP_LOCK "Lock group"
+    IDS_DESKTOP_GROUP_LOCKED_HINT "This group is locked. Unlock it to move or resize it."
+    IDS_DOCK_OPEN_WITH_FORMAT "Open with %s"
+    IDS_DOCK_OPEN_WITH_FAILED "Couldn't open it with this app"
+    IDS_LAYOUT_SNAPSHOTS "Layout snapshots"
+    IDS_LAYOUT_SNAPSHOT_SAVE "Save current layout"
+    IDS_LAYOUT_SNAPSHOT_OPEN_FOLDER "Open snapshot folder"
+    IDS_LAYOUT_SNAPSHOT_AUTO "Daily"
+    IDS_LAYOUT_SNAPSHOT_MANUAL "Manual"
+    IDS_LAYOUT_SNAPSHOT_SAVED "Layout snapshot saved"
+    IDS_LAYOUT_SNAPSHOT_RESTORE "Restore layout snapshot"
+    IDS_LAYOUT_SNAPSHOT_RESTORED_FORMAT "Restored the layout from %s"
+    IDS_LAYOUT_SNAPSHOT_RECOVERED "The layout file was damaged, so the latest snapshot was restored"
+    IDS_LAYOUT_SNAPSHOT_FAILED "Couldn't read this snapshot"
+    IDS_LAYOUT_SNAPSHOT_NONE "No snapshots yet"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

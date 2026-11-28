@@ -20,6 +20,7 @@
 #include <psapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 #include <shldisp.h>
 #include <exdisp.h>
 #include <tlhelp32.h>
@@ -1494,6 +1495,7 @@ public:
         SeedTagsFromLocalPulseFiles();
         overlays_.SetTagPalette(tag_palette_);
         LoadOrInitModel();
+        MaybeTakeDailyLayoutSnapshot();
         ApplyWidgetPrefs();
         ApplySystemAppearance();
 
@@ -1578,6 +1580,7 @@ public:
         overlays_.SetDipScale(mount_.DipScale());
         SetupOverlays();
         SetupDropTarget();
+        if (layout_recovered_from_snapshot_) ShowInfoToast(l10n::Get(l10n::StringId::LayoutSnapshotRecovered));
 
         SyncWatcherDirectories(true);
 
@@ -2635,6 +2638,187 @@ private:
         }
     }
 
+    static bool EndsWithNoCase(std::wstring_view s, std::wstring_view suffix) noexcept {
+        return s.size() >= suffix.size() &&
+               _wcsnicmp(s.data() + s.size() - suffix.size(), suffix.data(), suffix.size()) == 0;
+    }
+
+    // Programs and shortcuts dropped on the Dock are pinned, whatever icon they land on.
+    static bool IsAppLikePath(std::wstring_view p) noexcept {
+        return EndsWithNoCase(p, L".exe") || EndsWithNoCase(p, L".lnk") || EndsWithNoCase(p, L".url") ||
+               EndsWithNoCase(p, L".appref-ms");
+    }
+
+    // An app icon that can take files (as on the Mac): an exe or a shortcut, a packaged app, or a running app.
+    static bool DockItemOpensFiles(const render::DockBarItem& item) noexcept {
+        if (item.kind != render::DockBarItemKind::App || item.is_ghost) return false;
+        return EndsWithNoCase(item.launch_path, L".exe") || EndsWithNoCase(item.launch_path, L".lnk") ||
+               !item.aumid.empty() || !item.windows.empty();
+    }
+
+    static std::wstring DockOpenWithLabel(const render::DockBarItem& item) {
+        wchar_t buf[256]{};
+        swprintf_s(buf, l10n::Get(l10n::StringId::DockOpenWithFormat).c_str(), item.title.c_str());
+        return buf;
+    }
+
+    // One command-line argument the way CommandLineToArgvW reads it back.
+    static std::wstring QuoteCommandArgument(const std::wstring& arg) {
+        std::wstring out = L"\"";
+        size_t slashes = 0;
+        for (const wchar_t ch : arg) {
+            if (ch == L'\\') { ++slashes; continue; }
+            out.append(ch == L'"' ? slashes * 2 + 1 : slashes, L'\\');
+            slashes = 0;
+            out.push_back(ch);
+        }
+        out.append(slashes * 2, L'\\');
+        out.push_back(L'"');
+        return out;
+    }
+
+    void DropPathsOnDockApp(const std::wstring& key, const std::vector<std::wstring>& paths) {
+        if (paths.empty()) return;
+        if (std::all_of(paths.begin(), paths.end(), [](const std::wstring& p) { return IsAppLikePath(p); })) {
+            PinPathsToDock(paths);
+            return;
+        }
+        const int idx = live_data_.dock.FindItemIndexByKey(key);
+        if (idx < 0 || static_cast<size_t>(idx) >= live_data_.dock.items.size()) return;
+        auto& item = live_data_.dock.items[static_cast<size_t>(idx)];
+        item.bounce_start_ms = NowAnimMs();
+        StartAnimClock();
+        InvalidateDockBar();
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        std::wstring rec = L"open-with:" + (item.launch_path.empty() ? key : item.launch_path);
+        for (const auto& p : paths) rec += L"|" + p;
+        test_dock_activations_.push_back(std::move(rec));
+#else
+        if (!LaunchDockAppWithFiles(item, paths)) ShowInfoToast(l10n::Get(l10n::StringId::DockOpenWithFailed));
+#endif
+    }
+
+    static bool ResolveShortcut(const std::wstring& lnk, std::wstring& target, std::wstring& args) {
+        using Microsoft::WRL::ComPtr;
+        ComPtr<IShellLinkW> link;
+        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) return false;
+        ComPtr<IPersistFile> file;
+        if (FAILED(link.As(&file)) || FAILED(file->Load(lnk.c_str(), STGM_READ))) return false;
+        wchar_t path[MAX_PATH * 2]{};
+        wchar_t arg_buf[INFOTIPSIZE]{};
+        if (FAILED(link->GetPath(path, ARRAYSIZE(path), nullptr, SLGP_RAWPATH)) || !path[0]) return false;
+        wchar_t expanded[MAX_PATH * 2]{};
+        const DWORD n = ExpandEnvironmentStringsW(path, expanded, ARRAYSIZE(expanded));
+        target = (n > 0 && n <= ARRAYSIZE(expanded)) ? expanded : path;
+        if (SUCCEEDED(link->GetArguments(arg_buf, ARRAYSIZE(arg_buf)))) args = arg_buf;
+        return true;
+    }
+
+    static bool ActivatePackagedAppForFiles(const std::wstring& aumid, const std::vector<std::wstring>& paths) {
+        using Microsoft::WRL::ComPtr;
+        std::vector<PIDLIST_ABSOLUTE> pidls;
+        for (const auto& p : paths) {
+            PIDLIST_ABSOLUTE pidl = nullptr;
+            if (SUCCEEDED(SHParseDisplayName(p.c_str(), nullptr, &pidl, 0, nullptr)) && pidl) pidls.push_back(pidl);
+        }
+        bool ok = false;
+        ComPtr<IShellItemArray> items;
+        std::vector<PCIDLIST_ABSOLUTE> ids(pidls.begin(), pidls.end());
+        if (!ids.empty() &&
+            SUCCEEDED(SHCreateShellItemArrayFromIDLists(static_cast<UINT>(ids.size()), ids.data(), &items))) {
+            ComPtr<IApplicationActivationManager> mgr;
+            if (SUCCEEDED(CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_LOCAL_SERVER,
+                                           IID_PPV_ARGS(&mgr)))) {
+                DWORD pid = 0;
+                ok = SUCCEEDED(mgr->ActivateForFile(aumid.c_str(), items.Get(), L"open", &pid));
+            }
+        }
+        for (auto* pidl : pidls) CoTaskMemFree(pidl);
+        return ok;
+    }
+
+    static std::wstring ProcessImageOfWindow(HWND hwnd) {
+        DWORD pid = 0;
+        if (!hwnd || !GetWindowThreadProcessId(hwnd, &pid) || pid == 0) return {};
+        HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!proc) return {};
+        wchar_t path[MAX_PATH * 2]{};
+        DWORD len = ARRAYSIZE(path);
+        std::wstring out;
+        if (QueryFullProcessImageNameW(proc, 0, path, &len)) out.assign(path, len);
+        CloseHandle(proc);
+        return out;
+    }
+
+    // 拖到程序坞的应用上 = 用它打开: the exe gets the files as arguments; a packaged app gets them through
+    // its file activation; a running app without either is found through its window's process.
+    static bool LaunchDockAppWithFiles(const render::DockBarItem& item, const std::vector<std::wstring>& paths) {
+        std::wstring exe;
+        std::wstring args;
+        if (EndsWithNoCase(item.launch_path, L".exe")) {
+            exe = item.launch_path;
+        } else if (EndsWithNoCase(item.launch_path, L".lnk")) {
+            if (!ResolveShortcut(item.launch_path, exe, args) || !EndsWithNoCase(exe, L".exe")) {
+                exe.clear();
+                args.clear();
+            }
+        }
+        if (exe.empty() && !item.aumid.empty() && ActivatePackagedAppForFiles(item.aumid, paths)) return true;
+        if (exe.empty()) {
+            for (HWND h : item.windows) {
+                const std::wstring image = ProcessImageOfWindow(h);
+                if (!image.empty() && !EndsWithNoCase(image, L"\\ApplicationFrameHost.exe")) { exe = image; break; }
+            }
+        }
+        if (exe.empty() || !EndsWithNoCase(exe, L".exe")) return false;
+        for (const auto& p : paths) {
+            if (!args.empty()) args.push_back(L' ');
+            args += QuoteCommandArgument(p);
+        }
+        LaunchDetached(exe, args, std::filesystem::path(exe).parent_path().wstring());
+        return true;
+    }
+
+    // The wheel over a running app's Dock icon steps through its windows (down: next, up: previous).
+    // Returns whether the icon took the wheel.
+    bool CycleDockAppWindows(size_t idx, int wheel_delta) {
+        if (idx >= live_data_.dock.items.size()) return false;
+        const auto& item = live_data_.dock.items[idx];
+        if (item.kind != render::DockBarItemKind::App || item.windows.empty()) return false;
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        const std::vector<HWND> wins = item.windows;   // fixtures use stand-in handles
+#else
+        std::vector<HWND> wins;
+        for (HWND h : item.windows)
+            if (render::LiquidDockBarState::IsWindowLiveForActivation(h)) wins.push_back(h);
+        if (wins.empty()) return false;
+#endif
+        if (dock_wheel_key_ != item.key) {
+            dock_wheel_key_ = item.key;
+            dock_wheel_accum_ = 0;
+            dock_wheel_pos_ = -1;
+#ifndef PULSE_DESKTOP_DRAG_TEST
+            const HWND fg = GetForegroundWindow();
+            for (size_t i = 0; i < wins.size(); ++i)
+                if (wins[i] == fg) dock_wheel_pos_ = static_cast<int>(i);
+#endif
+        }
+        dock_wheel_accum_ += wheel_delta;
+        if (std::abs(dock_wheel_accum_) < WHEEL_DELTA) return true;   // fine touchpad steps add up first
+        const int step = dock_wheel_accum_ < 0 ? 1 : -1;
+        dock_wheel_accum_ = 0;
+        const int n = static_cast<int>(wins.size());
+        dock_wheel_pos_ = dock_wheel_pos_ < 0 ? (step > 0 ? 0 : n - 1) : ((dock_wheel_pos_ + step) % n + n) % n;
+        const HWND target = wins[static_cast<size_t>(dock_wheel_pos_)];
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        test_dock_activations_.push_back(L"cycle:" + std::to_wstring(dock_wheel_pos_));
+        (void)target;
+#else
+        ActivateWindowReliably(target);
+#endif
+        return true;
+    }
+
     void PinPathsToDock(const std::vector<std::wstring>& raw_paths) {
         if (raw_paths.empty()) return;
         const model::RectI wa = PrimaryWorkAreaClient();
@@ -3616,11 +3800,31 @@ private:
     void LoadOrInitModel() {
         state_.monitors = MonitorsInDip();
 #ifdef PULSE_DESKTOP_PERSISTENCE_TEST
-        const std::string& saved = test_model_input_;
+        std::string saved = test_model_input_;
 #else
-        const std::string saved = LoadTextFile(mount::DefaultLayoutStateFilePath());
+        std::string saved = LoadTextFile(mount::DefaultLayoutStateFilePath());
 #endif
-        if (!saved.empty() && model::DeserializeModelStateJson(saved, state_)) {
+        bool parsed = !saved.empty() && model::DeserializeModelStateJson(saved, state_);
+        if (!saved.empty() && !parsed) {
+            // A damaged layout file: put back the newest 布局快照 rather than starting over.
+            for (const auto& file : ListLayoutSnapshots()) {
+                std::string snap = LoadTextFile((LayoutSnapshotDir() / file).wstring());
+                model::DesktopModelState recovered;
+                if (snap.empty() || !model::DeserializeModelStateJson(snap, recovered)) continue;
+                state_ = std::move(recovered);
+                saved = std::move(snap);
+                parsed = true;
+                layout_recovered_from_snapshot_ = true;
+#ifndef PULSE_DESKTOP_PERSISTENCE_TEST
+                std::error_code ec;
+                const std::filesystem::path damaged(mount::DefaultLayoutStateFilePath());
+                std::filesystem::copy_file(damaged, damaged.wstring() + L".damaged",
+                                           std::filesystem::copy_options::overwrite_existing, ec);
+#endif
+                break;
+            }
+        }
+        if (parsed) {
             state_.monitors = MonitorsInDip();
             if (state_.groups.empty()) {
                 state_.groups = model::MakeDefaultGroups(PrimaryWorkAreaClient());
@@ -3663,6 +3867,118 @@ private:
         if (tile_drag_session_.Active()) committed.tiles = tile_drag_session_.Original();
         if (group_drag_session_.Pending()) committed.groups = group_drag_session_.Original();
         return model::SerializeModelStateJson(committed);
+    }
+
+    // ---- 布局快照: copies of the layout file, by hand from the desktop menu or once a day ----
+    static constexpr size_t kKeepManualSnapshots = 20;
+    static constexpr size_t kKeepDailySnapshots = 7;
+    static constexpr size_t kSnapshotMenuRows = 8;
+
+    std::filesystem::path LayoutSnapshotDir() const {
+        if (!snapshot_dir_override_.empty()) return std::filesystem::path(snapshot_dir_override_);
+#if defined(PULSE_DESKTOP_DRAG_TEST) || defined(PULSE_DESKTOP_PERSISTENCE_TEST)
+        return {};   // test hosts never read or write the real profile's snapshots
+#else
+        return std::filesystem::path(mount::DefaultLayoutStateFilePath()).parent_path() / L"layout_snapshots";
+#endif
+    }
+
+    std::vector<std::wstring> ListLayoutSnapshots() const {
+        std::vector<std::wstring> names;
+        if (LayoutSnapshotDir().empty()) return names;
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(LayoutSnapshotDir(), ec), end; !ec && it != end; it.increment(ec)) {
+            if (it->is_regular_file(ec)) names.push_back(it->path().filename().wstring());
+        }
+        return model::SortLayoutSnapshots(std::move(names));
+    }
+
+    static model::LayoutSnapshotName LayoutSnapshotNameNow(bool automatic) {
+        SYSTEMTIME t{};
+        GetLocalTime(&t);
+        model::LayoutSnapshotName n;
+        n.automatic = automatic;
+        n.year = t.wYear; n.month = t.wMonth; n.day = t.wDay;
+        n.hour = t.wHour; n.minute = t.wMinute; n.second = t.wSecond;
+        return n;
+    }
+
+    static std::wstring LayoutSnapshotLabel(const std::wstring& file) {
+        const auto n = model::ParseLayoutSnapshotFileName(file);
+        if (!n) return file;
+        wchar_t buf[128]{};
+        swprintf_s(buf, L"%d-%02d-%02d %02d:%02d \u00b7 %s", n->year, n->month, n->day, n->hour, n->minute,
+                   l10n::Get(n->automatic ? l10n::StringId::LayoutSnapshotAuto
+                                          : l10n::StringId::LayoutSnapshotManual).c_str());
+        return buf;
+    }
+
+    std::vector<std::pair<std::wstring, std::wstring>> LayoutSnapshotMenuEntries() const {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        for (const auto& file : ListLayoutSnapshots()) {
+            if (out.size() >= kSnapshotMenuRows) break;
+            out.emplace_back(file, LayoutSnapshotLabel(file));
+        }
+        return out;
+    }
+
+    bool SaveLayoutSnapshot(bool automatic) {
+        const std::filesystem::path dir = LayoutSnapshotDir();
+        if (dir.empty()) return false;
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        const std::wstring name = model::MakeLayoutSnapshotFileName(LayoutSnapshotNameNow(automatic));
+        if (!SaveTextFileAtomic((dir / name).wstring(), CommittedModelJson())) return false;
+        for (const auto& old : model::LayoutSnapshotsToPrune(ListLayoutSnapshots(), kKeepManualSnapshots,
+                                                             kKeepDailySnapshots)) {
+            std::filesystem::remove(dir / old, ec);
+        }
+        return true;
+    }
+
+    void MaybeTakeDailyLayoutSnapshot() {
+        if (model::DailyLayoutSnapshotDue(ListLayoutSnapshots(), LayoutSnapshotNameNow(true))) {
+            SaveLayoutSnapshot(true);
+        }
+    }
+
+    std::unordered_set<std::wstring> MappedFolderKeys() const {
+        std::unordered_set<std::wstring> keys;
+        for (const auto& g : state_.groups)
+            if (!g.mapped_folder_path.empty()) keys.insert(NormalizeFolderKey(g.mapped_folder_path));
+        return keys;
+    }
+
+    // Puts a snapshot's groups, widgets and file places back, as one undoable step.
+    bool RestoreLayoutSnapshot(const std::wstring& file) {
+        if (!model::ParseLayoutSnapshotFileName(file)) return false;   // a bare snapshot name, never a path
+        const std::string text = LoadTextFile((LayoutSnapshotDir() / file).wstring());
+        model::DesktopModelState snap;
+        if (text.empty() || !model::DeserializeModelStateJson(text, snap)) {
+            ShowInfoToast(l10n::Get(l10n::StringId::LayoutSnapshotFailed));
+            return false;
+        }
+        CancelGroupDrag(false);
+        PushUndo(l10n::Get(l10n::StringId::LayoutSnapshotRestore));
+        const auto mapped_before = MappedFolderKeys();
+        model::ApplyLayoutSnapshot(snap, state_);
+        interaction_.group_pages.clear();
+        interaction_.group_anim_positions.clear();
+        group_springs_.Clear();
+        group_hover_.Reset();
+        if (MappedFolderKeys() != mapped_before) {
+            SyncWatcherDirectories();
+            RefreshDesktopItems();
+            RefreshHealthStats();
+        }
+        RecomputeLayout();
+        SaveModel();
+        renderer_.InvalidateAll();
+        wchar_t buf[192]{};
+        swprintf_s(buf, l10n::Get(l10n::StringId::LayoutSnapshotRestoredFormat).c_str(),
+                   LayoutSnapshotLabel(file).c_str());
+        ShowUndoToast(buf);
+        return true;
     }
 
     void SaveModel() {
@@ -3868,6 +4184,7 @@ private:
         spec.group_view_mode = g.view_mode;
         spec.group_tabbed = model::TabMembers(state_.groups, g.id).size() > 1;
         spec.group_focus_visible = g.focus_visible;
+        spec.group_locked = GroupLocked(group_idx);
         spec.group_cols = g.cols;
         spec.group_material = g.material;
         spec.group_sort = g.sort_by;
@@ -4187,8 +4504,29 @@ private:
         else if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerGroupInteraction);
     }
 
+    // 锁定分组: a tab stack moves as one card, so any locked tab locks the stack.
+    bool GroupLocked(size_t index) const {
+        if (index >= state_.groups.size()) return false;
+        for (size_t member : model::TabMembers(state_.groups, state_.groups[index].id))
+            if (member < state_.groups.size() && state_.groups[member].locked) return true;
+        return state_.groups[index].locked;
+    }
+
+    void ShowGroupLockedHint() {
+        if (group_lock_hint_shown_) return;
+        group_lock_hint_shown_ = true;
+        ShowInfoToast(l10n::Get(l10n::StringId::DesktopGroupLockedHint));
+    }
+
     void BeginGroupDrag(size_t index, int x, int y, bool resize) {
         if (index >= state_.groups.size()) return;
+        group_lock_hint_shown_ = false;
+        locked_press_.reset();
+        if (GroupLocked(index)) {
+            // A locked card still takes clicks on its header (tab switching) but never moves or resizes.
+            if (resize) { ShowGroupLockedHint(); return; }
+            locked_press_ = model::PointI{x, y};
+        }
         CancelTileDrag(false);
         if (group_hover_.Pending()) { group_hover_.Reset(); RefreshGroupViews(); }
         for (size_t member : model::TabMembers(state_.groups, state_.groups[index].id)) {
@@ -4206,6 +4544,10 @@ private:
 
     void UpdateGroupDrag(int x, int y, uint64_t now) {
         if (!group_drag_session_.Pending()) return;
+        if (locked_press_) {
+            if (std::abs(x - locked_press_->x) >= 6 || std::abs(y - locked_press_->y) >= 6) ShowGroupLockedHint();
+            return;
+        }
         const auto before = CaptureDragDamage();
         const bool was_active = group_drag_session_.Active();
         if (group_drag_session_.Update(state_.groups, {x, y}, now)) {
@@ -4625,6 +4967,15 @@ private:
             SyncSettingsToPlugin();
             renderer_.InvalidateAll();
         }
+    }
+
+    void ShowInfoToast(const std::wstring& msg) {
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        test_info_toasts_.push_back(msg);
+#endif
+        overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+        overlays_.ShowToast(PrimaryWorkAreaScreen(), msg);
+        SyncOverlayInteractionFlags();
     }
 
     void ShowUndoToast(const std::wstring& msg) {
@@ -5223,6 +5574,15 @@ private:
                     z.kind = overlays::DropZoneKind::DockTrash;
                     return z;
                 }
+                if (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size() &&
+                    DockItemOpensFiles(live_data_.dock.items[static_cast<size_t>(hit)])) {
+                    const auto& app = live_data_.dock.items[static_cast<size_t>(hit)];
+                    z.kind = overlays::DropZoneKind::DockApp;
+                    z.target_title = app.title;
+                    z.target_path = app.key;
+                    z.hint = DockOpenWithLabel(app);
+                    return z;
+                }
                 z.kind = overlays::DropZoneKind::DockBar;
                 return z;
             }
@@ -5286,6 +5646,10 @@ private:
 
         if (zone.kind == overlays::DropZoneKind::DockBar) {
             PinPathsToDock(paths);
+            return;
+        }
+        if (zone.kind == overlays::DropZoneKind::DockApp) {
+            DropPathsOnDockApp(zone.target_path, paths);
             return;
         }
         if (zone.kind == overlays::DropZoneKind::DockTrash) {
@@ -5955,6 +6319,14 @@ private:
             renderer_.InvalidateAll();
         } else if (cmd == "undo") {
             PerformUndo();
+        } else if (cmd == "layout-snap-save") {
+            if (SaveLayoutSnapshot(false)) ShowInfoToast(l10n::Get(l10n::StringId::LayoutSnapshotSaved));
+        } else if (cmd.starts_with("layout-snap-restore:")) {
+            RestoreLayoutSnapshot(ipc::Utf8ToWide(cmd.substr(20)));
+        } else if (cmd == "layout-snap-folder") {
+            std::error_code ec;
+            std::filesystem::create_directories(LayoutSnapshotDir(), ec);
+            OpenPathInPulseOrShell(LayoutSnapshotDir().wstring());
         } else if (cmd == "open-search") {
             OpenSearchOverlay(L"");
         } else if (cmd == "health-check") {
@@ -6415,6 +6787,7 @@ private:
                 else if (cmd == "sort-type") g.sort_by = model::GroupSortBy::Type;
                 else if (cmd == "sort-manual") g.sort_by = model::GroupSortBy::Manual;
                 else if (cmd.starts_with("group-cols:") && cmd.size() >= 12) {
+                    if (GroupLocked(i)) { group_lock_hint_shown_ = false; ShowGroupLockedHint(); return; }
                     PushUndo(L"调整分组列数");
                     const int c = std::clamp(cmd[11] - '0', model::kGroupMinCols, model::kGroupMaxCols);
                     model::ResizeGroupColumns(state_.groups, i, c, g.visible_rows,
@@ -6427,6 +6800,11 @@ private:
                 else if (cmd == "mat-mica-alt") g.material = model::CardMaterial::MicaAlt;
                 else if (cmd == "mat-solid") g.material = model::CardMaterial::Solid;
                 else if (cmd == "toggle-focus") g.focus_visible = !g.focus_visible;
+                else if (cmd == "toggle-lock") {
+                    const bool lock = !GroupLocked(i);
+                    for (size_t member : model::TabMembers(state_.groups, g.id)) state_.groups[member].locked = lock;
+                    g.locked = lock;
+                }
                 else if (cmd == "open-group-pulse") {
                     OpenPathInPulseOrShell(g.mapped_folder_path.empty()
                                                ? mount::ResolveKnownFolder(FOLDERID_Desktop)
@@ -9461,6 +9839,14 @@ private:
                         interaction_.drop_hint_visible = true;
                         interaction_.drop_hint_pos = {x, y};
                         interaction_.drop_hint_label = L"移入回收站";
+                    } else if (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size() &&
+                               DockItemOpensFiles(live_data_.dock.items[static_cast<size_t>(hit)])) {
+                        const auto& app = live_data_.dock.items[static_cast<size_t>(hit)];
+                        interaction_.drop_target_dock = 3;
+                        dock_drop_key_ = app.key;
+                        interaction_.drop_hint_visible = true;
+                        interaction_.drop_hint_pos = {x, y};
+                        interaction_.drop_hint_label = DockOpenWithLabel(app);
                     } else {
                         interaction_.drop_target_dock = 1;
                         interaction_.drop_hint_visible = true;
@@ -9966,6 +10352,12 @@ private:
                     renderer_.InvalidateAll();
                     return 0;
                 }
+                if (dst_dock == 3) {
+                    DropPathsOnDockApp(dock_drop_key_, paths);
+                    dock_drop_key_.clear();
+                    renderer_.InvalidateAll();
+                    return 0;
+                }
                 if (dst_dock == 1) {
                     // Non-destructive pin to Dock: original desktop icon / group membership stays untouched!
                     PinPathsToDock(paths);
@@ -10362,6 +10754,16 @@ private:
                     return 0;
                 }
             }
+            // Over a running app on the Dock, the wheel steps through its windows.
+            if (state_.settings.dock_enabled && !interaction_.side_drawer_open &&
+                state_.settings.active_scene != model::DesktopScene::Present &&
+                live_data_.dock.HitTestBar(static_cast<float>(c.x), static_cast<float>(c.y), dock_bar_pointer_inside_)) {
+                const int hit = live_data_.dock.HitTestItem(static_cast<float>(c.x), static_cast<float>(c.y));
+                if (hit >= 0 && CycleDockAppWindows(static_cast<size_t>(hit), GET_WHEEL_DELTA_WPARAM(wp))) {
+                    handled = true;
+                    return 0;
+                }
+            }
             // Over a group card or tile stack, the wheel turns its pages.
             if (state_.settings.organize_enabled && !state_.settings.icons_hidden &&
                 state_.settings.active_scene != model::DesktopScene::Present &&
@@ -10540,6 +10942,7 @@ private:
                 }
             }
             spec.widget_catalog = WidgetCatalog();
+            spec.layout_snapshots = LayoutSnapshotMenuEntries();
 
             spec.target_kind = overlays::ContextMenuTargetKind::BlankDesktop;
             spec.ai_organize_enabled = AiOrganizerEnabled();
@@ -10788,6 +11191,14 @@ private:
     pulse::desktop::interaction::GroupDragSession group_drag_session_;
     model::DesktopModelState drag_group_undo_snapshot_{};
     std::optional<size_t> pending_group_idx_;
+    std::optional<model::PointI> locked_press_;   // the press on a locked card's header (never becomes a drag)
+    bool group_lock_hint_shown_ = false;
+    std::wstring dock_drop_key_;                  // the Dock app under an internal file drag (open with it)
+    std::wstring dock_wheel_key_;                 // wheel over a Dock app: the app and window it reached
+    int dock_wheel_pos_ = -1;
+    int dock_wheel_accum_ = 0;
+    std::wstring snapshot_dir_override_;          // tests keep 布局快照 out of the real profile
+    bool layout_recovered_from_snapshot_ = false;
     std::string pending_group_tab_id_;
     std::optional<size_t> dragging_group_idx_;
     std::optional<size_t> resizing_group_idx_;
@@ -10846,6 +11257,7 @@ private:
 #ifdef PULSE_DESKTOP_DRAG_TEST
     std::string test_saved_model_;
     std::vector<std::wstring> test_dock_activations_;
+    std::vector<std::wstring> test_info_toasts_;
 #endif
 #ifdef PULSE_DESKTOP_PERSISTENCE_TEST
     std::string test_model_input_;

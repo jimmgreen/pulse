@@ -146,5 +146,42 @@ int main() {
         check(NextNewGroupTitle({},L"新建分组")==L"新建分组"&&NextNewGroupTitle(named,L"新建分组")==L"新建分组 3",
               "new groups get the first free title");
     }
+    {   // 布局快照: names, order, pruning, the daily rule, and putting one back.
+        LayoutSnapshotName n;n.year=2026;n.month=11;n.day=26;n.hour=14;n.minute=30;n.second=5;
+        const auto f=MakeLayoutSnapshotFileName(n);
+        check(f==L"snap-20261126-143005.json","a hand-made snapshot is named by its time");
+        const auto back=ParseLayoutSnapshotFileName(f);
+        check(back&&!back->automatic&&back->day==26&&back->second==5,"snapshot names read back");
+        n.automatic=true;
+        check(MakeLayoutSnapshotFileName(n)==L"auto-20261126-143005.json","a daily snapshot has its own prefix");
+        check(!ParseLayoutSnapshotFileName(L"layout.json")&&!ParseLayoutSnapshotFileName(L"snap-20261326-143005.json")&&
+              !ParseLayoutSnapshotFileName(L"..\\snap-20261126-143005.json"),"other files, bad dates and paths are not snapshots");
+        const std::vector<std::wstring> files{L"auto-20261124-090000.json",L"snap-20261125-120000.json",L"notes.txt",
+                                              L"auto-20261126-090000.json",L"snap-20261120-080000.json"};
+        const auto sorted=SortLayoutSnapshots(files);
+        check(sorted.size()==4&&sorted[0]==L"auto-20261126-090000.json"&&sorted[3]==L"snap-20261120-080000.json","snapshots list newest first");
+        check(LayoutSnapshotsToPrune(files,1,1)==std::vector<std::wstring>{L"auto-20261124-090000.json",L"snap-20261120-080000.json"},
+              "pruning keeps the newest of each kind");
+        LayoutSnapshotName today;today.year=2026;today.month=11;today.day=26;
+        check(!DailyLayoutSnapshotDue(files,today),"no second daily snapshot on the same day");
+        today.day=27;
+        check(DailyLayoutSnapshotDue(files,today),"a new day takes a daily snapshot");
+        DesktopModelState snap;DesktopGroup a;a.id="a";a.x=100;a.locked=true;snap.groups.push_back(a);
+        DesktopItem i1;i1.path=L"C:\\d\\One.txt";i1.pinned_group_id="a";snap.items.push_back(i1);
+        DesktopModelState cur;DesktopGroup b;b.id="b";cur.groups.push_back(b);
+        DesktopItem c1;c1.path=L"c:\\D\\one.TXT";c1.force_loose=true;cur.items.push_back(c1);
+        DesktopItem c2;c2.path=L"C:\\d\\New.txt";c2.pinned_group_id="b";cur.items.push_back(c2);
+        DesktopItem c3;c3.path=L"C:\\d\\App.lnk";c3.pinned_group_id=kAppsTileGroupId;cur.items.push_back(c3);
+        check(ApplyLayoutSnapshot(snap,cur)==1&&cur.groups.size()==1&&cur.groups[0].id=="a"&&cur.groups[0].locked,
+              "restoring brings the snapshot's groups back");
+        check(cur.items[0].pinned_group_id=="a"&&!cur.items[0].force_loose,"a known file goes back to its group (paths compare case-insensitively)");
+        check(cur.items[1].pinned_group_id.empty()&&cur.items[2].pinned_group_id==kAppsTileGroupId,
+              "a newer file leaves a group that is gone; the apps tile keeps its shortcut");
+        DesktopModelState rt;
+        check(DeserializeModelStateJson(SerializeModelStateJson(cur),rt)&&rt.groups[0].locked,"锁定分组 survives saving");
+        DesktopModelState old_file;
+        check(DeserializeModelStateJson(SerializeModelStateJson(DesktopModelState{}),old_file)&&(old_file.groups.empty()||!old_file.groups[0].locked),
+              "older layouts load unlocked");
+    }
     return failures?1:0;
 }

@@ -6614,6 +6614,21 @@ enum class StringId : UINT {
     QuickLookFilterVideos = IDS_QUICK_LOOK_FILTER_VIDEOS,
     QuickLookImmersive = IDS_QUICK_LOOK_IMMERSIVE,
     DockStackRemove = IDS_DOCK_STACK_REMOVE,
+    DesktopGroupLock = IDS_DESKTOP_GROUP_LOCK,
+    DesktopGroupLockedHint = IDS_DESKTOP_GROUP_LOCKED_HINT,
+    DockOpenWithFormat = IDS_DOCK_OPEN_WITH_FORMAT,
+    DockOpenWithFailed = IDS_DOCK_OPEN_WITH_FAILED,
+    LayoutSnapshots = IDS_LAYOUT_SNAPSHOTS,
+    LayoutSnapshotSave = IDS_LAYOUT_SNAPSHOT_SAVE,
+    LayoutSnapshotOpenFolder = IDS_LAYOUT_SNAPSHOT_OPEN_FOLDER,
+    LayoutSnapshotAuto = IDS_LAYOUT_SNAPSHOT_AUTO,
+    LayoutSnapshotManual = IDS_LAYOUT_SNAPSHOT_MANUAL,
+    LayoutSnapshotSaved = IDS_LAYOUT_SNAPSHOT_SAVED,
+    LayoutSnapshotRestore = IDS_LAYOUT_SNAPSHOT_RESTORE,
+    LayoutSnapshotRestoredFormat = IDS_LAYOUT_SNAPSHOT_RESTORED_FORMAT,
+    LayoutSnapshotRecovered = IDS_LAYOUT_SNAPSHOT_RECOVERED,
+    LayoutSnapshotFailed = IDS_LAYOUT_SNAPSHOT_FAILED,
+    LayoutSnapshotNone = IDS_LAYOUT_SNAPSHOT_NONE,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

@@ -31,6 +31,7 @@ enum class DropZoneKind : uint8_t {
     StagingTrayTile = 5,
     DockBar = 6,
     DockTrash = 7,
+    DockApp = 8,     // an app icon on the Dock: the files open with it
 };
 
 struct DropZoneQueryResult {
@@ -38,6 +39,7 @@ struct DropZoneQueryResult {
     std::string target_id;          // group_id or tile_id
     std::wstring target_title;      // group title or folder name
     std::wstring target_path;       // destination folder path when applicable
+    std::wstring hint;              // the pill text when the host words it (DockApp: 用「…」打开)
 };
 
 struct DropTargetCallbacks {

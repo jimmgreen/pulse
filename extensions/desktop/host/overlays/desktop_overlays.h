@@ -160,6 +160,7 @@ struct ContextMenuSpec {
     bool group_tabbed = false;
     model::GroupViewMode group_view_mode = model::GroupViewMode::Icons;
     bool group_focus_visible = false;
+    bool group_locked = false;
     int group_cols = 4;
     model::CardMaterial group_material = model::CardMaterial::FollowHost;
     model::GroupSortBy group_sort = model::GroupSortBy::ModifiedTime;
@@ -209,6 +210,9 @@ struct ContextMenuSpec {
     uint64_t dock_active_hwnd = 0;
     std::vector<std::pair<uint64_t, std::wstring>> dock_item_windows;
     std::vector<std::pair<std::wstring, std::wstring>> dock_recent_downloads;
+
+    // BlankDesktop 布局快照: snapshot file name and its menu label, newest first.
+    std::vector<std::pair<std::wstring, std::wstring>> layout_snapshots;
 };
 
 struct OverlayCallbacks {

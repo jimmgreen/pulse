@@ -211,6 +211,9 @@ DWORD DesktopDropTarget::EvaluateHover(model::PointI client_pt, DWORD key_state,
     case DropZoneKind::DockTrash:
         out_hint = L"移入回收站";
         return DROPEFFECT_MOVE;
+    case DropZoneKind::DockApp:
+        out_hint = out_zone.hint.empty() ? out_zone.target_title : out_zone.hint;
+        return DROPEFFECT_COPY;
     case DropZoneKind::StagingTrayTile:
         out_hint = L"加入 Pulse 暂存区";
         return DROPEFFECT_COPY;

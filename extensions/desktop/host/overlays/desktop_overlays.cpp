@@ -1274,6 +1274,26 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             u.enabled = !menu_spec_.undo_label.empty();
             menu_rows_.push_back(std::move(u));
         }
+        {
+            // 布局快照: save the layout now, or put a saved one back (it can be undone).
+            MenuRow ls = mk_row("sub:layout-snap", L'\xE81C', l10n::Get(l10n::StringId::LayoutSnapshots));
+            ls.submenu_rows.push_back(mk_row("layout-snap-save", L'\xE74E',
+                                             l10n::Get(l10n::StringId::LayoutSnapshotSave), {}, true));
+            for (const auto& [file, label] : menu_spec_.layout_snapshots) {
+                std::string id = "layout-snap-restore:";
+                for (const wchar_t ch : file) id.push_back(static_cast<char>(ch < 0x80 ? ch : '?'));
+                ls.submenu_rows.push_back(mk_row(std::move(id), 0, label));
+            }
+            if (menu_spec_.layout_snapshots.empty()) {
+                MenuRow none = mk_row("layout-snap-none", 0, l10n::Get(l10n::StringId::LayoutSnapshotNone));
+                none.enabled = false;
+                ls.submenu_rows.push_back(std::move(none));
+            }
+            ls.submenu_rows.back().separator_after = true;
+            ls.submenu_rows.push_back(mk_row("layout-snap-folder", L'\xE838',
+                                             l10n::Get(l10n::StringId::LayoutSnapshotOpenFolder)));
+            menu_rows_.push_back(std::move(ls));
+        }
 
         menu_rows_.push_back(mk_row("open-search", L'\xE721', L"搜索桌面和 Pulse", L"Ctrl+F"));
         menu_rows_.push_back(mk_row("open-desktop-pulse", L'\xEC50', L"在 Pulse 中打开桌面"));
@@ -1343,6 +1363,7 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
                                                  std::to_wstring(c) + L" 列", {}, false,
                                                  menu_spec_.group_cols == c));
             }
+            gc.enabled = !menu_spec_.group_locked;   // a locked card keeps its size
             menu_rows_.push_back(std::move(gc));
         }
         {
@@ -1365,6 +1386,8 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
                                     menu_spec_.group_collapsed ? L"展开分组" : L"卷起分组", L"双击标题"));
         menu_rows_.push_back(mk_row("toggle-focus", L'\xE7C4', L"在专注场景中保持展开", {},
                                     false, menu_spec_.group_focus_visible));
+        menu_rows_.push_back(mk_row("toggle-lock", L'\xE72E', l10n::Get(l10n::StringId::DesktopGroupLock), {},
+                                    false, menu_spec_.group_locked));
         menu_rows_.push_back(mk_row("map-real-folder", L'\xE8B7',
                                     menu_spec_.group_mapped_folder_path.empty()
                                         ? L"对应到真实文件夹…"

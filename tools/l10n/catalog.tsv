@@ -6631,3 +6631,18 @@ QuickLookFilterPhotos	IDS_QUICK_LOOK_FILTER_PHOTOS	7995	图片	Photos	圖片
 QuickLookFilterVideos	IDS_QUICK_LOOK_FILTER_VIDEOS	7996	视频	Videos	影片
 QuickLookImmersive	IDS_QUICK_LOOK_IMMERSIVE	7997	沉浸式看图	Photo viewer layout	沉浸式看圖
 DockStackRemove	IDS_DOCK_STACK_REMOVE	7993	从程序坞移除	Remove from Dock	從程式塢移除
+DesktopGroupLock	IDS_DESKTOP_GROUP_LOCK	8008	锁定分组	Lock group	鎖定群組
+DesktopGroupLockedHint	IDS_DESKTOP_GROUP_LOCKED_HINT	8009	分组已锁定，解锁后才能移动或调整大小	This group is locked. Unlock it to move or resize it.	群組已鎖定，解鎖後才能移動或調整大小
+DockOpenWithFormat	IDS_DOCK_OPEN_WITH_FORMAT	8010	用「%s」打开	Open with %s	用「%s」開啟
+DockOpenWithFailed	IDS_DOCK_OPEN_WITH_FAILED	8011	无法用这个应用打开	Couldn't open it with this app	無法用這個應用程式開啟
+LayoutSnapshots	IDS_LAYOUT_SNAPSHOTS	8012	布局快照	Layout snapshots	版面快照
+LayoutSnapshotSave	IDS_LAYOUT_SNAPSHOT_SAVE	8013	保存当前布局	Save current layout	儲存目前版面
+LayoutSnapshotOpenFolder	IDS_LAYOUT_SNAPSHOT_OPEN_FOLDER	8014	打开快照文件夹	Open snapshot folder	開啟快照資料夾
+LayoutSnapshotAuto	IDS_LAYOUT_SNAPSHOT_AUTO	8015	每日自动	Daily	每日自動
+LayoutSnapshotManual	IDS_LAYOUT_SNAPSHOT_MANUAL	8016	手动	Manual	手動
+LayoutSnapshotSaved	IDS_LAYOUT_SNAPSHOT_SAVED	8017	已保存布局快照	Layout snapshot saved	已儲存版面快照
+LayoutSnapshotRestore	IDS_LAYOUT_SNAPSHOT_RESTORE	8018	恢复布局快照	Restore layout snapshot	還原版面快照
+LayoutSnapshotRestoredFormat	IDS_LAYOUT_SNAPSHOT_RESTORED_FORMAT	8019	已恢复 %s 的布局	Restored the layout from %s	已還原 %s 的版面
+LayoutSnapshotRecovered	IDS_LAYOUT_SNAPSHOT_RECOVERED	8020	布局文件损坏，已从最近的快照恢复	The layout file was damaged, so the latest snapshot was restored	版面檔案損毀，已從最近的快照還原
+LayoutSnapshotFailed	IDS_LAYOUT_SNAPSHOT_FAILED	8021	无法读取这个快照	Couldn't read this snapshot	無法讀取這個快照
+LayoutSnapshotNone	IDS_LAYOUT_SNAPSHOT_NONE	8022	还没有快照	No snapshots yet	還沒有快照

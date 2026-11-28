@@ -1412,7 +1412,7 @@ GroupHeaderHitZone DesktopRenderer::HitTestGroupCard(const model::DesktopGroup& 
     }
     if (!frame.contains(px, py)) return GroupHeaderHitZone::None;
 
-    if (!effective_collapsed && px >= frame.right() - 16 && py >= frame.bottom() - 16) {
+    if (!effective_collapsed && !group.locked && px >= frame.right() - 16 && py >= frame.bottom() - 16) {
         return GroupHeaderHitZone::ResizeGrip;
     }
     if (!effective_collapsed) {
@@ -4468,6 +4468,12 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
                                       Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
         DrawWidgetText(count_buf, static_cast<UINT32>(std::wcslen(count_buf)), fmt_pill_.Get(),
                           count_rc, Brush(text_sec));
+        if (group.locked) {   // 锁定分组: a small padlock after the count
+            const wchar_t lock_glyph[2] = {L'\xE72E', 0};
+            DrawGlyph(d2d_dc_.Get(), lock_glyph, 1, fmt_fluent_12_.Get(),
+                      D2D1::RectF(count_rc.right + 4.0f, rc.top, count_rc.right + 20.0f, hdr_bottom),
+                      Brush(text_sec, 0.85f));
+        }
 
     }
 
