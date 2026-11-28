@@ -1608,6 +1608,91 @@ int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
         const auto png=std::filesystem::path(output).parent_path()/(L"settings-context-"+std::to_wstring(w)+L".png");
         check(s.compositor.SaveSnapshot(png.c_str()),"context menu page screenshot captured");
     }
+    // 随机背景图: page 0 geometry, the 3x3 position grid and the hit mapping.
+    {
+        auto background_vm=BuildVm(s,false);
+        background_vm.settings_open=true;background_vm.settings_page=0;
+        background_vm.settings_scroll=0;background_vm.settings_expanded=0xFFFFFFFFu;
+        background_vm.settings_search_query.clear();background_vm.settings_search_results.clear();
+        const float background_scale=s.scale;
+        const auto background_window=D2D1::RectF(0,0,1280*background_scale,2600*background_scale);
+        const auto background=ui::MakeSettingsLayout(background_vm,background_window,background_scale,
+            s.renderer.TitleBarHeight(),28*background_scale,&painter);
+        auto filled=[](D2D1_RECT_F r) { return r.bottom>r.top && r.right>r.left; };
+        bool background_rows=filled(background.wallpaper_source_card) && filled(background.wallpaper_pick) &&
+            filled(background.wallpaper_next) && filled(background.wallpaper_url_row) &&
+            filled(background.wallpaper_pointer_row) && filled(background.wallpaper_fit_card) &&
+            filled(background.wallpaper_position_card) && filled(background.wallpaper_ratio_card) &&
+            filled(background.wallpaper_region_card) && filled(background.wallpaper_opacity_card) &&
+            filled(background.wallpaper_switch_card) && filled(background.wallpaper_interval_card);
+        for(int i=0;i<4;++i) background_rows &= filled(background.wallpaper_source_row[i]) &&
+            filled(background.wallpaper_fit_row[i]) && filled(background.wallpaper_switch_row[i]);
+        for(int i=0;i<3;++i) background_rows &= filled(background.wallpaper_ratio_row[i]) &&
+            filled(background.wallpaper_opacity_row[i]) && filled(background.wallpaper_interval_row[i]);
+        for(int i=0;i<2;++i) background_rows &= filled(background.wallpaper_region_row[i]);
+        for(int i=0;i<9;++i) background_rows &= filled(background.wallpaper_position_cell[i]);
+        check(background_rows,"random background rows and every 3x3 cell have visible geometry");
+        bool background_disjoint=true;
+        for(int i=0;i<9;++i) for(int j=i+1;j<9;++j) {
+            const auto a=background.wallpaper_position_cell[i],b=background.wallpaper_position_cell[j];
+            background_disjoint &= !(a.left<b.right && b.left<a.right && a.top<b.bottom && b.top<a.bottom);
+        }
+        check(background_disjoint,"the 3x3 position cells do not overlap");
+        auto middle=[](D2D1_RECT_F r) {
+            return D2D1::Point2F((r.left+r.right)/2.0f,(r.top+r.bottom)/2.0f); };
+        const auto grid_tl=middle(background.wallpaper_position_cell[0]);
+        const auto grid_center=middle(background.wallpaper_position_cell[4]);
+        const auto grid_br=middle(background.wallpaper_position_cell[8]);
+        bool grid_edges=true;
+        for(int i=0;i<9;++i) {
+            const auto cell=middle(background.wallpaper_position_cell[i]);
+            grid_edges &= grid_tl.x<=cell.x && grid_tl.y<=cell.y && grid_br.x>=cell.x && grid_br.y>=cell.y;
+        }
+        check(grid_edges && std::fabs(grid_center.x-(grid_tl.x+grid_br.x)/2.0f)<=1.0f &&
+            std::fabs(grid_center.y-(grid_tl.y+grid_br.y)/2.0f)<=1.0f,
+            "the 3x3 grid starts top-left, centers on 4 and ends bottom-right");
+        auto background_hit=[&](D2D1_RECT_F r) {
+            const auto point=middle(r);
+            return s.renderer.HitTest(background_vm,background_window,point.x,point.y); };
+        bool position_hits=true;
+        for(int i=0;i<9;++i) {
+            const auto hit=background_hit(background.wallpaper_position_cell[i]);
+            position_hits &= hit.region==H::SettingsWallpaperPosition && hit.index==i;
+        }
+        check(position_hits,"each 3x3 position cell hits its own index");
+        bool background_choices=true;
+        for(int i=0;i<4;++i) {
+            const auto source=background_hit(background.wallpaper_source_row[i]);
+            const auto fit=background_hit(background.wallpaper_fit_row[i]);
+            const auto mode=background_hit(background.wallpaper_switch_row[i]);
+            background_choices &= source.region==H::SettingsWallpaperSource && source.index==i &&
+                fit.region==H::SettingsWallpaperFit && fit.index==i &&
+                mode.region==H::SettingsWallpaperSwitch && mode.index==i;
+        }
+        for(int i=0;i<2;++i) {
+            const auto region=background_hit(background.wallpaper_region_row[i]);
+            background_choices &= region.region==H::SettingsWallpaperRegion && region.index==i;
+        }
+        const auto next_hit=background_hit(background.wallpaper_next);
+        background_choices &= next_hit.region==H::SettingsWallpaperNext && next_hit.index==0;
+        check(background_choices,"source, fit, region, switch rows and 下一张 hit their own target");
+    }
+    // A legacy profile carries none of the new keys: the view model must expose
+    // the image-source defaults and leave an unresolved path on the single image.
+    {
+        const auto previous_prefs=s.appPrefs;
+        app::AppPrefs background_defaults;background_defaults.persist=false;
+        s.appPrefs=background_defaults;
+        const auto defaults_vm=BuildVm(s,false);
+        check(defaults_vm.background_source==0 && defaults_vm.background_fit==1 &&
+            defaults_vm.background_position==4 && defaults_vm.background_region==0 &&
+            defaults_vm.background_opacity==100 && defaults_vm.background_switch==0 &&
+            defaults_vm.background_ratio==50 && defaults_vm.background_interval_min==30,
+            "legacy profiles fill the view model with the random background defaults");
+        check(defaults_vm.background_resolved_path==defaults_vm.background_image,
+            "an unresolved random background falls back to the single image path");
+        s.appPrefs=previous_prefs;
+    }
     log<<"failures="<<failures<<'\n';return failures ? 1 : 0;
 }
 #endif

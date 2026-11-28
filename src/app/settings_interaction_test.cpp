@@ -74,6 +74,28 @@ int RunSettingsInteractionTest(AppState& s,const wchar_t* output) {
     const bool group_on=s.ctxMenuPrefs.GroupEnabled(ipc::CtxMenuGroup::Software);
     HandleSettingsControl(s,expand);
     check((s.settingsExpanded&(1u<<8)) && s.ctxMenuPrefs.GroupEnabled(ipc::CtxMenuGroup::Software)==group_on,"expanding context group does not toggle its preference");
+    // 随机背景图: each settings control dispatches into the controller and lands
+    // in the live preferences. The sliders are driven by the drag chain instead.
+    s.appPrefs.background_folder=docs.wstring();
+    H wall_source;wall_source.region=H::SettingsWallpaperSource;wall_source.index=1;
+    check(HandleSettingsControl(s,wall_source) && s.appPrefs.background_source==1,
+        "background source row reaches the controller");
+    H wall_position;wall_position.region=H::SettingsWallpaperPosition;wall_position.index=0;
+    check(HandleSettingsControl(s,wall_position) && s.appPrefs.background_position==0,
+        "background position cell reaches the controller");
+    H wall_region;wall_region.region=H::SettingsWallpaperRegion;wall_region.index=1;
+    check(HandleSettingsControl(s,wall_region) && s.appPrefs.background_region==1,
+        "background region row reaches the controller");
+    H wall_switch;wall_switch.region=H::SettingsWallpaperSwitch;wall_switch.index=2;
+    check(HandleSettingsControl(s,wall_switch) && s.appPrefs.background_switch==2,
+        "background switch row reaches the controller");
+    H wall_fit;wall_fit.region=H::SettingsWallpaperFit;wall_fit.index=2;
+    check(HandleSettingsControl(s,wall_fit) && s.appPrefs.background_fit==2,
+        "background fit row reaches the controller");
+    s.settings.BackgroundOpacity(55);
+    check(s.appPrefs.background_opacity==55,"background opacity value reaches the controller");
+    s.settings.BackgroundRatio(30);
+    check(s.appPrefs.background_ratio==30,"background ratio value reaches the controller");
     s.contentSearch.Configure(index::ContentIndexConfig{});
     check(wait([&]{return s.contentSearch.GetConfig().roots.empty();}),"isolated content fixture configuration cleared");
     log<<"failures="<<failures<<'\n';return failures ? 1 : 0;
