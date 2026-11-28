@@ -383,6 +383,13 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.vertical_tabs_row=row(64);
         l.pinned_names_row=row(64);
         l.close_tab_double_click_row=row(64);
+        // 侧栏单击打开新标签页: the lead line is the parent setting, and the eight
+        // section switches (收藏 / 快速访问 / 工作区 / 此电脑的磁盘 / 标签 / 网络 /
+        // 云盘 / 已保存的搜索) are compact dependent rows on one tinted band, so
+        // they read as one sub-setting instead of eight standalone settings.
+        l.sidebar_new_tab_lead=row(80);
+        for(int i=0;i<kSidebarNewTabSectionCount;++i)
+            l.sidebar_new_tab_row[i]=row(40,true);
         l.close_last_tab_row=row(64);
 
         section(I::SettingsSecOpenLocation);

@@ -1,4 +1,5 @@
 #include "../app/settings_controller.h"
+#include "../app/app_model.h"
 #include "../app/shell_integration_registry.h"
 #include "../app/address_bar_command.h"
 #include "../app/session.h"
@@ -2684,6 +2685,49 @@ int wmain(int argc, wchar_t** argv) {
     parsed_prefs.ResetToDefaults();
     passed &= Report("reset turns double-click tab close off",
         !parsed_prefs.close_tab_on_double_click);
+    passed &= Report("sidebar new-tab setting has localized text",
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarFolderNewTab).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarFolderNewTabDesc).empty() &&
+        pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabDrives) ==
+            L"\u6B64\u7535\u8111\u4E0E\u78C1\u76D8" &&
+        pulse::app::kSidebarNewTabSectionCount == 8);
+    passed &= Report("sidebar new-tab switches cover every section",
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabStarred).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabQuickAccess).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabWorkspaces).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabTags).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabNetworks).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabCloud).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsSidebarNewTabSavedSearches).empty());
+    const int drives_section = static_cast<int>(pulse::app::SidebarSectionId::Drives);
+    const int starred_section = static_cast<int>(pulse::app::SidebarSectionId::Starred);
+    passed &= Report("sidebar sections open in a new tab by default",
+        prefs.sidebar_new_tab_mask == 0xFFu && prefs.SidebarSectionNewTab(drives_section));
+    settings_ui.ToggleUi(88);   // 此电脑与磁盘
+    passed &= Report("one sidebar switch leaves the others alone and persists",
+        !prefs.SidebarSectionNewTab(drives_section) && prefs.SidebarSectionNewTab(starred_section) &&
+        parsed_prefs.FromJson(prefs.ToJson()) &&
+        !parsed_prefs.SidebarSectionNewTab(drives_section) &&
+        parsed_prefs.SidebarSectionNewTab(starred_section));
+    settings_ui.ToggleUi(88);
+    passed &= Report("sidebar switch turns back on and persists",
+        prefs.SidebarSectionNewTab(drives_section) && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.SidebarSectionNewTab(drives_section));
+    passed &= Report("legacy current-tab mode turns every sidebar switch off",
+        parsed_prefs.FromJson(L"{\"sidebar_open_mode\":0}") &&
+        parsed_prefs.sidebar_new_tab_mask == 0u);
+    passed &= Report("legacy single-click mode turns every sidebar switch on",
+        parsed_prefs.FromJson(L"{\"sidebar_open_mode\":1}") &&
+        parsed_prefs.sidebar_new_tab_mask == 0xFFu);
+    passed &= Report("legacy boolean switch turns every sidebar switch on",
+        parsed_prefs.FromJson(L"{\"sidebar_folder_new_tab\":true}") &&
+        parsed_prefs.sidebar_new_tab_mask == 0xFFu);
+    passed &= Report("missing preferences default to a new tab everywhere",
+        parsed_prefs.FromJson(L"{}") && parsed_prefs.sidebar_new_tab_mask == 0xFFu);
+    parsed_prefs.sidebar_new_tab_mask = 0;
+    parsed_prefs.ResetToDefaults();
+    passed &= Report("reset turns every sidebar switch back on",
+        parsed_prefs.sidebar_new_tab_mask == 0xFFu);
     passed &= Report("confirm before deleting setting has localized text",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDelete).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDeleteDesc).empty() &&

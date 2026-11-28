@@ -100,6 +100,7 @@ void AppPrefs::ResetToDefaults() {
     external_open = 0;
     close_window_with_last_tab = true;
     close_tab_on_double_click = false;
+    sidebar_new_tab_mask = 0xFFu;
     confirm_recycle_delete = false;
     start_in_tray = false;
     lan_discovery = true;
@@ -343,6 +344,8 @@ std::wstring AppPrefs::ToJson() const {
     out += close_window_with_last_tab ? L"true" : L"false";
     out += L",\n  \"close_tab_on_double_click\":";
     out += close_tab_on_double_click ? L"true" : L"false";
+    out += L",\n  \"sidebar_new_tab_mask\":";
+    out += std::to_wstring(sidebar_new_tab_mask & 0xFFu);
     out += L",\n  \"confirm_recycle_delete\":";
     out += confirm_recycle_delete ? L"true" : L"false";
     out += L",\n  \"start_in_tray\":";
@@ -728,6 +731,18 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     // Missing key = preferences saved before the setting existed: keep their behavior.
     close_window_with_last_tab = pulse::json::ExtractBool(json, L"close_window_with_last_tab", false);
     close_tab_on_double_click = pulse::json::ExtractBool(json, L"close_tab_on_double_click", false);
+    // 侧栏单击打开新标签页: migrated from the earlier three-way mode. Mode 0
+    // replaced the current tab (all switches off); 1 and 2 meant a new tab.
+    const int sidebar_mask = pulse::json::ExtractInt(json, L"sidebar_new_tab_mask", -1);
+    const int sidebar_mode = pulse::json::ExtractInt(json, L"sidebar_open_mode", -1);
+    if (sidebar_mask >= 0)
+        sidebar_new_tab_mask = static_cast<unsigned int>(sidebar_mask) & 0xFFu;
+    else if (sidebar_mode >= 0)
+        sidebar_new_tab_mask = sidebar_mode == 0 ? 0u : 0xFFu;
+    else if (pulse::json::ExtractBool(json, L"sidebar_folder_new_tab", false))
+        sidebar_new_tab_mask = 0xFFu;
+    else
+        sidebar_new_tab_mask = 0xFFu;
     confirm_recycle_delete = pulse::json::ExtractBool(json, L"confirm_recycle_delete", false);
     start_in_tray = pulse::json::ExtractBool(json, L"start_in_tray", false);
     lan_discovery = pulse::json::ExtractBool(json, L"lan_discovery", true);

@@ -789,6 +789,9 @@ struct AppState : AppCoreOwner {
     // double-click it turns into opens the folder and stops that calculation.
     std::wstring folderSizeClickPath;
     LONG folderSizeClickTime = 0;
+    // Sidebar row press: the section it belongs to, so the release knows which
+    // 侧栏单击打开新标签页 switch applies.
+    int pinDragSection = -1;
     HWND hwndWorkspaceRenameEdit = nullptr;
     std::wstring workspaceRenameRoot;
     bool workspaceRenameIgnoreKillFocus = false;

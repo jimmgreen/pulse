@@ -787,6 +787,22 @@ enum class SidebarSectionId : int {
 
 inline constexpr int kSidebarSectionCount = static_cast<int>(SidebarSectionId::Count);
 
+// Settings > 标签页与窗口 > 侧栏单击打开新标签页: one switch per sidebar
+// section, laid out in this order. 收藏 and 快速访问 lead because those rows are
+// what users click most; the C:/D: rows live in Drives (此电脑).
+inline constexpr SidebarSectionId kSidebarNewTabSectionOrder[] = {
+    SidebarSectionId::Starred,
+    SidebarSectionId::QuickAccess,
+    SidebarSectionId::Workspaces,
+    SidebarSectionId::Drives,
+    SidebarSectionId::Tags,
+    SidebarSectionId::Networks,
+    SidebarSectionId::Cloud,
+    SidebarSectionId::SavedSearches,
+};
+inline constexpr int kSidebarNewTabSectionCount =
+    static_cast<int>(sizeof(kSidebarNewTabSectionOrder) / sizeof(kSidebarNewTabSectionOrder[0]));
+
 // Sections whose rows are the section itself: they render without a header and
 // cannot be folded as a whole. Single source of truth — the view-model builder
 // and the section menu both ask here.

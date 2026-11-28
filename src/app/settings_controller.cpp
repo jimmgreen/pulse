@@ -2,6 +2,7 @@
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "settings_controller.h"
+#include "app_model.h"
 #include "blank_pane_click.h"
 #include "default_file_manager.h"
 #include "shell_integration_registry.h"
@@ -1355,6 +1356,13 @@ void SettingsController::IntegrationAction(int index) {
 
 void SettingsController::ToggleUi(int index) {
     if (!prefs_ || !context_) return;
+    // 85..92: 侧栏单击打开新标签页, one switch per sidebar section.
+    if (index >= 85 && index < 85 + app::kSidebarNewTabSectionCount) {
+        const int section = static_cast<int>(app::kSidebarNewTabSectionOrder[index - 85]);
+        prefs_->SetSidebarSectionNewTab(section, !prefs_->SidebarSectionNewTab(section));
+        SaveAndApply(SettingsEffect::None);
+        return;
+    }
     if (index == 81) { ArrangeMinimized(prefs_->arrange_include_minimized ? 0 : 1); return; }
     if (index == 84) {  // 滚动到最后一项之后
         prefs_->list_scroll_past_end = !prefs_->list_scroll_past_end;

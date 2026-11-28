@@ -186,9 +186,26 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             painter_.DrawGlyph(icon,D2D1::RectF(r.left+18*scale_,r.top+19*scale_,r.left+36*scale_,r.top+37*scale_),theme.text_secondary);
             painter_.DrawWrappedBody(l10n::Get(title),D2D1::Point2F(r.left+54*scale_,r.top+12*scale_),width,theme.text);
             painter_.DrawWrappedCaption(l10n::Get(desc),D2D1::Point2F(r.left+54*scale_,r.top+18*scale_+title_h),width,theme.text_secondary);
-        } else label(r,l10n::Get(title),l10n::Get(desc),icon,text_right,hit==15 ? 43.0f : 21.0f);
+        } else label(r,l10n::Get(title),title==desc ? std::wstring{} : l10n::Get(desc),icon,text_right,hit==15 ? 43.0f : 21.0f);
         fluent::ControlState state{}; state.checked=on; state.hovered=IsHovered(vm,H::SettingsToggle,hit);
         painter_.DrawSwitch(D2D1::RectF(r.right-60*scale_,r.top+16*scale_,r.right-16*scale_,r.top+48*scale_),L"",state);
+    };
+    // A dependent switch row: small glyph, 13-DIP title, switch on the right.
+    // Sits on the parent card's tinted band with the shared guide line, so a
+    // group of them reads as one sub-setting (见 侧栏单击打开新标签页).
+    auto sub_toggle=[&](D2D1_RECT_F r,const std::wstring& title,const wchar_t* icon,bool on,int hit) {
+        if(r.bottom<=r.top) return;
+        const bool hot=IsHovered(vm,H::SettingsToggle,hit);
+        if(hot) {
+            MakeBrush(dc,theme.fill_hover,brFillHover_);
+            FillRoundedRect(dc,brFillHover_.get(),r.left+2*scale_,r.top+1*scale_,r.right-r.left-4*scale_,r.bottom-r.top-2*scale_,6*scale_);
+        }
+        const float cy=(r.top+r.bottom)*0.5f;
+        DrawIconText(r.left+18*scale_,cy-8*scale_,16*scale_,16*scale_,icon,L"",theme.text_secondary,0.85f);
+        painter_.DrawText(title,D2D1::RectF(r.left+42*scale_,cy-9*scale_,r.right-76*scale_,cy+9*scale_),
+            compositor_->SmallFormat(),theme.text_secondary);
+        fluent::ControlState state{}; state.checked=on; state.hovered=hot;
+        painter_.DrawSwitch(D2D1::RectF(r.right-62*scale_,r.top,r.right-16*scale_,r.bottom),L"",state);
     };
     auto button=[&](D2D1_RECT_F r,const std::wstring& value,H::Region region,int index,bool primary=false,bool enabled=true,const wchar_t* glyph=L"") {
         if(r.bottom<=r.top) return;
@@ -1129,6 +1146,22 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         toggle(lay.vertical_tabs_row,I::SettingsVerticalTabs,I::SettingsVerticalTabsDesc,L"\xE8A0",vm.settings_vertical_tabs,23);
         toggle(lay.pinned_names_row,I::PinnedNames,I::PinnedNamesDesc,L"\xE718",vm.show_pinned_tab_names,6);
         toggle(lay.close_tab_double_click_row,I::SettingsCloseTabDoubleClick,I::SettingsCloseTabDoubleClickDesc,L"\xEA39",vm.settings_close_tab_double_click,35);
+        {
+            // 侧栏单击打开新标签页: a lead line plus one switch per sidebar
+            // section; Ctrl+click keeps opening a new tab everywhere.
+            const I section_labels[]={I::SettingsSidebarNewTabStarred,I::SettingsSidebarNewTabQuickAccess,
+                I::SettingsSidebarNewTabWorkspaces,I::SettingsSidebarNewTabDrives,I::SettingsSidebarNewTabTags,
+                I::SettingsSidebarNewTabNetworks,I::SettingsSidebarNewTabCloud,I::SettingsSidebarNewTabSavedSearches};
+            const wchar_t* section_icons[]={L"\xE734",L"\xE8B7",L"\xE821",L"\xEDA2",
+                L"\xE8EC",L"\xE968",L"\xE753",L"\xE721"};
+            label(lay.sidebar_new_tab_lead,l10n::Get(I::SettingsSidebarFolderNewTab),
+                l10n::Get(I::SettingsSidebarFolderNewTabDesc),L"\xE8A0",0.0f,38.0f);
+            for(int i=0;i<kSidebarNewTabSectionCount;++i) {
+                const int sec=kSidebarNewTabSections[i];
+                sub_toggle(lay.sidebar_new_tab_row[i],l10n::Get(section_labels[i]),section_icons[i],
+                    (vm.settings_sidebar_new_tab_mask&(1u<<sec))!=0,85+i);
+            }
+        }
         toggle(lay.close_last_tab_row,I::SettingsCloseLastTab,I::SettingsCloseLastTabDesc,L"\xE89F",vm.settings_close_last_tab,26);
         }
         if(page==9) {

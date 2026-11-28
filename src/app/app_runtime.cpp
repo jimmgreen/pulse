@@ -18,6 +18,18 @@
 #include "app_internal.h"
 #include "button_press_hover.h"
 #include "staging_shelf_controller.h"
+
+// 侧栏单击打开新标签页: the settings rows must address the same sections the
+// sidebar uses, in the order ui::kSidebarNewTabSections declares.
+static_assert(pulse::ui::kSidebarNewTabSections[0] == static_cast<int>(pulse::app::SidebarSectionId::Starred) &&
+    pulse::ui::kSidebarNewTabSections[1] == static_cast<int>(pulse::app::SidebarSectionId::QuickAccess) &&
+    pulse::ui::kSidebarNewTabSections[2] == static_cast<int>(pulse::app::SidebarSectionId::Workspaces) &&
+    pulse::ui::kSidebarNewTabSections[3] == static_cast<int>(pulse::app::SidebarSectionId::Drives) &&
+    pulse::ui::kSidebarNewTabSections[4] == static_cast<int>(pulse::app::SidebarSectionId::Tags) &&
+    pulse::ui::kSidebarNewTabSections[5] == static_cast<int>(pulse::app::SidebarSectionId::Networks) &&
+    pulse::ui::kSidebarNewTabSections[6] == static_cast<int>(pulse::app::SidebarSectionId::Cloud) &&
+    pulse::ui::kSidebarNewTabSections[7] == static_cast<int>(pulse::app::SidebarSectionId::SavedSearches),
+    "sidebar new-tab switches must follow SidebarSectionId");
 #include "workspace_sidebar.h"
 #include "app_network_page.h"
 #include "shortcut_page.h"
@@ -3089,6 +3101,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_external_open = s.appPrefs.external_open;
     vm.settings_close_last_tab = s.appPrefs.close_window_with_last_tab;
     vm.settings_close_tab_double_click = s.appPrefs.close_tab_on_double_click;
+    vm.settings_sidebar_new_tab_mask = s.appPrefs.sidebar_new_tab_mask;
     vm.settings_confirm_delete = s.appPrefs.confirm_recycle_delete;
     vm.settings_home_folder = s.appPrefs.home_folder;
     vm.settings_text_render = s.appPrefs.text_render;

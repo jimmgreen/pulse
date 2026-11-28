@@ -6649,5 +6649,15 @@
 #define IDS_DOCK_SPRING_MOVE_FORMAT                                                      8030
 #define IDS_DOCK_SPRING_COPY_FORMAT                                                      8031
 #define IDS_DOCK_SPRING_DROPPED                                                          8032
+#define IDS_SETTINGS_SIDEBAR_FOLDER_NEW_TAB                                              8033
+#define IDS_SETTINGS_SIDEBAR_FOLDER_NEW_TAB_DESC                                         8034
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_STARRED                                             8035
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_QUICK_ACCESS                                        8036
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_WORKSPACES                                          8037
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_DRIVES                                              8038
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_TAGS                                                8039
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_NETWORKS                                            8040
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_CLOUD                                               8041
+#define IDS_SETTINGS_SIDEBAR_NEW_TAB_SAVED_SEARCHES                                      8042
 
 #endif  // PULSE_STRING_IDS_H

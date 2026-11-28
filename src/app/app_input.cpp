@@ -107,6 +107,30 @@ using namespace pulse;
 
 namespace pulse {
 namespace {
+// 侧栏单击打开新标签页: every sidebar section (收藏 / 快速访问 / 工作区 /
+// 此电脑的各个磁盘 / 标签 / 网络 / 云盘 / 已保存的搜索) carries its own switch
+// in 设置 > 标签页与窗口. Ctrl+left-click opens a new tab in all of them.
+static bool SidebarOpensNewTab(const AppState& s, int section) {
+    return s.appPrefs.SidebarSectionNewTab(section) ||
+        (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+}
+
+// Opens the row in a new tab (an existing tab on that path is reused, exactly
+// like Ctrl+click does today). Returns false when the caller should navigate
+// the current tab instead.
+static bool OpenSidebarRowInNewTab(AppState& s, const std::wstring& path, int section) {
+    if (path.empty() || IsVerticalTabPath(path)) return false;
+    if (!SidebarOpensNewTab(s, section)) return false;
+    OpenFolderTab(s, path);
+    return true;
+}
+
+// The row's section switch picks a new tab; otherwise the current tab follows
+// the location, exactly as before the switch existed.
+static void OpenSidebarRow(AppState& s, const std::wstring& path, int section) {
+    if (!OpenSidebarRowInNewTab(s, path, section)) NavigateTo(s, path);
+}
+
 // Target cells already match hit geometry during view feedback. Input ends
 // only the contained artwork settle; it never reinterprets a travelling row.
 void FinishContentMotionForInput(AppState* state) {
@@ -1956,6 +1980,7 @@ void ResetSidebarPinDrag(AppState& s) {
     if (!s.pinDragKey.empty()) ClearShortcutCrossDropHint(s);
     s.pinDragKey.clear();
     s.pinDragRun = -1;
+    s.pinDragSection = -1;
     s.pinDragToIndex = -1;
     s.pinGapVisible = false;
     s.pinGapLineY = 0.0f;
@@ -4875,6 +4900,7 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
                 // become a drag.
                 s->pinDragPending = true;
                 s->pinDragActive = false;
+                s->pinDragSection = hit.sidebar_section;
                 s->pinDragStartPt = POINT{ mx, my };
                 s->pinDragPath = hit.path;
                 s->pinDragKey = std::move(qa_row_key);
@@ -4888,6 +4914,7 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
                 // same reorder drag as the quick-access rows above.
                 s->pinDragPending = true;
                 s->pinDragActive = false;
+                s->pinDragSection = hit.sidebar_section;
                 s->pinDragStartPt = POINT{ mx, my };
                 s->pinDragPath = hit.path;
                 s->pinDragKey.clear();
@@ -4901,6 +4928,7 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
                 s->workspacePaneDragParent = row->workspace_parent_index;
                 s->workspacePaneDragFrom = row->workspace_child_number - 1;
                 s->pinDragPending = true;
+                s->pinDragSection = hit.sidebar_section;
                 s->pinDragStartPt = POINT{mx, my};
                 s->pinDragPath = hit.path;
                 s->pinDragRun = hit.index;
@@ -4908,6 +4936,7 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
             } else if (hit.path.starts_with(L"pulse:workspace:")) {
                 s->pinDragPending = true;
                 s->pinDragActive = false;
+                s->pinDragSection = hit.sidebar_section;
                 s->pinDragStartPt = POINT{mx, my};
                 s->pinDragPath = hit.path;
                 s->pinDragKey.clear();
@@ -4916,7 +4945,9 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
                 s->pinGapVisible = false;
                 SetCapture(hwnd);
             } else if (!hit.path.empty()) {
-                NavigateTo(*s, hit.path);
+                // 此电脑的各个磁盘 / 网络位置 / 云盘 / 已保存的搜索: the section's
+                // switch decides between a new tab and the current one.
+                OpenSidebarRow(*s, hit.path, hit.sidebar_section);
             }
         } else if (hit.region == ui::HitTestResult::StatusBarCancelSearch) {
             if (auto* tab = ActiveTab(*s)) CancelActiveContentSearch(*s, *tab);
@@ -5315,9 +5346,14 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (GetCapture() == hwnd) ReleaseCapture();
                 if (!was_active) {
                     // A row of a header-less section navigates on release; a
-                    // header folds its section (masks are keyed by id).
-                    if (navigate || !path.empty()) NavigateTo(*s, path);
-                    else if (section >= 0) s->sidebarCollapsedMask ^= 1u << section;
+                    // header folds its section (masks are keyed by id). The
+                    // section's switch decides tab vs. current tab.
+                    if (navigate || !path.empty()) {
+                        if (navigate || !OpenSidebarRowInNewTab(*s, path, section))
+                            NavigateTo(*s, path);
+                    } else if (section >= 0) {
+                        s->sidebarCollapsedMask ^= 1u << section;
+                    }
                 }
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
@@ -5329,6 +5365,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 const std::wstring qa_drag_key = s->pinDragKey;
                 const int workspace_parent = s->workspacePaneDragParent;
                 const int workspace_pane = s->workspacePaneDragFrom;
+                const int pin_section = s->pinDragSection;
                 bool cross_drop = false;
                 if (was_active && !qa_drag_key.empty()) {
                     const POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -5353,24 +5390,28 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 }
                 ResetSidebarPinDrag(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
-                // Ctrl / Shift on a tag row combines it into the open tag view;
-                // Ctrl on a quick-access row opens it in a new tab (#58-2), as the
-                // middle button does.
+                // Ctrl / Shift on a tag row combines it into the open tag view.
+                // Otherwise the row's own sidebar switch decides between a new
+                // tab and the current one (Ctrl+click always opens a new tab).
                 const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                if (!was_active && OpenSidebarKnownFolder(*s, app::BuiltinQuickAccessFromKey(qa_drag_key),
-                        ctrl ? SidebarFolderOpenMode::NewTab : SidebarFolderOpenMode::Current)) {
+                const int section = pin_section;
+                const bool open_new = SidebarOpensNewTab(*s, section);
+                if (!was_active &&
+                    OpenSidebarKnownFolder(*s, app::BuiltinQuickAccessFromKey(qa_drag_key),
+                        open_new ? SidebarFolderOpenMode::NewTab : SidebarFolderOpenMode::Current)) {
                     // The worker resolves the currently configured destination.
                 } else if (!was_active && workspace_parent >= 0) {
-                    if (ctrl) OpenFolderTab(*s, path);
+                    if (open_new) OpenFolderTab(*s, path);
                     else ActivateWorkspacePane(*s, workspace_parent, workspace_pane);
-                } else if (!was_active && WorkspaceIndexFromPath(path) >= 0 && ctrl)
-                    OpenWorkspaceNewTab(*s, WorkspaceIndexFromPath(path));
-                else if (!was_active && !path.empty() && !tab_row && ctrl && !qa_drag_key.empty() &&
-                    !IsSidebarTagPath(path))
-                    OpenFolderTab(*s, path);
-                else if (!was_active && !path.empty() && !tab_row &&
-                    !(IsSidebarTagPath(path) && CombineSidebarTagClick(*s, path)))
-                    NavigateTo(*s, path);
+                } else if (!was_active && WorkspaceIndexFromPath(path) >= 0) {
+                    if (open_new) OpenWorkspaceNewTab(*s, WorkspaceIndexFromPath(path));
+                    else NavigateTo(*s, path);
+                } else if (!was_active && !path.empty() && !tab_row && !ctrl &&
+                    IsSidebarTagPath(path) && CombineSidebarTagClick(*s, path)) {
+                    // Combined into the open tag view.
+                } else if (!was_active && !path.empty() && !tab_row) {
+                    if (!OpenSidebarRowInNewTab(*s, path, section)) NavigateTo(*s, path);
+                }
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -5397,7 +5438,10 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 }
                 ResetSidebarStarDrag(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
-                if (!was_active && !path.empty()) NavigateTo(*s, path);
+                if (!was_active && !path.empty() &&
+                    !OpenSidebarRowInNewTab(*s, path,
+                        static_cast<int>(app::SidebarSectionId::Starred)))
+                    NavigateTo(*s, path);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }

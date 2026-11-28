@@ -48,6 +48,20 @@ inline constexpr int kSidebarFavoritesScrollbar = 4;
 inline constexpr int kSettingsMenuFixedHit = 99990;
 inline constexpr int kSettingsMenuRowHit = 100000;
 inline constexpr int kSettingsMenuOrderReset = 68;
+// Settings > 标签页与窗口: 侧栏单击打开新标签页 — one switch per sidebar section,
+// drawn in this order. The values are app::SidebarSectionId; they stay plain
+// ints because app_model.h depends on this header.
+inline constexpr int kSidebarNewTabSectionCount = 8;
+inline constexpr int kSidebarNewTabSections[kSidebarNewTabSectionCount] = {
+    7,  // Starred (收藏)
+    1,  // QuickAccess (快速访问)
+    0,  // Workspaces (工作区)
+    3,  // Drives (此电脑与磁盘)
+    4,  // Tags (标签)
+    5,  // Networks (网络位置)
+    6,  // Cloud (云盘)
+    2,  // SavedSearches (已保存的搜索)
+};
 enum class PaneHeaderIcon;
 
 inline constexpr unsigned kSettingsContextExpandedMask = 0x1f00u;
@@ -1623,6 +1637,9 @@ struct WindowViewModel {
     int settings_external_open = 0; // 0 smart, 1 tab, 2 new window (multi-window M7b)
     bool settings_close_last_tab = false;
     bool settings_close_tab_double_click = false;
+    // Settings > 标签页与窗口: 侧栏单击打开新标签页, one bit per sidebar section
+    // (bit = SidebarSectionId); see app::kSidebarNewTabSectionOrder.
+    unsigned int settings_sidebar_new_tab_mask = 0xFFu;
     bool settings_confirm_delete = false;
     std::wstring settings_home_folder; // default location; empty = This PC
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth

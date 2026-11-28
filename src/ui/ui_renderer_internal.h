@@ -3133,6 +3133,9 @@ struct SettingsLayout {
     D2D1_RECT_F external_open_row[3]{};
     D2D1_RECT_F close_last_tab_row{};
     D2D1_RECT_F close_tab_double_click_row{};
+    D2D1_RECT_F sidebar_new_tab_lead{};
+    // One cell per sidebar section, in kSidebarNewTabSections order.
+    D2D1_RECT_F sidebar_new_tab_row[kSidebarNewTabSectionCount]{};
     D2D1_RECT_F confirm_delete_row{};
     D2D1_RECT_F start_in_tray_row{};
     D2D1_RECT_F text_render_card{};

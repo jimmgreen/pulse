@@ -6656,3 +6656,13 @@ DockPreviewSetting	IDS_DOCK_PREVIEW_SETTING	8029	悬停显示窗口预览	Show w
 DockSpringMoveFormat	IDS_DOCK_SPRING_MOVE_FORMAT	8030	移动到「%s」	Move to %s	移動到「%s」
 DockSpringCopyFormat	IDS_DOCK_SPRING_COPY_FORMAT	8031	复制到「%s」	Copy to %s	複製到「%s」
 DockSpringDropped	IDS_DOCK_SPRING_DROPPED	8032	已放入「%s」	Moved to %s	已放入「%s」
+SettingsSidebarFolderNewTab	IDS_SETTINGS_SIDEBAR_FOLDER_NEW_TAB	8033	侧栏单击打开新标签页	Single-click opens a new tab	側欄單擊開啟新分頁
+SettingsSidebarFolderNewTabDesc	IDS_SETTINGS_SIDEBAR_FOLDER_NEW_TAB_DESC	8034	下面每个区域可以单独选择：单击时在新标签页打开，或覆盖当前标签页；Ctrl+左键始终在新标签页打开	Each area below can open in a new tab on a single click or replace the current tab; Ctrl+click always opens a new tab	下面每個區域可以單獨選擇：單擊時在新分頁開啟，或覆蓋目前分頁；Ctrl+左鍵一律在新分頁開啟
+SettingsSidebarNewTabStarred	IDS_SETTINGS_SIDEBAR_NEW_TAB_STARRED	8035	收藏	Starred	收藏
+SettingsSidebarNewTabQuickAccess	IDS_SETTINGS_SIDEBAR_NEW_TAB_QUICK_ACCESS	8036	快速访问	Quick access	快速存取
+SettingsSidebarNewTabWorkspaces	IDS_SETTINGS_SIDEBAR_NEW_TAB_WORKSPACES	8037	工作区	Workspaces	工作區
+SettingsSidebarNewTabDrives	IDS_SETTINGS_SIDEBAR_NEW_TAB_DRIVES	8038	此电脑与磁盘	This PC and drives	本機與磁碟
+SettingsSidebarNewTabTags	IDS_SETTINGS_SIDEBAR_NEW_TAB_TAGS	8039	标签	Tags	標籤
+SettingsSidebarNewTabNetworks	IDS_SETTINGS_SIDEBAR_NEW_TAB_NETWORKS	8040	网络位置	Network locations	網路位置
+SettingsSidebarNewTabCloud	IDS_SETTINGS_SIDEBAR_NEW_TAB_CLOUD	8041	云盘	Cloud storage	雲端硬碟
+SettingsSidebarNewTabSavedSearches	IDS_SETTINGS_SIDEBAR_NEW_TAB_SAVED_SEARCHES	8042	已保存的搜索	Saved searches	已儲存的搜尋

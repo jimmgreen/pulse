@@ -135,6 +135,20 @@ struct AppPrefs {
     bool close_window_with_last_tab = true;
     // Double-clicking a tab closes it, like its close button (app/last_tab_close.h).
     bool close_tab_on_double_click = false;
+    // Settings > 标签页与窗口: 侧栏单击打开新标签页. One bit per sidebar
+    // section (bit = SidebarSectionId), so 收藏 / 快速访问 / 工作区 / 此电脑
+    // disks / 网络 ... each carry their own switch. Ctrl+click always opens a
+    // new tab regardless of these bits.
+    unsigned int sidebar_new_tab_mask = 0xFFu;
+    bool SidebarSectionNewTab(int section) const {
+        return section >= 0 && section < 32 &&
+            (sidebar_new_tab_mask & (1u << section)) != 0;
+    }
+    void SetSidebarSectionNewTab(int section, bool on) {
+        if (section < 0 || section >= 32) return;
+        if (on) sidebar_new_tab_mask |= 1u << section;
+        else sidebar_new_tab_mask &= ~(1u << section);
+    }
     bool confirm_recycle_delete = false; // ask before Delete moves items to the Recycle Bin
     // Sign-in launches (Run value with --startup) stay hidden behind the tray icon.
     bool start_in_tray = false;
