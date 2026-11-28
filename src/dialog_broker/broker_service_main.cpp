@@ -479,12 +479,15 @@ struct BrokerRuntime {
         const auto info = broker::InspectLiveProcess(cand.pid);
         if (info.creation_time != 0) creation_time = info.creation_time;
         const auto decision = broker::EvaluateProcessPolicy(info, &snap);
-        const bool refresh_loaded_stub =
-            cand.refresh_existing &&
+        // A newly observed process may already have PulseDialogStub loaded via COM
+        // (DllGetClassObject uses PULSE_STUB_FLAG_COM_ONLY without installing sink hooks).
+        // Always run idempotent PulseStubActivate so legacy/WinRT/direct-reveal sink hooks
+        // are still installed for processes that touched COM before Broker reached them.
+        const bool activate_loaded_stub =
             decision.verdict == broker::AdmissionVerdict::SkipAlreadyLoaded &&
             (decision.target_machine == IMAGE_FILE_MACHINE_AMD64 ||
              decision.target_machine == IMAGE_FILE_MACHINE_I386);
-        if (decision.verdict != broker::AdmissionVerdict::Eligible && !refresh_loaded_stub) {
+        if (decision.verdict != broker::AdmissionVerdict::Eligible && !activate_loaded_stub) {
             // A brand-new CUI process that imports or loads user32.dll can still be inside
             // LdrInitializeThunk (or an AV scan) at 120 ms, making EnumProcessModulesEx miss
             // user32.dll (or fail with ERROR_PARTIAL_COPY). Retry once before settling.
