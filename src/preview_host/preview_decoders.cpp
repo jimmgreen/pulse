@@ -11,6 +11,7 @@
 #include "../common/preview_extensions.h"
 #include "../common/shell_id.h"
 #include "archive_listing.h"
+#include "archive_member.h"
 #include "content_sniff.h"
 #include "docx_document.h"
 #include "epub_document.h"
@@ -1669,7 +1670,18 @@ static bool AcceptsArchive(const DecodeRequest& q) {
     return !q.is_directory && preview::IsArchiveExtension(q.extension) &&
         (!q.offline || RequiresArchivePlugin(q));
 }
+// Grid tiles of ZIP / 7z / RAR and comic-book archives show a picture from
+// inside: a member named cover / folder / preview / thumb, else the first
+// picture. Without one the tile goes on exactly as before (contents tree, or
+// archive-plugin-required for 7z/RAR). Cloud placeholders are never read.
+static bool HasArchiveCover(const DecodeRequest& q) {
+    return q.grid && !q.offline &&
+        IsOneOf(q.extension, {L".zip", L".cbz", L".7z", L".cb7", L".rar", L".cbr"});
+}
 static DecodeStep RunArchive(const DecodeRequest& q, DecodeResult& r) {
+    if (HasArchiveCover(q) && preview::DecodeArchiveCoverThumbnail(q.path, q.cap, r.pixels, r.width,
+                                                                   r.height, r.stride, nullptr))
+        return MadeBitmap(r);
     if (RequiresArchivePlugin(q)) {
         r.error = L"archive-plugin-required";
         return DecodeStep::Failed;

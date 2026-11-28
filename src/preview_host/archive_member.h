@@ -1,5 +1,5 @@
 // archive_member.h - thumbnails of pictures inside an archive (Quick Look's
-// archive thumbnail view).
+// archive thumbnail view) and of the archive itself (grid covers).
 #pragma once
 
 #include <windows.h>
@@ -28,5 +28,14 @@ bool ReadArchiveMember(const std::wstring& archive, std::wstring_view member, si
 bool DecodeArchiveMemberThumbnail(std::wstring_view spec, UINT max_edge, std::vector<uint8_t>& pixels,
                                   UINT& width, UINT& height, UINT& stride,
                                   UINT& source_width, UINT& source_height, std::wstring* error);
+
+// Grid cover of an archive file: a picture member named cover / folder /
+// preview / thumb, otherwise the first picture, decoded like
+// DecodeArchiveMemberThumbnail. One bounded forward pass (900 ms, 4000
+// members, 24 MiB per member); nothing is extracted to disk. *error:
+// libarchive-unavailable, archive-open-failed, archive-no-cover,
+// archive-cover-decode-failed.
+bool DecodeArchiveCoverThumbnail(const std::wstring& archive, UINT max_edge, std::vector<uint8_t>& pixels,
+                                 UINT& width, UINT& height, UINT& stride, std::wstring* error);
 
 } // namespace pulse::preview

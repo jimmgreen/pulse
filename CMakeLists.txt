@@ -1026,6 +1026,11 @@ add_executable(pulse_archive_plugin_required_test src/bench/archive_plugin_requi
 target_link_libraries(pulse_archive_plugin_required_test PRIVATE ole32 shell32 shlwapi)
 add_dependencies(pulse_archive_plugin_required_test pulse_preview)
 
+# Grid covers read from inside ZIP/7z archives, driven through Pulse.Preview.exe.
+add_executable(pulse_archive_cover_test src/bench/archive_cover_test.cpp)
+target_link_libraries(pulse_archive_cover_test PRIVATE ole32 shell32 shlwapi)
+add_dependencies(pulse_archive_cover_test pulse_preview)
+
 # Progressive JPEG thumbnails from the DC scan alone, against WIC's full decode.
 add_executable(pulse_jpeg_dc_test src/bench/jpeg_dc_preview_test.cpp src/preview_host/jpeg_dc_preview.cpp)
 target_link_libraries(pulse_jpeg_dc_test PRIVATE ole32 windowscodecs)
