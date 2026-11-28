@@ -1,4 +1,5 @@
 #include "legacy_hook_host.h"
+#include <algorithm>
 #include <cstddef>
 #include <commctrl.h>
 #include <utility>
@@ -11,6 +12,59 @@ constexpr wchar_t kProperty[] = L"Pulse.LegacyHookHost.Private";
 UINT AttachMessage() { static const UINT message = RegisterWindowMessageW(L"Pulse.Picker.AttachLegacyChild.v1"); return message; }
 constexpr LRESULT kAttached = 0x504c4348L;
 struct EmptyTemplate { DLGTEMPLATE dialog; WORD menu, window_class, title; };
+
+// Empty child dialog template matching native comdlg32 Explorer sub-dialog
+// (0x44000444 = WS_CHILD | WS_CLIPCHILDREN | DS_CONTROL | DS_SETFONT | DS_3DLOOK).
+std::vector<BYTE> BuildEmptyExplorerChildTemplate() {
+    std::vector<BYTE> out;
+    auto push_word = [&](WORD v) {
+        const auto* p = reinterpret_cast<const BYTE*>(&v);
+        out.insert(out.end(), p, p + 2);
+    };
+    auto push_dword = [&](DWORD v) {
+        const auto* p = reinterpret_cast<const BYTE*>(&v);
+        out.insert(out.end(), p, p + 4);
+    };
+    push_word(1);          // dlgVer
+    push_word(0xFFFF);     // signature (DLGTEMPLATEEX)
+    push_dword(0);         // helpID
+    push_dword(0);         // exStyle
+    push_dword(WS_CHILD | WS_CLIPCHILDREN | DS_CONTROL | DS_SETFONT | DS_3DLOOK);
+    push_word(0);          // cDlgItems
+    push_word(0);          // x
+    push_word(0);          // y
+    push_word(200);        // cx
+    push_word(40);         // cy
+    push_word(0);          // menu
+    push_word(0);          // windowClass
+    push_word(0);          // title
+    push_word(9);          // pointsize
+    push_word(400);        // weight
+    out.push_back(0);      // italic
+    out.push_back(1);      // charset (DEFAULT_CHARSET)
+    const wchar_t font[] = L"MS Shell Dlg";
+    for (wchar_t ch : font) push_word(static_cast<WORD>(ch));
+    while (out.size() % 4 != 0) out.push_back(0);
+    return out;
+}
+
+std::wstring TrimLabel(std::wstring text) {
+    while (!text.empty() && (text.back() == L' ' || text.back() == L'\t' || text.back() == L':' || text.back() == L'\uFF1A'))
+        text.pop_back();
+    size_t start = 0;
+    while (start < text.size() && (text[start] == L' ' || text[start] == L'\t')) ++start;
+    if (start) text.erase(0, start);
+    return text;
+}
+
+std::wstring WindowText(HWND hwnd) {
+    const int len = GetWindowTextLengthW(hwnd);
+    if (len <= 0 || len > 4096) return {};
+    std::wstring buf(static_cast<size_t>(len) + 1, L'\0');
+    const int copied = GetWindowTextW(hwnd, buf.data(), len + 1);
+    buf.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+    return buf;
+}
 }
 LegacyHookHost::LegacyHookHost(OPENFILENAMEW* input) noexcept : input_(input),
     hook_(input && (input->Flags & OFN_ENABLEHOOK) ? input->lpfnHook : nullptr), thread_(GetCurrentThreadId()) {}
@@ -18,6 +72,7 @@ LegacyHookHost::LegacyHookHost(OPENFILENAMEA* input) noexcept : input_(input),
     hook_(input && (input->Flags & OFN_ENABLEHOOK) ? input->lpfnHook : nullptr), thread_(GetCurrentThreadId()), ansi_(true) {}
 LegacyHookHost::~LegacyHookHost() {
     if (child_ && GetCurrentThreadId() == thread_) DestroyWindow(child_);
+    filter_combo_ = nullptr;
     if (parent_ && GetCurrentThreadId() == thread_) {
         HWND owned = owns_parent_ ? parent_ : nullptr;
         owns_parent_ = false;
@@ -43,7 +98,24 @@ INT_PTR CALLBACK LegacyHookHost::DialogProc(HWND window, UINT message, WPARAM wp
         RemovePropW(window, kProperty);
         self->child_ = nullptr;
     }
+    // Mirrored Explorer hook sub-dialogs must return TRUE from WM_INITDIALOG so the
+    // dialog manager keeps the child window alive even when the hook returns 0.
+    if (message == WM_INITDIALOG && self->mirrored_) return TRUE;
     return static_cast<INT_PTR>(answer);
+}
+bool LegacyHookHost::IsEmptyTemplate(std::span<const BYTE> bytes) noexcept {
+    if (bytes.size() < 18) return false;
+    WORD first = 0, signature = 0;
+    std::memcpy(&first, bytes.data(), 2);
+    std::memcpy(&signature, bytes.data() + 2, 2);
+    WORD count = 0;
+    if (signature == 0xFFFF) {
+        if (first != 1 || bytes.size() < 18) return false;
+        std::memcpy(&count, bytes.data() + 16, 2);
+    } else {
+        std::memcpy(&count, bytes.data() + 8, 2);
+    }
+    return count == 0;
 }
 bool LegacyHookHost::AppendTemplateSupported(std::span<const BYTE> bytes) noexcept {
     struct Reader {
@@ -71,7 +143,7 @@ bool LegacyHookHost::AppendTemplateSupported(std::span<const BYTE> bytes) noexce
     }
     return true;
 }
-HRESULT LegacyHookHost::Prepare() {
+HRESULT LegacyHookHost::Prepare(bool allow_empty_template_fallback) {
     if(prepared_)return S_OK;
     if(!input_ || GetCurrentThreadId()!=thread_)return E_INVALIDARG;
     const auto* wide=static_cast<OPENFILENAMEW*>(input_);
@@ -88,9 +160,23 @@ HRESULT LegacyHookHost::Prepare() {
         if(resource){bytes=SizeofResource(instance,resource);const HGLOBAL loaded=LoadResource(instance,resource);if(loaded)data=LockResource(loaded);}
     }
     struct Unlock { HGLOBAL value; ~Unlock(){if(value)GlobalUnlock(value);} } unlock{locked};
-    if(!data || !bytes || bytes>1024*1024)return HRESULT_FROM_WIN32(ERROR_RESOURCE_DATA_NOT_FOUND);
+    if(!data || !bytes || bytes>1024*1024) {
+        if (allow_empty_template_fallback && (flags & OFN_ENABLETEMPLATEHANDLE) && (flags & OFN_ENABLEHOOK) && hook_) {
+            template_ = BuildEmptyExplorerChildTemplate();
+            prepared_ = true;
+            return S_OK;
+        }
+        return HRESULT_FROM_WIN32(ERROR_RESOURCE_DATA_NOT_FOUND);
+    }
     const auto view=std::span(static_cast<const BYTE*>(data),bytes);
-    if(!AppendTemplateSupported(view))return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    if(!AppendTemplateSupported(view)) {
+        if (allow_empty_template_fallback && (flags & OFN_ENABLETEMPLATEHANDLE) && (flags & OFN_ENABLEHOOK) && hook_ && IsEmptyTemplate(view)) {
+            template_ = BuildEmptyExplorerChildTemplate();
+            prepared_ = true;
+            return S_OK;
+        }
+        return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
     try {template_.assign(view.begin(),view.end());}catch(...){return E_OUTOFMEMORY;}
     prepared_=true;return S_OK;
 }
@@ -177,6 +263,163 @@ HRESULT LegacyHookHost::Create(HWND parent, ParentMessage message) {
     }
     guard.committed = true;
     return S_OK;
+}
+
+HRESULT LegacyHookHost::CreateMirrored(ParentMessage message, const std::vector<std::wstring>& filter_labels,
+                                       UINT filter_index_1based) {
+    if (!input_ || child_ || GetCurrentThreadId() != thread_ || !hook_) return E_INVALIDARG;
+    if (!prepared_) {
+        const HRESULT ready = Prepare(true);
+        if (FAILED(ready)) return ready;
+    }
+    const int host_w = 774;
+    const int host_h = 86;
+    // Off-screen yet WS_VISIBLE: Photoshop's Save for Web hook only populates its
+    // Settings / Slices ComboBoxes once the sub-dialog is visible.
+    HWND popup = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC", L"",
+                                 WS_POPUP | WS_VISIBLE | WS_CLIPCHILDREN,
+                                 -20000, -20000, host_w, host_h,
+                                 nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!popup) {
+        const DWORD err = GetLastError();
+        return HRESULT_FROM_WIN32(err ? err : ERROR_INVALID_WINDOW_HANDLE);
+    }
+    struct PopupGuard {
+        LegacyHookHost* host;
+        HWND popup;
+        bool committed = false;
+        ~PopupGuard() {
+            if (committed || !popup) return;
+            if (host->parent_ == popup) {
+                RemoveWindowSubclass(popup, ParentProc, reinterpret_cast<UINT_PTR>(host));
+                host->parent_ = nullptr;
+                host->owns_parent_ = false;
+                host->filter_combo_ = nullptr;
+            }
+            if (IsWindow(popup)) DestroyWindow(popup);
+        }
+    } guard{this, popup};
+
+    // Provide a standard cmb1 (0x470) filter ComboBox stub inside the parent so hooks
+    // querying GetDlgItem(GetParent(hDlg), cmb1) see the current Save-as-type index.
+    filter_combo_ = CreateWindowExW(0, L"COMBOBOX", L"",
+                                    WS_CHILD | CBS_DROPDOWNLIST,
+                                    0, 0, 200, 120,
+                                    popup, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(cmb1)),
+                                    GetModuleHandleW(nullptr), nullptr);
+    if (filter_combo_) {
+        for (const auto& label : filter_labels) {
+            SendMessageW(filter_combo_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+        SyncFilterIndex(filter_index_1based);
+    }
+
+    parent_message_ = std::move(message);
+    parent_ = popup;
+    owns_parent_ = true;
+    mirrored_ = true;
+    if (parent_message_ && !SetWindowSubclass(popup, ParentProc, reinterpret_cast<UINT_PTR>(this), reinterpret_cast<DWORD_PTR>(this))) {
+        parent_ = nullptr;
+        owns_parent_ = false;
+        mirrored_ = false;
+        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    }
+
+    const std::vector<BYTE> fallback = template_.empty() ? BuildEmptyExplorerChildTemplate() : std::vector<BYTE>{};
+    const DLGTEMPLATE* layout = reinterpret_cast<const DLGTEMPLATE*>(template_.empty() ? fallback.data() : template_.data());
+    const HINSTANCE mod = GetModuleHandleW(nullptr);
+    const HWND result = ansi_
+        ? CreateDialogIndirectParamA(mod, layout, popup, DialogProc, reinterpret_cast<LPARAM>(this))
+        : CreateDialogIndirectParamW(mod, layout, popup, DialogProc, reinterpret_cast<LPARAM>(this));
+    if (!result || result != child_ || !IsWindow(result)) {
+        mirrored_ = false;
+        return HRESULT_FROM_WIN32(ERROR_INVALID_WINDOW_HANDLE);
+    }
+    SetWindowPos(result, nullptr, 0, 0, host_w, host_h, SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(result, SW_SHOWNOACTIVATE);
+    SendMessageW(result, WM_SIZE, SIZE_RESTORED, MAKELPARAM(host_w, host_h));
+    guard.committed = true;
+    return S_OK;
+}
+
+void LegacyHookHost::SyncFilterIndex(UINT filter_index_1based) {
+    if (!filter_combo_ || !IsWindow(filter_combo_)) return;
+    const LRESULT count = SendMessageW(filter_combo_, CB_GETCOUNT, 0, 0);
+    if (count <= 0) return;
+    const LRESULT zero_based = filter_index_1based > 0 ? static_cast<LRESULT>(filter_index_1based - 1) : 0;
+    SendMessageW(filter_combo_, CB_SETCURSEL, static_cast<WPARAM>(std::clamp<LRESULT>(zero_based, 0, count - 1)), 0);
+}
+
+std::vector<MirroredLegacyCombo> LegacyHookHost::ReadMirroredCombos() const {
+    std::vector<MirroredLegacyCombo> out;
+    if (!child_ || !IsWindow(child_) || GetCurrentThreadId() != thread_) return out;
+
+    struct ChildInfo {
+        HWND hwnd = nullptr;
+        int id = 0;
+        std::wstring cls;
+        std::wstring text;
+    };
+    std::vector<ChildInfo> children;
+    EnumChildWindows(child_, [](HWND hwnd, LPARAM lp) -> BOOL {
+        auto* list = reinterpret_cast<std::vector<ChildInfo>*>(lp);
+        if (GetParent(hwnd) != GetAncestor(hwnd, GA_PARENT)) return TRUE;
+        wchar_t cls[64]{};
+        GetClassNameW(hwnd, cls, ARRAYSIZE(cls));
+        list->push_back({hwnd, GetDlgCtrlID(hwnd), cls, WindowText(hwnd)});
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&children));
+
+    std::wstring pending_label;
+    for (const auto& ch : children) {
+        if (GetParent(ch.hwnd) != child_) continue;
+        if (_wcsicmp(ch.cls.c_str(), L"Static") == 0) {
+            const std::wstring trimmed = TrimLabel(ch.text);
+            if (!trimmed.empty()) pending_label = trimmed;
+            continue;
+        }
+        if (_wcsicmp(ch.cls.c_str(), L"ComboBox") != 0) continue;
+        MirroredLegacyCombo combo;
+        combo.hwnd = ch.hwnd;
+        combo.control_id = ch.id;
+        combo.label = pending_label;
+        pending_label.clear();
+        combo.enabled = IsWindowEnabled(ch.hwnd) != FALSE;
+        const LRESULT count = SendMessageW(ch.hwnd, CB_GETCOUNT, 0, 0);
+        if (count > 0 && count <= 256) {
+            combo.items.reserve(static_cast<size_t>(count));
+            for (LRESULT i = 0; i < count; ++i) {
+                const LRESULT len = SendMessageW(ch.hwnd, CB_GETLBTEXTLEN, static_cast<WPARAM>(i), 0);
+                if (len == CB_ERR || len < 0 || len > 4096) {
+                    combo.items.emplace_back();
+                    continue;
+                }
+                std::wstring item(static_cast<size_t>(len) + 1, L'\0');
+                const LRESULT copied = SendMessageW(ch.hwnd, CB_GETLBTEXT, static_cast<WPARAM>(i),
+                                                    reinterpret_cast<LPARAM>(item.data()));
+                item.resize(copied != CB_ERR && copied >= 0 ? static_cast<size_t>(copied) : 0);
+                combo.items.push_back(std::move(item));
+            }
+        }
+        const LRESULT sel = SendMessageW(ch.hwnd, CB_GETCURSEL, 0, 0);
+        combo.selected = (sel != CB_ERR && sel >= 0 && sel < static_cast<LRESULT>(combo.items.size()))
+            ? static_cast<int>(sel) : -1;
+        out.push_back(std::move(combo));
+    }
+    return out;
+}
+
+bool LegacyHookHost::SelectMirroredCombo(size_t index, int item_index) {
+    const auto combos = ReadMirroredCombos();
+    if (index >= combos.size() || !child_ || !IsWindow(child_)) return false;
+    const auto& target = combos[index];
+    if (!target.hwnd || !IsWindow(target.hwnd)) return false;
+    if (item_index < 0 || item_index >= static_cast<int>(target.items.size())) return false;
+    SendMessageW(target.hwnd, CB_SETCURSEL, static_cast<WPARAM>(item_index), 0);
+    SendMessageW(child_, WM_COMMAND,
+                 MAKEWPARAM(static_cast<WORD>(target.control_id), CBN_SELCHANGE),
+                 reinterpret_cast<LPARAM>(target.hwnd));
+    return true;
 }
 bool LegacyHookHost::Notify(UINT code) {
     if (!child_ || GetCurrentThreadId() != thread_ || notifying_) return false;
