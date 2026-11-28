@@ -243,5 +243,14 @@ void DrawDockWidgetsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noe
 void DrawDockSettingsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept;
 void DrawDockTerminalVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept;
 void DrawDockCalculatorVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept;
+// Fallback icons (used when the shell cannot supply a bitmap) and the Apps stack tile.
+void DrawDockAppsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept;
+void DrawDockTrashVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r, bool full) noexcept;
+void DrawDockFolderVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r, bool downloads_glyph) noexcept;
+void DrawDockExplorerVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept;
+void DrawDockGenericAppVectorIcon(ID2D1DeviceContext* dc,
+                                  const D2D1_RECT_F& r,
+                                  const std::wstring& title,
+                                  const DockBarTextFn& draw_text) noexcept;
 
 } // namespace pulse::desktop::render

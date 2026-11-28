@@ -435,6 +435,11 @@ target_compile_features(pulse_desktop_widget_gallery_render_test PRIVATE cxx_std
 target_compile_options(pulse_desktop_widget_gallery_render_test PRIVATE /W4 /permissive- /utf-8)
 target_link_libraries(pulse_desktop_widget_gallery_render_test PRIVATE pulse_desktop_mount_gfx)
 
+add_executable(pulse_desktop_dock_icon_gallery_render_test tests/dock_icon_gallery_render_test.cpp)
+target_compile_features(pulse_desktop_dock_icon_gallery_render_test PRIVATE cxx_std_20)
+target_compile_options(pulse_desktop_dock_icon_gallery_render_test PRIVATE /W4 /permissive- /utf-8)
+target_link_libraries(pulse_desktop_dock_icon_gallery_render_test PRIVATE pulse_desktop_mount_gfx)
+
 add_executable(pulse_desktop_drag_damage_test tests/drag_damage_test.cpp)
 target_compile_features(pulse_desktop_drag_damage_test PRIVATE cxx_std_20)
 target_compile_options(pulse_desktop_drag_damage_test PRIVATE /W4 /permissive- /utf-8)

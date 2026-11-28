@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <cwctype>
+#include <initializer_list>
 #include <set>
 
 namespace pulse::desktop::render {
@@ -472,151 +473,6 @@ ComPtr<ID2D1Bitmap> ExtractAppsFolderBitmap(ID2D1DeviceContext* dc,
     return CreateD2DBitmapFromWicSource(dc, wic, wic_bmp.Get(), true);
 }
 
-void DrawGenericAppSquircle(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br,
-                            const D2D1_RECT_F& r, const std::wstring& title,
-                            const DockBarTextFn& draw_text) noexcept {
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.32f, 0.38f, 0.48f, 0.96f)},
-        {1.0f, D2D1::ColorF(0.18f, 0.21f, 0.28f, 0.96f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
-    } else {
-        br->SetColor(D2D1::ColorF(0.24f, 0.28f, 0.36f, 0.96f));
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), br);
-    }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.30f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(r, rad, rad), br, 1.0f);
-    if (draw_text) {
-        const std::wstring ch = title.empty() ? L"A" : title.substr(0, 1);
-        draw_text(ch, r, w * 0.42f, true, 0xF5FFFFFFu, 1.0f);
-    }
-}
-
-void DrawExplorerVectorIcon(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r) noexcept {
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.98f, 0.78f, 0.24f, 1.0f)},
-        {1.0f, D2D1::ColorF(0.88f, 0.58f, 0.10f, 1.0f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
-    }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.36f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.6f, r.top + 0.6f, r.right - 0.6f, r.bottom - 0.6f), rad, rad), br, 1.0f);
-    // Crisp folder tab & front pocket
-    const float pad = w * 0.16f;
-    br->SetColor(D2D1::ColorF(1.0f, 0.96f, 0.80f, 0.92f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + pad, r.top + w * 0.34f, r.right - pad, r.bottom - pad), w * 0.10f, w * 0.10f), br);
-    br->SetColor(D2D1::ColorF(0.16f, 0.52f, 0.96f, 0.95f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + w * 0.32f, r.bottom - pad - w * 0.12f, r.right - w * 0.32f, r.bottom - pad + w * 0.04f), w * 0.05f, w * 0.05f), br);
-}
-
-void DrawTrashVectorIcon(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r, bool full) noexcept {
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.84f, 0.87f, 0.92f, 0.96f)},
-        {1.0f, D2D1::ColorF(0.56f, 0.61f, 0.68f, 0.96f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
-    }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.6f, r.top + 0.6f, r.right - 0.6f, r.bottom - 0.6f), rad, rad), br, 1.0f);
-    // Basket lid + body + vertical slats
-    const float cx = (r.left + r.right) * 0.5f;
-    br->SetColor(D2D1::ColorF(0.20f, 0.24f, 0.30f, 0.86f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx - w * 0.26f, r.top + w * 0.24f, cx + w * 0.26f, r.top + w * 0.31f), 2.0f, 2.0f), br);
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx - w * 0.11f, r.top + w * 0.17f, cx + w * 0.11f, r.top + w * 0.24f), 2.0f, 2.0f), br);
-    if (full) {
-        br->SetColor(D2D1::ColorF(0.98f, 0.99f, 1.0f, 0.95f));
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx - w * 0.08f, r.top + w * 0.36f), w * 0.10f, w * 0.07f), br);
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx + w * 0.08f, r.top + w * 0.37f), w * 0.09f, w * 0.06f), br);
-    }
-    br->SetColor(D2D1::ColorF(0.20f, 0.24f, 0.30f, 0.82f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cx - w * 0.21f, r.top + w * 0.34f, cx + w * 0.21f, r.bottom - w * 0.17f), w * 0.06f, w * 0.06f), br, std::max(1.4f, w * 0.045f));
-    for (float ox : {-0.08f, 0.0f, 0.08f}) {
-        dc->DrawLine(D2D1::Point2F(cx + w * ox, r.top + w * 0.43f), D2D1::Point2F(cx + w * ox, r.bottom - w * 0.24f), br, std::max(1.2f, w * 0.036f));
-    }
-}
-
-void DrawDownloadsVectorIcon(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r) noexcept {
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.22f, 0.68f, 1.00f, 1.0f)},
-        {1.0f, D2D1::ColorF(0.08f, 0.42f, 0.90f, 1.0f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
-    }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.34f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.6f, r.top + 0.6f, r.right - 0.6f, r.bottom - 0.6f), rad, rad), br, 1.0f);
-    const float cx = (r.left + r.right) * 0.5f;
-    const float cy = (r.top + r.bottom) * 0.5f;
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.96f));
-    const float st = std::max(1.8f, w * 0.075f);
-    dc->DrawLine(D2D1::Point2F(cx, r.top + w * 0.23f), D2D1::Point2F(cx, cy + w * 0.14f), br, st);
-    dc->DrawLine(D2D1::Point2F(cx - w * 0.16f, cy - w * 0.01f), D2D1::Point2F(cx, cy + w * 0.15f), br, st);
-    dc->DrawLine(D2D1::Point2F(cx + w * 0.16f, cy - w * 0.01f), D2D1::Point2F(cx, cy + w * 0.15f), br, st);
-    dc->DrawLine(D2D1::Point2F(cx - w * 0.22f, r.bottom - w * 0.22f), D2D1::Point2F(cx + w * 0.22f, r.bottom - w * 0.22f), br, st);
-}
-
-// 应用程序 stack: a blue folder-style tile carrying the four-square apps mark.
-void DrawAppsStackVectorIcon(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br, const D2D1_RECT_F& r) noexcept {
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.42f, 0.56f, 1.00f, 1.0f)},
-        {1.0f, D2D1::ColorF(0.20f, 0.30f, 0.92f, 1.0f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
-    }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.34f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.6f, r.top + 0.6f, r.right - 0.6f, r.bottom - 0.6f), rad, rad), br, 1.0f);
-    const float cx = (r.left + r.right) * 0.5f;
-    const float cy = (r.top + r.bottom) * 0.5f;
-    const float cell = w * 0.17f, gap = w * 0.06f, cr = cell * 0.30f;
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.96f));
-    for (int iy = 0; iy < 2; ++iy) {
-        for (int ix = 0; ix < 2; ++ix) {
-            const float l = cx - cell - gap * 0.5f + ix * (cell + gap);
-            const float t = cy - cell - gap * 0.5f + iy * (cell + gap);
-            dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(l, t, l + cell, t + cell), cr, cr), br);
-        }
-    }
-}
-
 void PaintDockTooltip(ID2D1Factory* factory, ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br,
                       const DockBarItem& item, float alpha, float canvas_w, float canvas_h,
                       uint8_t dock_position,
@@ -712,43 +568,548 @@ void PaintDockTooltip(ID2D1Factory* factory, ID2D1DeviceContext* dc, ID2D1SolidC
 // Apple-style Custom Direct2D Vector Squircle Icons (from liquid_dock.cpp)
 // ============================================================================
 
-void DrawDockWidgetsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
-    if (!dc) return;
-    ComPtr<ID2D1SolidColorBrush> br;
-    if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &br)) || !br) return;
+namespace {
 
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.24f, 0.62f, 1.00f, 1.0f)},
-        {1.0f, D2D1::ColorF(0.32f, 0.26f, 0.92f, 1.0f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
+// ----------------------------------------------------------------------------
+// macOS icon-grid toolkit shared by every self-drawn Dock icon.
+//
+// Apple app icons since Big Sur use a continuous-curvature "squircle" silhouette
+// rather than a circular-arc rounded rectangle: the corner curvature ramps in
+// smoothly, so there is no visible kink where the straight edge meets the arc.
+// The superellipse |x|^5 + |y|^5 = 1 matches that mask closely (its 45-degree
+// point lands at 0.871 of the half-width, the same as Apple's template).
+// ----------------------------------------------------------------------------
+
+ComPtr<ID2D1PathGeometry> IcoSquircle(ID2D1Factory* f, const D2D1_RECT_F& r) noexcept {
+    if (!f) return {};
+    const float a = (r.right - r.left) * 0.5f;
+    const float b = (r.bottom - r.top) * 0.5f;
+    if (a < 0.5f || b < 0.5f) return {};
+    ComPtr<ID2D1PathGeometry> geo;
+    if (FAILED(f->CreatePathGeometry(&geo)) || !geo) return {};
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geo->Open(&sink)) || !sink) return {};
+    const float cx = (r.left + r.right) * 0.5f;
+    const float cy = (r.top + r.bottom) * 0.5f;
+    constexpr int kSteps = 288;
+    constexpr float kExp = 2.0f / 5.0f;
+    for (int i = 0; i < kSteps; ++i) {
+        const float t = 2.0f * kPi * static_cast<float>(i) / static_cast<float>(kSteps);
+        const float c = std::cos(t);
+        const float s = std::sin(t);
+        const D2D1_POINT_2F p = D2D1::Point2F(cx + a * std::copysign(std::pow(std::fabs(c), kExp), c),
+                                              cy + b * std::copysign(std::pow(std::fabs(s), kExp), s));
+        if (i == 0) {
+            sink->BeginFigure(p, D2D1_FIGURE_BEGIN_FILLED);
+        } else {
+            sink->AddLine(p);
+        }
     }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.32f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.6f, r.top + 0.6f, r.right - 0.6f, r.bottom - 0.6f), rad, rad), br.Get(), 1.0f);
+    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+    if (FAILED(sink->Close())) return {};
+    return geo;
+}
 
-    const float pad = w * 0.16f;
-    const float gap = w * 0.08f;
-    const float tile = (w - pad * 2.0f - gap) * 0.5f;
-    const float tr = tile * 0.28f;
-    const float x0 = r.left + pad;
-    const float y0 = r.top + pad;
+D2D1_RECT_F IcoInset(const D2D1_RECT_F& r, float d) noexcept {
+    return D2D1::RectF(r.left + d, r.top + d, r.right - d, r.bottom - d);
+}
 
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, y0, x0 + tile, y0 + tile), tr, tr), br.Get());
-    br->SetColor(D2D1::ColorF(1.0f, 0.86f, 0.34f, 0.95f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0 + tile + gap, y0, x0 + tile * 2.0f + gap, y0 + tile), tr, tr), br.Get());
-    br->SetColor(D2D1::ColorF(0.45f, 0.95f, 0.72f, 0.92f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0, y0 + tile + gap, x0 + tile, y0 + tile * 2.0f + gap), tr, tr), br.Get());
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.55f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x0 + tile + gap, y0 + tile + gap, x0 + tile * 2.0f + gap, y0 + tile * 2.0f + gap), tr, tr), br.Get());
+D2D1_COLOR_F IcoHex(UINT32 rgb, float a = 1.0f) noexcept {
+    return D2D1::ColorF(rgb, a);
+}
+
+D2D1_COLOR_F IcoWhite(float a) noexcept { return D2D1::ColorF(1.0f, 1.0f, 1.0f, a); }
+D2D1_COLOR_F IcoBlack(float a) noexcept { return D2D1::ColorF(0.0f, 0.0f, 0.0f, a); }
+
+D2D1_COLOR_F IcoMix(const D2D1_COLOR_F& x, const D2D1_COLOR_F& y, float t) noexcept {
+    return D2D1::ColorF(x.r + (y.r - x.r) * t, x.g + (y.g - x.g) * t, x.b + (y.b - x.b) * t, x.a + (y.a - x.a) * t);
+}
+
+ComPtr<ID2D1LinearGradientBrush> IcoLinear(ID2D1DeviceContext* dc,
+                                           std::initializer_list<D2D1_GRADIENT_STOP> stops,
+                                           D2D1_POINT_2F p0,
+                                           D2D1_POINT_2F p1) noexcept {
+    if (!dc || stops.size() == 0) return {};
+    ComPtr<ID2D1GradientStopCollection> sc;
+    if (FAILED(dc->CreateGradientStopCollection(stops.begin(), static_cast<UINT32>(stops.size()), &sc)) || !sc) return {};
+    ComPtr<ID2D1LinearGradientBrush> lg;
+    if (FAILED(dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(p0, p1), sc.Get(), &lg))) return {};
+    return lg;
+}
+
+ComPtr<ID2D1RadialGradientBrush> IcoRadial(ID2D1DeviceContext* dc,
+                                           std::initializer_list<D2D1_GRADIENT_STOP> stops,
+                                           D2D1_POINT_2F center,
+                                           float rx,
+                                           float ry) noexcept {
+    if (!dc || stops.size() == 0 || rx <= 0.0f || ry <= 0.0f) return {};
+    ComPtr<ID2D1GradientStopCollection> sc;
+    if (FAILED(dc->CreateGradientStopCollection(stops.begin(), static_cast<UINT32>(stops.size()), &sc)) || !sc) return {};
+    ComPtr<ID2D1RadialGradientBrush> rg;
+    if (FAILED(dc->CreateRadialGradientBrush(
+            D2D1::RadialGradientBrushProperties(center, D2D1::Point2F(0.0f, 0.0f), rx, ry), sc.Get(), &rg))) {
+        return {};
+    }
+    return rg;
+}
+
+// Per-icon drawing context: resolves the factory, one solid brush and a round-cap stroke once,
+// and maps icon-grid fractions (0..1 of the tile width) to device coordinates.
+struct IcoCanvas {
+    ID2D1DeviceContext* dc = nullptr;
+    ComPtr<ID2D1Factory> factory;
+    ComPtr<ID2D1SolidColorBrush> br;
+    ComPtr<ID2D1StrokeStyle> round;
+    D2D1_RECT_F r{};
+    float w = 0.0f;
+    bool ok = false;
+
+    D2D1_POINT_2F P(float fx, float fy) const noexcept { return D2D1::Point2F(r.left + w * fx, r.top + w * fy); }
+    D2D1_RECT_F R(float l, float t, float rr, float b) const noexcept {
+        return D2D1::RectF(r.left + w * l, r.top + w * t, r.left + w * rr, r.top + w * b);
+    }
+    float S(float f) const noexcept { return w * f; }
+    IcoCanvas Sub(const D2D1_RECT_F& sub) const {
+        IcoCanvas c = *this;
+        c.r = sub;
+        c.w = sub.right - sub.left;
+        return c;
+    }
+};
+
+IcoCanvas IcoBegin(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
+    IcoCanvas c;
+    c.dc = dc;
+    c.r = r;
+    c.w = r.right - r.left;
+    if (!dc || c.w <= 2.0f) return c;
+    dc->GetFactory(&c.factory);
+    if (!c.factory) return c;
+    if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &c.br)) || !c.br) return c;
+    const D2D1_STROKE_STYLE_PROPERTIES sp = D2D1::StrokeStyleProperties(
+        D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_LINE_JOIN_ROUND);
+    c.factory->CreateStrokeStyle(sp, nullptr, 0, &c.round);
+    c.ok = true;
+    return c;
+}
+
+ComPtr<ID2D1PathGeometry> IcoPolyline(ID2D1Factory* f, std::initializer_list<D2D1_POINT_2F> pts, bool closed) noexcept {
+    if (!f || pts.size() < 2) return {};
+    ComPtr<ID2D1PathGeometry> geo;
+    if (FAILED(f->CreatePathGeometry(&geo)) || !geo) return {};
+    ComPtr<ID2D1GeometrySink> sink;
+    if (FAILED(geo->Open(&sink)) || !sink) return {};
+    bool first = true;
+    for (const D2D1_POINT_2F& p : pts) {
+        if (first) {
+            sink->BeginFigure(p, closed ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
+            first = false;
+        } else {
+            sink->AddLine(p);
+        }
+    }
+    sink->EndFigure(closed ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN);
+    if (FAILED(sink->Close())) return {};
+    return geo;
+}
+
+void IcoStroke(IcoCanvas& c, std::initializer_list<D2D1_POINT_2F> pts, const D2D1_COLOR_F& color, float width) noexcept {
+    if (auto g = IcoPolyline(c.factory.Get(), pts, false)) {
+        c.br->SetColor(color);
+        c.dc->DrawGeometry(g.Get(), c.br.Get(), width, c.round.Get());
+    }
+}
+
+// Two-pass soft contact shadow under a rounded rectangle (a wide faint pass plus a tight core).
+void IcoShadowRR(IcoCanvas& c, const D2D1_RECT_F& rc, float rad, float dy, float alpha) noexcept {
+    const float spread = dy * 0.7f;
+    c.br->SetColor(IcoBlack(alpha * 0.45f));
+    c.dc->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(rc.left - spread, rc.top + dy * 1.5f - spread, rc.right + spread, rc.bottom + dy * 1.5f + spread),
+                          rad + spread, rad + spread),
+        c.br.Get());
+    c.br->SetColor(IcoBlack(alpha));
+    c.dc->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(rc.left, rc.top + dy, rc.right, rc.bottom + dy), rad, rad), c.br.Get());
+}
+
+// macOS Big Sur+ app tile: continuous-curvature squircle, top-lit three-stop body gradient,
+// a soft top sheen, bottom occlusion, a specular inner rim and a hairline outer edge.
+// (Same lighting recipe as the Settings tile so the whole Dock reads as one icon family.)
+void IcoPaintTile(IcoCanvas& c,
+                  const D2D1_COLOR_F& top,
+                  const D2D1_COLOR_F& mid,
+                  const D2D1_COLOR_F& bottom,
+                  float sheen,
+                  float rim) noexcept {
+    ID2D1Factory* f = c.factory.Get();
+    auto shape = IcoSquircle(f, c.r);
+    if (!shape) {
+        c.br->SetColor(mid);
+        c.dc->FillRoundedRectangle(D2D1::RoundedRect(c.r, c.S(0.225f), c.S(0.225f)), c.br.Get());
+        return;
+    }
+    if (auto body = IcoLinear(c.dc, {{0.0f, top}, {0.5f, mid}, {1.0f, bottom}}, c.P(0.5f, 0.0f), c.P(0.5f, 1.0f))) {
+        c.dc->FillGeometry(shape.Get(), body.Get());
+    } else {
+        c.br->SetColor(mid);
+        c.dc->FillGeometry(shape.Get(), c.br.Get());
+    }
+    if (sheen > 0.0f) {
+        if (auto g = IcoRadial(c.dc, {{0.0f, IcoWhite(sheen)}, {0.55f, IcoWhite(sheen * 0.35f)}, {1.0f, IcoWhite(0.0f)}},
+                               c.P(0.5f, 0.0f), c.S(0.80f), c.S(0.58f))) {
+            c.dc->FillGeometry(shape.Get(), g.Get());
+        }
+    }
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoBlack(0.0f)}, {1.0f, IcoBlack(0.10f)}}, c.P(0.5f, 0.55f), c.P(0.5f, 1.0f))) {
+        c.dc->FillGeometry(shape.Get(), g.Get());
+    }
+    if (rim > 0.0f) {
+        const float rim_w = std::max(0.8f, c.S(0.014f));
+        const float in = rim_w * 0.5f + std::max(0.35f, c.S(0.004f));
+        if (auto inner = IcoSquircle(f, IcoInset(c.r, in))) {
+            if (auto g = IcoLinear(c.dc,
+                                   {{0.00f, IcoWhite(rim)},
+                                    {0.22f, IcoWhite(rim * 0.30f)},
+                                    {0.70f, IcoWhite(rim * 0.06f)},
+                                    {1.00f, IcoWhite(rim * 0.34f)}},
+                                   c.P(0.5f, 0.0f), c.P(0.5f, 1.0f))) {
+                c.dc->DrawGeometry(inner.Get(), g.Get(), rim_w);
+            }
+        }
+    }
+    const float edge = std::max(0.5f, c.S(0.006f));
+    if (auto outer = IcoSquircle(f, IcoInset(c.r, edge * 0.5f))) {
+        c.br->SetColor(IcoBlack(0.16f));
+        c.dc->DrawGeometry(outer.Get(), c.br.Get(), edge);
+    }
+}
+
+// A raised key / widget card: soft shadow, vertical gradient body, specular top lip.
+void IcoPaintCard(IcoCanvas& c,
+                  const D2D1_RECT_F& rc,
+                  float rad,
+                  const D2D1_COLOR_F& top,
+                  const D2D1_COLOR_F& bottom,
+                  float shadow_alpha,
+                  float lip_alpha) noexcept {
+    if (shadow_alpha > 0.0f) IcoShadowRR(c, rc, rad, std::max(0.6f, c.S(0.012f)), shadow_alpha);
+    const D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(rc, rad, rad);
+    if (auto g = IcoLinear(c.dc, {{0.0f, top}, {1.0f, bottom}}, D2D1::Point2F(rc.left, rc.top), D2D1::Point2F(rc.left, rc.bottom))) {
+        c.dc->FillRoundedRectangle(rr, g.Get());
+    } else {
+        c.br->SetColor(top);
+        c.dc->FillRoundedRectangle(rr, c.br.Get());
+    }
+    if (lip_alpha > 0.0f) {
+        const float lw = std::max(0.6f, c.S(0.008f));
+        const float h = rc.bottom - rc.top;
+        if (auto g = IcoLinear(c.dc, {{0.0f, IcoWhite(lip_alpha)}, {0.45f, IcoWhite(0.0f)}, {1.0f, IcoWhite(lip_alpha * 0.15f)}},
+                               D2D1::Point2F(rc.left, rc.top), D2D1::Point2F(rc.left, rc.top + h))) {
+            c.dc->DrawRoundedRectangle(D2D1::RoundedRect(IcoInset(rc, lw * 0.5f), std::max(0.5f, rad - lw * 0.5f),
+                                                         std::max(0.5f, rad - lw * 0.5f)),
+                                       g.Get(), lw);
+        }
+    }
+}
+
+// The macOS blue folder (back panel with tab, a sheet of paper, lighter front flap and an
+// optional debossed downloads glyph). `c.r` is the square frame the folder sits in.
+void IcoPaintFolder(IcoCanvas& c, bool downloads_glyph, float shadow_alpha) noexcept {
+    ID2D1Factory* f = c.factory.Get();
+    if (shadow_alpha > 0.0f) {
+        if (auto g = IcoRadial(c.dc, {{0.0f, IcoBlack(shadow_alpha)}, {1.0f, IcoBlack(0.0f)}}, c.P(0.5f, 0.855f), c.S(0.46f), c.S(0.07f))) {
+            c.dc->FillEllipse(D2D1::Ellipse(c.P(0.5f, 0.855f), c.S(0.46f), c.S(0.07f)), g.Get());
+        }
+    }
+    // Back panel with the tab.
+    ComPtr<ID2D1PathGeometry> back;
+    if (SUCCEEDED(f->CreatePathGeometry(&back)) && back) {
+        ComPtr<ID2D1GeometrySink> sk;
+        if (SUCCEEDED(back->Open(&sk)) && sk) {
+            const float cr = c.S(0.045f);
+            const D2D1_SIZE_F csz = D2D1::SizeF(cr, cr);
+            const auto arc = [&](D2D1_POINT_2F to) {
+                sk->AddArc(D2D1::ArcSegment(to, csz, 0.0f, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+            };
+            sk->BeginFigure(c.P(0.125f, 0.165f), D2D1_FIGURE_BEGIN_FILLED);
+            sk->AddLine(c.P(0.355f, 0.165f));
+            sk->AddQuadraticBezier(D2D1::QuadraticBezierSegment(c.P(0.385f, 0.165f), c.P(0.402f, 0.185f)));
+            sk->AddLine(c.P(0.425f, 0.213f));
+            sk->AddQuadraticBezier(D2D1::QuadraticBezierSegment(c.P(0.437f, 0.228f), c.P(0.462f, 0.228f)));
+            sk->AddLine(c.P(0.875f, 0.228f));
+            arc(c.P(0.92f, 0.273f));
+            sk->AddLine(c.P(0.92f, 0.795f));
+            arc(c.P(0.875f, 0.84f));
+            sk->AddLine(c.P(0.125f, 0.84f));
+            arc(c.P(0.08f, 0.795f));
+            sk->AddLine(c.P(0.08f, 0.21f));
+            arc(c.P(0.125f, 0.165f));
+            sk->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(sk->Close())) {
+                if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0x5DB4EF)}, {1.0f, IcoHex(0x2C84D3)}}, c.P(0.5f, 0.165f), c.P(0.5f, 0.84f))) {
+                    c.dc->FillGeometry(back.Get(), g.Get());
+                }
+            }
+        }
+    }
+    // Sheet of paper peeking out.
+    IcoPaintCard(c, c.R(0.135f, 0.255f, 0.865f, 0.47f), c.S(0.025f), IcoHex(0xFDFDFE), IcoHex(0xE3E8EE), 0.0f, 0.0f);
+    // Front flap.
+    const D2D1_RECT_F front = c.R(0.08f, 0.315f, 0.92f, 0.84f);
+    const float fr = c.S(0.045f);
+    c.br->SetColor(IcoBlack(0.10f));
+    c.dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(front.left, front.top - c.S(0.008f), front.right, front.bottom), fr, fr), c.br.Get());
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0x9CD9FC)}, {0.45f, IcoHex(0x73C3F6)}, {1.0f, IcoHex(0x4EA8EC)}},
+                           D2D1::Point2F(front.left, front.top), D2D1::Point2F(front.left, front.bottom))) {
+        c.dc->FillRoundedRectangle(D2D1::RoundedRect(front, fr, fr), g.Get());
+    }
+    const float hl = std::max(0.6f, c.S(0.009f));
+    c.br->SetColor(IcoWhite(0.70f));
+    c.dc->DrawLine(D2D1::Point2F(front.left + fr * 0.6f, front.top + hl * 0.5f),
+                   D2D1::Point2F(front.right - fr * 0.6f, front.top + hl * 0.5f), c.br.Get(), hl, c.round.Get());
+    if (downloads_glyph) {
+        const float sw = std::max(1.0f, c.S(0.034f));
+        for (int pass = 0; pass < 2; ++pass) {
+            const float dy = pass == 0 ? c.S(0.010f) : 0.0f;
+            const D2D1_COLOR_F col = pass == 0 ? IcoWhite(0.45f) : IcoHex(0x2B7CC4, 0.90f);
+            c.br->SetColor(col);
+            const D2D1_POINT_2F ctr = c.P(0.5f, 0.585f);
+            c.dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(ctr.x, ctr.y + dy), c.S(0.14f), c.S(0.14f)), c.br.Get(), sw);
+            IcoStroke(c, {D2D1::Point2F(ctr.x, ctr.y - c.S(0.075f) + dy), D2D1::Point2F(ctr.x, ctr.y + c.S(0.070f) + dy)}, col, sw);
+            IcoStroke(c, {D2D1::Point2F(ctr.x - c.S(0.058f), ctr.y + c.S(0.014f) + dy),
+                          D2D1::Point2F(ctr.x, ctr.y + c.S(0.072f) + dy),
+                          D2D1::Point2F(ctr.x + c.S(0.058f), ctr.y + c.S(0.014f) + dy)},
+                      col, sw);
+        }
+    }
+}
+
+} // namespace
+
+// Widgets: macOS-blue tile carrying three frosted widget cards (weather/text, activity ring, bar chart).
+void DrawDockWidgetsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    IcoPaintTile(c, IcoHex(0x63B6FF), IcoHex(0x2F7FF0), IcoHex(0x1B4FD1), 0.26f, 0.62f);
+
+    const float card_r = c.S(0.085f);
+    const D2D1_COLOR_F card_top = IcoHex(0xFFFFFF, 0.98f);
+    const D2D1_COLOR_F card_bot = IcoHex(0xE6EDF8, 0.97f);
+    const D2D1_RECT_F wide = c.R(0.155f, 0.155f, 0.845f, 0.465f);
+    const D2D1_RECT_F left = c.R(0.155f, 0.535f, 0.465f, 0.845f);
+    const D2D1_RECT_F right = c.R(0.535f, 0.535f, 0.845f, 0.845f);
+    IcoPaintCard(c, wide, card_r, card_top, card_bot, 0.20f, 0.0f);
+    IcoPaintCard(c, left, card_r, card_top, card_bot, 0.20f, 0.0f);
+    IcoPaintCard(c, right, card_r, card_top, card_bot, 0.20f, 0.0f);
+
+    // Wide card: sun disc + two text lines.
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0xFFD54A)}, {1.0f, IcoHex(0xFF9F0A)}}, c.P(0.27f, 0.245f), c.P(0.27f, 0.385f))) {
+        c.dc->FillEllipse(D2D1::Ellipse(c.P(0.27f, 0.31f), c.S(0.068f), c.S(0.068f)), g.Get());
+    }
+    const float line_r = c.S(0.018f);
+    c.br->SetColor(IcoHex(0x1D1D1F, 0.78f));
+    c.dc->FillRoundedRectangle(D2D1::RoundedRect(c.R(0.385f, 0.262f, 0.745f, 0.300f), line_r, line_r), c.br.Get());
+    c.br->SetColor(IcoHex(0x1D1D1F, 0.30f));
+    c.dc->FillRoundedRectangle(D2D1::RoundedRect(c.R(0.385f, 0.330f, 0.625f, 0.364f), line_r, line_r), c.br.Get());
+
+    // Left card: activity ring (track + 3/4 progress arc).
+    {
+        const D2D1_POINT_2F ctr = c.P(0.31f, 0.69f);
+        const float rr = c.S(0.088f);
+        const float sw = std::max(1.0f, c.S(0.038f));
+        c.br->SetColor(IcoHex(0xFF2D55, 0.18f));
+        c.dc->DrawEllipse(D2D1::Ellipse(ctr, rr, rr), c.br.Get(), sw);
+        ComPtr<ID2D1PathGeometry> arc;
+        if (SUCCEEDED(c.factory->CreatePathGeometry(&arc)) && arc) {
+            ComPtr<ID2D1GeometrySink> sk;
+            if (SUCCEEDED(arc->Open(&sk)) && sk) {
+                sk->BeginFigure(D2D1::Point2F(ctr.x, ctr.y - rr), D2D1_FIGURE_BEGIN_HOLLOW);
+                sk->AddArc(D2D1::ArcSegment(D2D1::Point2F(ctr.x - rr, ctr.y), D2D1::SizeF(rr, rr), 0.0f,
+                                            D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                sk->EndFigure(D2D1_FIGURE_END_OPEN);
+                if (SUCCEEDED(sk->Close())) {
+                    if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0xFF6482)}, {1.0f, IcoHex(0xFF2D55)}},
+                                           D2D1::Point2F(ctr.x, ctr.y - rr), D2D1::Point2F(ctr.x, ctr.y + rr))) {
+                        c.dc->DrawGeometry(arc.Get(), g.Get(), sw, c.round.Get());
+                    }
+                }
+            }
+        }
+    }
+
+    // Right card: three rising bars.
+    {
+        const float base = 0.785f;
+        const float bw = 0.050f;
+        const float xs[3] = {0.592f, 0.665f, 0.738f};
+        const float hs[3] = {0.095f, 0.150f, 0.205f};
+        for (int i = 0; i < 3; ++i) {
+            const D2D1_RECT_F bar = c.R(xs[i] - bw * 0.5f, base - hs[i], xs[i] + bw * 0.5f, base);
+            if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0x5EDC7E)}, {1.0f, IcoHex(0x28B84C)}},
+                                   D2D1::Point2F(bar.left, bar.top), D2D1::Point2F(bar.left, bar.bottom))) {
+                c.dc->FillRoundedRectangle(D2D1::RoundedRect(bar, c.S(0.022f), c.S(0.022f)), g.Get());
+            }
+        }
+    }
+}
+
+// Apps (Launchpad-style): light aluminium tile with a 3x3 grid of vivid app tiles.
+void DrawDockAppsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    IcoPaintTile(c, IcoHex(0xF7F8FA), IcoHex(0xE2E5EA), IcoHex(0xC3C8D0), 0.30f, 0.80f);
+
+    struct Pair { UINT32 top; UINT32 bottom; };
+    static constexpr Pair kColors[9] = {
+        {0xFF7A6E, 0xF0352B}, {0xFFBE5C, 0xFF8A00}, {0xFFE873, 0xFFC400},
+        {0x74E691, 0x2BBD4F}, {0x72E1EA, 0x16B1C8}, {0x64B4FF, 0x1C76EE},
+        {0x9796FF, 0x5452D8}, {0xD796FF, 0xA14BE4}, {0xFF94B8, 0xFF3A7C},
+    };
+    const float g0 = 0.185f;
+    const float gap = 0.052f;
+    const float cell = (1.0f - 2.0f * g0 - 2.0f * gap) / 3.0f;
+    const float cr = c.S(cell * 0.30f);
+    for (int iy = 0; iy < 3; ++iy) {
+        for (int ix = 0; ix < 3; ++ix) {
+            const float l = g0 + static_cast<float>(ix) * (cell + gap);
+            const float t = g0 + static_cast<float>(iy) * (cell + gap);
+            const Pair& p = kColors[iy * 3 + ix];
+            IcoPaintCard(c, c.R(l, t, l + cell, t + cell), cr, IcoHex(p.top), IcoHex(p.bottom), 0.16f, 0.45f);
+        }
+    }
+}
+
+// Trash: freestanding translucent mesh bin (macOS Trash is not tiled), crumpled paper when full.
+void DrawDockTrashVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r, bool full) noexcept {
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    ID2D1Factory* f = c.factory.Get();
+
+    const float rim_y = 0.235f;
+    const float rim_rx = 0.315f;
+    const float rim_ry = 0.058f;
+    const D2D1_POINT_2F rim_c = c.P(0.5f, rim_y);
+
+    // Contact shadow.
+    if (auto g = IcoRadial(c.dc, {{0.0f, IcoBlack(0.32f)}, {1.0f, IcoBlack(0.0f)}}, c.P(0.5f, 0.905f), c.S(0.32f), c.S(0.050f))) {
+        c.dc->FillEllipse(D2D1::Ellipse(c.P(0.5f, 0.905f), c.S(0.32f), c.S(0.050f)), g.Get());
+    }
+    // Bin interior seen through the opening.
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0x6E747D)}, {1.0f, IcoHex(0xA9AFB7)}}, c.P(0.5f, rim_y - rim_ry), c.P(0.5f, rim_y + rim_ry))) {
+        c.dc->FillEllipse(D2D1::Ellipse(rim_c, c.S(rim_rx), c.S(rim_ry)), g.Get());
+    }
+    if (full) {
+        struct Ball { float x, y, rx, ry; };
+        static constexpr Ball kBalls[4] = {
+            {0.385f, 0.215f, 0.110f, 0.075f}, {0.600f, 0.205f, 0.120f, 0.082f},
+            {0.495f, 0.165f, 0.095f, 0.070f}, {0.300f, 0.240f, 0.060f, 0.045f},
+        };
+        for (const Ball& b : kBalls) {
+            const D2D1_POINT_2F p = c.P(b.x, b.y);
+            if (auto g = IcoRadial(c.dc, {{0.0f, IcoHex(0xFFFFFF)}, {0.7f, IcoHex(0xEEF1F5)}, {1.0f, IcoHex(0xCDD3DB)}},
+                                   D2D1::Point2F(p.x - c.S(b.rx * 0.3f), p.y - c.S(b.ry * 0.4f)), c.S(b.rx * 1.3f), c.S(b.ry * 1.3f))) {
+                c.dc->FillEllipse(D2D1::Ellipse(p, c.S(b.rx), c.S(b.ry)), g.Get());
+            }
+            c.br->SetColor(IcoHex(0x8E96A1, 0.55f));
+            c.dc->DrawEllipse(D2D1::Ellipse(p, c.S(b.rx), c.S(b.ry)), c.br.Get(), std::max(0.5f, c.S(0.006f)));
+            c.dc->DrawLine(D2D1::Point2F(p.x - c.S(b.rx * 0.45f), p.y - c.S(b.ry * 0.1f)),
+                           D2D1::Point2F(p.x + c.S(b.rx * 0.25f), p.y + c.S(b.ry * 0.35f)), c.br.Get(),
+                           std::max(0.5f, c.S(0.006f)), c.round.Get());
+        }
+    }
+    // Body: front rim arc, tapered sides, rounded foot.
+    ComPtr<ID2D1PathGeometry> body;
+    if (SUCCEEDED(f->CreatePathGeometry(&body)) && body) {
+        ComPtr<ID2D1GeometrySink> sk;
+        if (SUCCEEDED(body->Open(&sk)) && sk) {
+            sk->BeginFigure(c.P(0.5f - rim_rx, rim_y), D2D1_FIGURE_BEGIN_FILLED);
+            sk->AddArc(D2D1::ArcSegment(c.P(0.5f + rim_rx, rim_y), D2D1::SizeF(c.S(rim_rx), c.S(rim_ry)), 0.0f,
+                                        D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+            sk->AddLine(c.P(0.762f, 0.850f));
+            sk->AddQuadraticBezier(D2D1::QuadraticBezierSegment(c.P(0.755f, 0.895f), c.P(0.705f, 0.898f)));
+            sk->AddLine(c.P(0.295f, 0.898f));
+            sk->AddQuadraticBezier(D2D1::QuadraticBezierSegment(c.P(0.245f, 0.895f), c.P(0.238f, 0.850f)));
+            sk->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(sk->Close())) {
+                if (auto g = IcoLinear(c.dc,
+                                       {{0.00f, IcoHex(0xB9BEC6, 0.96f)},
+                                        {0.22f, IcoHex(0xF1F3F6, 0.96f)},
+                                        {0.48f, IcoHex(0xFAFBFC, 0.96f)},
+                                        {0.78f, IcoHex(0xDADEE3, 0.96f)},
+                                        {1.00f, IcoHex(0xA4AAB3, 0.96f)}},
+                                       c.P(0.5f - rim_rx, 0.5f), c.P(0.5f + rim_rx, 0.5f))) {
+                    c.dc->FillGeometry(body.Get(), g.Get());
+                }
+                if (auto g = IcoLinear(c.dc, {{0.0f, IcoBlack(0.0f)}, {1.0f, IcoBlack(0.12f)}}, c.P(0.5f, 0.45f), c.P(0.5f, 0.9f))) {
+                    c.dc->FillGeometry(body.Get(), g.Get());
+                }
+                // Mesh ribs converging toward the foot.
+                const float rib_w = std::max(0.6f, c.S(0.013f));
+                for (int i = 1; i < 9; ++i) {
+                    const float t = static_cast<float>(i) / 9.0f;
+                    const float xt = (0.5f - rim_rx + 0.03f) + t * (2.0f * rim_rx - 0.06f);
+                    const float xb = 0.265f + t * 0.47f;
+                    const float yt = rim_y + rim_ry * std::sqrt(std::max(0.0f, 1.0f - std::pow((xt - 0.5f) / rim_rx, 2.0f))) + 0.035f;
+                    IcoStroke(c, {c.P(xt, yt), c.P(xb, 0.862f)}, IcoHex(0x7F8690, 0.42f), rib_w);
+                }
+                c.br->SetColor(IcoHex(0x5E656F, 0.45f));
+                c.dc->DrawGeometry(body.Get(), c.br.Get(), std::max(0.5f, c.S(0.007f)));
+            }
+        }
+    }
+    // Rolled rim.
+    const float rim_w = std::max(1.0f, c.S(0.032f));
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0xFFFFFF)}, {0.5f, IcoHex(0xD9DDE2)}, {1.0f, IcoHex(0x9EA4AD)}},
+                           c.P(0.5f, rim_y - rim_ry), c.P(0.5f, rim_y + rim_ry))) {
+        c.dc->DrawEllipse(D2D1::Ellipse(rim_c, c.S(rim_rx), c.S(rim_ry)), g.Get(), rim_w);
+    }
+    c.br->SetColor(IcoHex(0x5E656F, 0.40f));
+    c.dc->DrawEllipse(D2D1::Ellipse(rim_c, c.S(rim_rx) + rim_w * 0.5f, c.S(rim_ry) + rim_w * 0.5f), c.br.Get(),
+                      std::max(0.5f, c.S(0.006f)));
+}
+
+// Folder fallback: freestanding macOS blue folder; Downloads gets the debossed arrow badge.
+void DrawDockFolderVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r, bool downloads_glyph) noexcept {
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    IcoPaintFolder(c, downloads_glyph, 0.30f);
+}
+
+// File Explorer fallback: white system tile holding the blue folder.
+void DrawDockExplorerVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    IcoPaintTile(c, IcoHex(0xFFFFFF), IcoHex(0xF0F2F5), IcoHex(0xD6DAE0), 0.25f, 0.85f);
+    IcoCanvas inner = c.Sub(c.R(0.13f, 0.15f, 0.87f, 0.89f));
+    IcoPaintFolder(inner, false, 0.22f);
+}
+
+// Unknown app fallback: colour derived from the title (stable per app), white monogram.
+void DrawDockGenericAppVectorIcon(ID2D1DeviceContext* dc,
+                                  const D2D1_RECT_F& r,
+                                  const std::wstring& title,
+                                  const DockBarTextFn& draw_text) noexcept {
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    struct Pair { UINT32 top; UINT32 bottom; };
+    static constexpr Pair kPalette[8] = {
+        {0x62AEFF, 0x1A63DD}, {0x9A97FF, 0x4743CF}, {0xCB94FF, 0x8636D6}, {0xFF92B4, 0xE02E6A},
+        {0xFFB75E, 0xEE6F0F}, {0x6FDE8E, 0x1E9E45}, {0x6ADCE3, 0x0F8FAD}, {0x9AA0A9, 0x474C55},
+    };
+    UINT32 h = 2166136261u;
+    for (wchar_t ch : title) h = (h ^ static_cast<UINT32>(std::towlower(ch))) * 16777619u;
+    const Pair& p = kPalette[h % 8u];
+    const D2D1_COLOR_F top = IcoHex(p.top);
+    const D2D1_COLOR_F bottom = IcoHex(p.bottom);
+    IcoPaintTile(c, top, IcoMix(top, bottom, 0.5f), bottom, 0.24f, 0.60f);
+    if (draw_text) {
+        std::wstring ch = title.empty() ? std::wstring(L"A") : title.substr(0, 1);
+        if (!ch.empty()) ch[0] = static_cast<wchar_t>(std::towupper(ch[0]));
+        const D2D1_RECT_F tr = c.R(0.0f, 0.02f, 1.0f, 1.02f);
+        draw_text(ch, D2D1::RectF(tr.left, tr.top + c.S(0.016f), tr.right, tr.bottom + c.S(0.016f)), c.S(0.48f), true, 0x40000000u, 1.0f);
+        draw_text(ch, tr, c.S(0.48f), true, 0xFFFFFFFFu, 1.0f);
+    }
 }
 
 ComPtr<ID2D1PathGeometry> BuildMachinedGearGeometry(ID2D1Factory* factory,
@@ -877,6 +1238,13 @@ void DrawDockSettingsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) no
     const float cx = (r.left + r.right) * 0.5f;
     const float cy = (r.top + r.bottom) * 0.5f;
 
+    // Continuous-curvature Apple squircle silhouette shared with every other Dock icon.
+    const ComPtr<ID2D1PathGeometry> tile_shape = IcoSquircle(factory.Get(), r);
+    const auto fill_tile = [&](ID2D1Brush* brush) {
+        if (tile_shape) dc->FillGeometry(tile_shape.Get(), brush);
+        else dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), brush);
+    };
+
     // 1. macOS 26 Tahoe brushed slate-platinum squircle base
     {
         const D2D1_GRADIENT_STOP stops[3] = {
@@ -890,7 +1258,7 @@ void DrawDockSettingsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) no
             SUCCEEDED(dc->CreateLinearGradientBrush(
                 D2D1::LinearGradientBrushProperties(D2D1::Point2F(cx, r.top), D2D1::Point2F(cx, r.bottom)),
                 sc.Get(), &lg)) && lg) {
-            dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
+            fill_tile(lg.Get());
         }
     }
 
@@ -906,7 +1274,7 @@ void DrawDockSettingsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) no
             SUCCEEDED(dc->CreateRadialGradientBrush(
                 D2D1::RadialGradientBrushProperties(D2D1::Point2F(cx, cy), D2D1::Point2F(0, 0), w * 0.44f, w * 0.44f),
                 sc.Get(), &rg)) && rg) {
-            dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), rg.Get());
+            fill_tile(rg.Get());
         }
     }
 
@@ -926,10 +1294,13 @@ void DrawDockSettingsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) no
             SUCCEEDED(dc->CreateLinearGradientBrush(
                 D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
                 sc.Get(), &lg)) && lg) {
-            dc->DrawRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(r.left + inset, r.top + inset, r.right - inset, r.bottom - inset),
-                                  std::max(1.0f, rad - inset), std::max(1.0f, rad - inset)),
-                lg.Get(), rim_w);
+            if (auto rim_shape = IcoSquircle(factory.Get(), IcoInset(r, inset))) {
+                dc->DrawGeometry(rim_shape.Get(), lg.Get(), rim_w);
+            } else {
+                dc->DrawRoundedRectangle(
+                    D2D1::RoundedRect(IcoInset(r, inset), std::max(1.0f, rad - inset), std::max(1.0f, rad - inset)),
+                    lg.Get(), rim_w);
+            }
         }
     }
 
@@ -1047,84 +1418,90 @@ void DrawDockSettingsVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) no
     }
 }
 
+// Terminal: silver aluminium bezel around a recessed glass screen with a white `>_` prompt.
 void DrawDockTerminalVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
-    if (!dc) return;
-    ComPtr<ID2D1SolidColorBrush> br;
-    if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &br)) || !br) return;
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    IcoPaintTile(c, IcoHex(0xF4F5F7), IcoHex(0xDADCE0), IcoHex(0xB0B4BB), 0.30f, 0.75f);
 
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.20f, 0.23f, 0.29f, 1.0f)},
-        {1.0f, D2D1::ColorF(0.08f, 0.09f, 0.13f, 1.0f)},
-    };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
+    const D2D1_RECT_F scr = c.R(0.105f, 0.115f, 0.895f, 0.835f);
+    const float sr = c.S(0.092f);
+    // Machined recess: lower lip catches light, upper lip falls into shadow.
+    c.br->SetColor(IcoWhite(0.80f));
+    c.dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(scr.left, scr.top, scr.right, scr.bottom + c.S(0.012f)), sr, sr), c.br.Get());
+    c.br->SetColor(IcoBlack(0.30f));
+    c.dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(scr.left, scr.top - c.S(0.008f), scr.right, scr.bottom), sr, sr), c.br.Get());
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoHex(0x3B3E44)}, {0.40f, IcoHex(0x1E2024)}, {1.0f, IcoHex(0x0C0D10)}},
+                           D2D1::Point2F(scr.left, scr.top), D2D1::Point2F(scr.left, scr.bottom))) {
+        c.dc->FillRoundedRectangle(D2D1::RoundedRect(scr, sr, sr), g.Get());
     }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.34f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.7f, r.top + 0.7f, r.right - 0.7f, r.bottom - 0.7f), rad, rad), br.Get(), 1.15f);
+    // Glass glare across the upper screen.
+    if (auto g = IcoLinear(c.dc, {{0.0f, IcoWhite(0.13f)}, {0.42f, IcoWhite(0.02f)}, {1.0f, IcoWhite(0.0f)}},
+                           D2D1::Point2F(scr.left, scr.top), D2D1::Point2F(scr.left, scr.bottom))) {
+        c.dc->FillRoundedRectangle(D2D1::RoundedRect(scr, sr, sr), g.Get());
+    }
+    c.br->SetColor(IcoBlack(0.55f));
+    c.dc->DrawRoundedRectangle(D2D1::RoundedRect(scr, sr, sr), c.br.Get(), std::max(0.5f, c.S(0.007f)));
 
-    const float dot_r = w * 0.036f;
-    const float dy = r.top + w * 0.17f;
-    br->SetColor(D2D1::ColorF(1.0f, 0.38f, 0.34f, 0.85f));
-    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + w * 0.20f, dy), dot_r, dot_r), br.Get());
-    br->SetColor(D2D1::ColorF(1.0f, 0.76f, 0.22f, 0.85f));
-    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + w * 0.30f, dy), dot_r, dot_r), br.Get());
-    br->SetColor(D2D1::ColorF(0.26f, 0.84f, 0.44f, 0.85f));
-    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(r.left + w * 0.40f, dy), dot_r, dot_r), br.Get());
-
-    const float stroke = w * 0.068f;
-    const float px = r.left + w * 0.24f;
-    const float py = r.top + w * 0.56f;
-    br->SetColor(D2D1::ColorF(0.32f, 0.88f, 1.0f, 0.96f));
-    dc->DrawLine(D2D1::Point2F(px, py - w * 0.12f), D2D1::Point2F(px + w * 0.15f, py), br.Get(), stroke);
-    dc->DrawLine(D2D1::Point2F(px + w * 0.15f, py), D2D1::Point2F(px, py + w * 0.12f), br.Get(), stroke);
-    br->SetColor(D2D1::ColorF(0.95f, 0.97f, 1.0f, 0.94f));
-    dc->DrawLine(D2D1::Point2F(px + w * 0.22f, py + w * 0.11f), D2D1::Point2F(px + w * 0.46f, py + w * 0.11f), br.Get(), stroke);
+    // Prompt.
+    const float sw = std::max(1.2f, c.S(0.050f));
+    const D2D1_COLOR_F ink = IcoHex(0xF5F5F7);
+    IcoStroke(c, {c.P(0.215f, 0.255f), c.P(0.318f, 0.330f), c.P(0.215f, 0.405f)}, ink, sw);
+    IcoStroke(c, {c.P(0.365f, 0.405f), c.P(0.500f, 0.405f)}, ink, sw);
 }
 
+// Calculator: graphite tile with a 2x2 keypad (function grey, operator orange, digit grey).
 void DrawDockCalculatorVectorIcon(ID2D1DeviceContext* dc, const D2D1_RECT_F& r) noexcept {
-    if (!dc) return;
-    ComPtr<ID2D1SolidColorBrush> br;
-    if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(1, 1, 1, 1), &br)) || !br) return;
+    IcoCanvas c = IcoBegin(dc, r);
+    if (!c.ok) return;
+    IcoPaintTile(c, IcoHex(0x5E6168), IcoHex(0x3A3D43), IcoHex(0x202226), 0.16f, 0.45f);
 
-    const float w = r.right - r.left;
-    const float rad = w * 0.225f;
-    const D2D1_GRADIENT_STOP stops[2] = {
-        {0.0f, D2D1::ColorF(0.24f, 0.25f, 0.29f, 1.0f)},
-        {1.0f, D2D1::ColorF(0.11f, 0.12f, 0.15f, 1.0f)},
+    const float g0 = 0.175f;
+    const float gap = 0.056f;
+    const float cell = (1.0f - 2.0f * g0 - gap) * 0.5f;
+    const float kr = c.S(cell * 0.30f);
+    const float sw = std::max(1.2f, c.S(0.044f));
+    const float arm = 0.068f;
+    const auto key = [&](int ix, int iy) {
+        const float l = g0 + static_cast<float>(ix) * (cell + gap);
+        const float t = g0 + static_cast<float>(iy) * (cell + gap);
+        return c.R(l, t, l + cell, t + cell);
     };
-    ComPtr<ID2D1GradientStopCollection> sc;
-    ComPtr<ID2D1LinearGradientBrush> lg;
-    if (SUCCEEDED(dc->CreateGradientStopCollection(stops, 2, &sc)) && sc &&
-        SUCCEEDED(dc->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(r.left, r.top), D2D1::Point2F(r.right, r.bottom)),
-            sc.Get(), &lg)) && lg) {
-        dc->FillRoundedRectangle(D2D1::RoundedRect(r, rad, rad), lg.Get());
+    const auto center = [&](const D2D1_RECT_F& k) {
+        return D2D1::Point2F((k.left + k.right) * 0.5f, (k.top + k.bottom) * 0.5f);
+    };
+
+    const D2D1_RECT_F k_minus = key(0, 0);
+    const D2D1_RECT_F k_plus = key(1, 0);
+    const D2D1_RECT_F k_times = key(0, 1);
+    const D2D1_RECT_F k_equal = key(1, 1);
+    IcoPaintCard(c, k_minus, kr, IcoHex(0xE4E4E2), IcoHex(0xB5B6B9), 0.32f, 0.70f);
+    IcoPaintCard(c, k_plus, kr, IcoHex(0xFFB547), IcoHex(0xFF8800), 0.32f, 0.55f);
+    IcoPaintCard(c, k_times, kr, IcoHex(0x74777E), IcoHex(0x50535A), 0.32f, 0.40f);
+    IcoPaintCard(c, k_equal, kr, IcoHex(0xFFB547), IcoHex(0xFF8800), 0.32f, 0.55f);
+
+    const D2D1_COLOR_F white = IcoHex(0xFFFFFF);
+    const float a = c.S(arm);
+    {
+        const D2D1_POINT_2F p = center(k_minus);
+        IcoStroke(c, {D2D1::Point2F(p.x - a, p.y), D2D1::Point2F(p.x + a, p.y)}, IcoHex(0x1C1C1E), sw);
     }
-    br->SetColor(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.30f));
-    dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + 0.6f, r.top + 0.6f, r.right - 0.6f, r.bottom - 0.6f), rad, rad), br.Get(), 1.0f);
-
-    const float pad = w * 0.14f;
-    br->SetColor(D2D1::ColorF(0.06f, 0.07f, 0.09f, 0.85f));
-    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(r.left + pad, r.top + pad, r.right - pad, r.top + w * 0.34f), w * 0.06f, w * 0.06f), br.Get());
-
-    const float grid_top = r.top + w * 0.43f;
-    const float cell = (w - pad * 2.0f) / 3.0f;
-    const float btn_r = cell * 0.37f;
-    for (int row = 0; row < 2; ++row) {
-        for (int col = 0; col < 3; ++col) {
-            const float cx = r.left + pad + (static_cast<float>(col) + 0.5f) * cell;
-            const float cy = grid_top + (static_cast<float>(row) + 0.5f) * (cell * 0.94f);
-            if (col == 2) br->SetColor(D2D1::ColorF(1.0f, 0.58f, 0.08f, 0.98f));
-            else br->SetColor(D2D1::ColorF(0.42f, 0.44f, 0.49f, 0.92f));
-            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), btn_r, btn_r), br.Get());
-        }
+    {
+        const D2D1_POINT_2F p = center(k_plus);
+        IcoStroke(c, {D2D1::Point2F(p.x - a, p.y), D2D1::Point2F(p.x + a, p.y)}, white, sw);
+        IcoStroke(c, {D2D1::Point2F(p.x, p.y - a), D2D1::Point2F(p.x, p.y + a)}, white, sw);
+    }
+    {
+        const D2D1_POINT_2F p = center(k_times);
+        const float d = a * 0.74f;
+        IcoStroke(c, {D2D1::Point2F(p.x - d, p.y - d), D2D1::Point2F(p.x + d, p.y + d)}, white, sw);
+        IcoStroke(c, {D2D1::Point2F(p.x - d, p.y + d), D2D1::Point2F(p.x + d, p.y - d)}, white, sw);
+    }
+    {
+        const D2D1_POINT_2F p = center(k_equal);
+        const float off = c.S(0.034f);
+        IcoStroke(c, {D2D1::Point2F(p.x - a, p.y - off), D2D1::Point2F(p.x + a, p.y - off)}, white, sw);
+        IcoStroke(c, {D2D1::Point2F(p.x - a, p.y + off), D2D1::Point2F(p.x + a, p.y + off)}, white, sw);
     }
 }
 
@@ -2501,6 +2878,7 @@ void DrawDockItemArtwork(ID2D1DeviceContext* dc,
                          const D2D1_RECT_F& icon_rect,
                          float icon_op,
                          const DockBarTextFn& draw_text) noexcept {
+    (void)br; // Vector icons own their brushes; kept for call-site compatibility.
     const std::wstring base_exe = ToLower(BaseNameNoExt(it.launch_path));
     const std::wstring family = (it.kind == DockBarItemKind::App)
         ? CanonicalAppFamily(it.launch_path, it.aumid)
@@ -2508,7 +2886,7 @@ void DrawDockItemArtwork(ID2D1DeviceContext* dc,
     if (it.kind == DockBarItemKind::WidgetsToggle) {
         DrawDockWidgetsVectorIcon(dc, icon_rect);
     } else if (it.key == L"special:apps") {
-        DrawAppsStackVectorIcon(dc, br, icon_rect);
+        DrawDockAppsVectorIcon(dc, icon_rect);
     } else if (it.key == L"ms-settings:" || family == L"ms-settings:") {
         DrawDockSettingsVectorIcon(dc, icon_rect);
     } else if (it.kind == DockBarItemKind::App &&
@@ -2521,13 +2899,13 @@ void DrawDockItemArtwork(ID2D1DeviceContext* dc,
     } else if (ID2D1Bitmap* bmp = icon_cache.GetOrLoad(dc, it, trash_not_empty)) {
         dc->DrawBitmap(bmp, &icon_rect, icon_op, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr);
     } else if (it.kind == DockBarItemKind::Trash) {
-        DrawTrashVectorIcon(dc, br, icon_rect, trash_not_empty);
+        DrawDockTrashVectorIcon(dc, icon_rect, trash_not_empty);
     } else if (it.kind == DockBarItemKind::Folder) {
-        DrawDownloadsVectorIcon(dc, br, icon_rect);
+        DrawDockFolderVectorIcon(dc, icon_rect, it.key == L"special:downloads");
     } else if (base_exe == L"explorer") {
-        DrawExplorerVectorIcon(dc, br, icon_rect);
+        DrawDockExplorerVectorIcon(dc, icon_rect);
     } else {
-        DrawGenericAppSquircle(dc, br, icon_rect, it.title, draw_text);
+        DrawDockGenericAppVectorIcon(dc, icon_rect, it.title, draw_text);
     }
 }
 
