@@ -11,6 +11,8 @@ public:
     const std::string& Expanded() const noexcept { return expanded_; }
     bool Pending() const noexcept { return !candidate_.empty() || !expanded_.empty(); }
     void Reset() { expanded_.clear(); candidate_.clear(); enter_at_ = leave_at_ = 0; }
+    // Opens a collapsed group at once (筛选 on a rolled-up card); it then closes like a hover-opened one.
+    void Force(std::string_view id) { expanded_ = id; candidate_.clear(); enter_at_ = leave_at_ = 0; }
     bool Update(std::string_view under_pointer, bool collapsed, bool keep_open, uint64_t now) {
         const auto previous = expanded_;
         if (!expanded_.empty()) {

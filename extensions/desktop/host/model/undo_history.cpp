@@ -1009,6 +1009,7 @@ std::string SerializeModelStateJson(const DesktopModelState& state) {
     w.Key("dock_stack_view"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_stack_view, 3));
     w.Key("dock_stack_sort"); w.WriteUint64(std::min<uint8_t>(state.settings.dock_stack_sort, 3));
     w.Key("dock_apps_stack"); w.WriteBool(state.settings.dock_apps_stack);
+    w.Key("dock_window_preview"); w.WriteBool(state.settings.dock_window_preview);
     w.Key("dock_pinned_paths");
     w.BeginArray();
     for (const auto& dp : state.settings.dock_pinned_paths) {
@@ -1356,6 +1357,9 @@ bool DeserializeModelStateJson(std::string_view utf8, DesktopModelState& out_sta
         }
         if (s->Find("dock_apps_stack")) {
             if (!ReadBoolField(*s, "dock_apps_stack", parsed.settings.dock_apps_stack)) return false;
+        }
+        if (s->Find("dock_window_preview")) {
+            if (!ReadBoolField(*s, "dock_window_preview", parsed.settings.dock_window_preview)) return false;
         }
         if (const JsonValue* dtp = s->Find("dock_tray_pinned_keys")) {
             if (dtp->kind != JsonValue::Kind::Array) return false;

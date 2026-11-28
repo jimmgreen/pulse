@@ -2,6 +2,7 @@
 // 应用程序 stack. A layered top-level window painted with Direct2D into a DIB (UpdateLayeredWindow),
 // so the Fan can float its icons and name pills straight over the desktop with no panel behind.
 #include "host/overlays/dock_stack_popup.h"
+#include "host/overlays/ole_drag_drop.h"
 
 #include "../../../../src/common/localization.h"
 
@@ -27,6 +28,9 @@ using Microsoft::WRL::ComPtr;
 constexpr wchar_t kClassName[] = L"PulseDockStackPopup";
 constexpr UINT_PTR kTimerFrame = 1;
 constexpr UINT_PTR kTimerWatch = 2;
+constexpr UINT_PTR kTimerSpring = 3;      // 弹簧文件夹: a folder held under a file drag opens
+constexpr ULONGLONG kSpringOpenMs = 650;  // how long a drag rests on a folder before it opens
+constexpr ULONGLONG kSpringLeaveMs = 450; // grace before a wandering drag closes the stack
 constexpr float kFanRadius = 1250.0f;   // DIP; the arc the fan's items rise along
 constexpr int kFanMaxFiles = 14;
 constexpr float kFanOpenMs = 300.0f;
@@ -303,6 +307,14 @@ struct DockStackPopup::Impl {
     bool mouse_was_down = true;
     std::wstring closed_key;
     ULONGLONG closed_tick = 0;
+    // 弹簧文件夹 (spring-loaded): the stack as a drop target.
+    DropFn drop_fn;
+    ComPtr<IDropTarget> drop_target;
+    bool drop_registered = false;
+    bool drag_inside = false;
+    std::vector<std::wstring> drag_paths;
+    int spring_hit = kHitNone;
+    ULONGLONG spring_due = 0, spring_leave_at = 0;
 
     // Layout, window-relative DIP.
     float win_w = 0, win_h = 0;           // DIP
@@ -330,6 +342,7 @@ struct DockStackPopup::Impl {
 
     ~Impl() {
         ReleaseSurface();
+        if (drop_registered && hwnd && IsWindow(hwnd)) RevokeDragDrop(hwnd);
         if (hwnd && IsWindow(hwnd)) {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
@@ -397,7 +410,11 @@ struct DockStackPopup::Impl {
         }
         hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kClassName, L"", WS_POPUP,
                                0, 0, 1, 1, nullptr, nullptr, GetModuleHandleW(nullptr), this);
-        return hwnd != nullptr;
+        if (!hwnd) return false;
+        // Files can be dropped on any open stack; a spring-loaded one is opened by the drag itself.
+        drop_target.Attach(new DropTarget(this));
+        drop_registered = SUCCEEDED(RegisterDragDrop(hwnd, drop_target.Get()));
+        return true;
     }
 
     void ReleaseSurface() {
@@ -936,11 +953,16 @@ struct DockStackPopup::Impl {
         anim_start = NowMs();
         had_foreground = false;
         mouse_was_down = true;
+        drag_inside = false;
+        spring_hit = kHitNone;
+        spring_leave_at = 0;
         if (req.headless) return true;
         Frame();
         SetWindowPos(hwnd, HWND_TOPMOST, px_x, px_y, px_w, px_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        SetForegroundWindow(hwnd);
-        SetFocus(hwnd);
+        if (!req.spring) {   // a drag in progress keeps its own window in front
+            SetForegroundWindow(hwnd);
+            SetFocus(hwnd);
+        }
         SetTimer(hwnd, kTimerWatch, 40, nullptr);
         return true;
     }
@@ -979,9 +1001,12 @@ struct DockStackPopup::Impl {
         closing = false;
         closed_key = req.key;
         closed_tick = GetTickCount64();
+        drag_inside = false;
+        spring_hit = kHitNone;
         if (hwnd) {
             KillTimer(hwnd, kTimerFrame);
             KillTimer(hwnd, kTimerWatch);
+            KillTimer(hwnd, kTimerSpring);
             if (GetCapture() == hwnd) ReleaseCapture();
             ShowWindow(hwnd, SW_HIDE);
         }
@@ -1061,6 +1086,10 @@ struct DockStackPopup::Impl {
     // host that could not hand the popup the foreground).
     void Watch() {
         if (!open || closing) return;
+        if (req.spring) {
+            SpringWatch();
+            return;
+        }
         const HWND fg = GetForegroundWindow();
         if (fg == hwnd) had_foreground = true;
         else if (had_foreground) {
@@ -1082,6 +1111,142 @@ struct DockStackPopup::Impl {
         mouse_was_down = down;
     }
 
+    // A spring-loaded stack lives as long as the drag stays on it or its Dock icon.
+    void SpringWatch() {
+        POINT pt{};
+        GetCursorPos(&pt);
+        const RECT wr{px_x, px_y, px_x + px_w, px_y + px_h};
+        RECT icon = req.icon_screen;
+        InflateRect(&icon, 6, 6);
+        const bool buttons = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+        if (!buttons && !drag_inside) {   // the drag ended (dropped elsewhere or cancelled)
+            Close(true);
+            return;
+        }
+        const bool near_stack = drag_inside || PtInRect(&wr, pt) || PtInRect(&icon, pt);
+        const ULONGLONG now = GetTickCount64();
+        if (near_stack) spring_leave_at = 0;
+        else if (!spring_leave_at) spring_leave_at = now + kSpringLeaveMs;
+        else if (now >= spring_leave_at) Close(true);
+    }
+
+    // Where a drop at `hit` goes: a folder item itself, else the folder the stack shows.
+    std::wstring DropFolderAt(int hit) const {
+        if (req.is_apps && nav.empty()) return {};
+        if (hit == kHitBack) return {};
+        if (hit >= 0 && hit < static_cast<int>(entries.size())) {
+            const DockStackEntry& e = entries[static_cast<size_t>(hit)];
+            if (e.is_dir && !e.is_app) return e.path;
+        }
+        return CurrentFolder();
+    }
+
+    bool Springable(int hit) const {
+        return hit == kHitBack ||
+               (hit >= 0 && hit < static_cast<int>(entries.size()) && entries[static_cast<size_t>(hit)].is_dir &&
+                !entries[static_cast<size_t>(hit)].is_app);
+    }
+
+    DWORD DragOverAt(const std::vector<std::wstring>& paths, float x, float y, DWORD key_state, ULONGLONG now) {
+        if (!open || closing) return DROPEFFECT_NONE;
+        const int hit = HitTest(x, y);
+        if (hit != hover) {
+            hover = hit;
+            if (!req.headless) Frame();
+        }
+        if (!Springable(hit)) {
+            spring_hit = kHitNone;
+        } else if (spring_hit != hit) {
+            spring_hit = hit;
+            spring_due = now + kSpringOpenMs;
+            if (hwnd && !req.headless) SetTimer(hwnd, kTimerSpring, 60, nullptr);
+        }
+        return DockStackDropEffect(paths, DropFolderAt(hit), key_state);
+    }
+
+    void SpringTick(ULONGLONG now) {
+        if (spring_hit == kHitNone) {
+            if (hwnd) KillTimer(hwnd, kTimerSpring);
+            return;
+        }
+        if (now < spring_due) return;
+        const int h = spring_hit;
+        spring_hit = kHitNone;
+        if (hwnd) KillTimer(hwnd, kTimerSpring);
+        if (Springable(h)) Activate(h);   // into the folder (or back out), still under the drag
+    }
+
+    DWORD DropAt(const std::vector<std::wstring>& paths, float x, float y, DWORD key_state, DWORD allowed) {
+        if (!open || closing) return DROPEFFECT_NONE;
+        const std::wstring dest = DropFolderAt(HitTest(x, y));
+        DWORD eff = DockStackDropEffect(paths, dest, key_state);
+        if (eff != DROPEFFECT_NONE && (eff & allowed) == 0) eff = (allowed & DROPEFFECT_COPY) ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+        drag_inside = false;
+        spring_hit = kHitNone;
+        if (eff == DROPEFFECT_NONE) return eff;
+        DropFn fn = drop_fn;
+        Close(true);
+        if (fn) fn(dest, paths, eff == DROPEFFECT_COPY);
+        return eff;
+    }
+
+    struct DropTarget final : public IDropTarget {
+        explicit DropTarget(Impl* owner) : impl(owner) {}
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+            if (!ppv) return E_POINTER;
+            if (riid == IID_IUnknown || riid == IID_IDropTarget) {
+                *ppv = static_cast<IDropTarget*>(this);
+                AddRef();
+                return S_OK;
+            }
+            *ppv = nullptr;
+            return E_NOINTERFACE;
+        }
+        ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&refs)); }
+        ULONG STDMETHODCALLTYPE Release() override {
+            const LONG n = InterlockedDecrement(&refs);
+            if (n == 0) delete this;
+            return static_cast<ULONG>(n);
+        }
+        HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data, DWORD key_state, POINTL pt, DWORD* effect) override {
+            impl->drag_paths = DesktopDropManager::ExtractHDropPaths(data);
+            impl->drag_inside = true;
+            impl->spring_leave_at = 0;
+            return DragOver(key_state, pt, effect);
+        }
+        HRESULT STDMETHODCALLTYPE DragOver(DWORD key_state, POINTL pt, DWORD* effect) override {
+            if (!effect) return E_POINTER;
+            if (impl->drag_paths.empty()) {
+                *effect = DROPEFFECT_NONE;
+                return S_OK;
+            }
+            const DWORD want = impl->DragOverAt(impl->drag_paths, (pt.x - impl->px_x) / impl->req.scale,
+                                                (pt.y - impl->px_y) / impl->req.scale, key_state, GetTickCount64());
+            *effect = (*effect & want) ? want : DROPEFFECT_NONE;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE DragLeave() override {
+            impl->drag_inside = false;
+            impl->spring_hit = kHitNone;
+            if (impl->hover != kHitNone && impl->open) {
+                impl->hover = kHitNone;
+                impl->Frame();
+            }
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE Drop(IDataObject* data, DWORD key_state, POINTL pt, DWORD* effect) override {
+            if (!effect) return E_POINTER;
+            std::vector<std::wstring> paths = DesktopDropManager::ExtractHDropPaths(data);
+            if (paths.empty()) paths = impl->drag_paths;
+            impl->drag_paths.clear();
+            *effect = impl->DropAt(paths, (pt.x - impl->px_x) / impl->req.scale, (pt.y - impl->px_y) / impl->req.scale,
+                                   key_state, *effect);
+            return S_OK;
+        }
+        Impl* impl;
+        LONG refs = 1;
+    };
+
     static LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_NCCREATE) {
             const auto* cs = reinterpret_cast<const CREATESTRUCTW*>(lp);
@@ -1093,6 +1258,7 @@ struct DockStackPopup::Impl {
         case WM_TIMER:
             if (wp == kTimerFrame) self->Frame();
             else if (wp == kTimerWatch) self->Watch();
+            else if (wp == kTimerSpring) self->SpringTick(GetTickCount64());
             return 0;
         case WM_MOUSEMOVE:
         case WM_LBUTTONDOWN:
@@ -1135,6 +1301,28 @@ struct DockStackPopup::Impl {
 DockStackPopup::DockStackPopup() : impl_(std::make_unique<Impl>()) {}
 DockStackPopup::~DockStackPopup() = default;
 void DockStackPopup::SetOpenHandler(OpenFn fn) { impl_->open_fn = std::move(fn); }
+void DockStackPopup::SetDropHandler(DropFn fn) { impl_->drop_fn = std::move(fn); }
+bool DockStackPopup::IsSpringLoaded() const noexcept { return impl_->open && !impl_->closing && impl_->req.spring; }
+std::wstring DockStackPopup::CurrentFolder() const { return impl_->CurrentFolder(); }
+DWORD DockStackPopup::SimulateDragOver(const std::vector<std::wstring>& paths, float x_dip, float y_dip, DWORD key_state,
+                                       ULONGLONG now) {
+    return impl_->DragOverAt(paths, x_dip, y_dip, key_state, now);
+}
+void DockStackPopup::SimulateSpringTick(ULONGLONG now) { impl_->SpringTick(now); }
+DWORD DockStackPopup::SimulateDrop(const std::vector<std::wstring>& paths, float x_dip, float y_dip, DWORD key_state) {
+    return impl_->DropAt(paths, x_dip, y_dip, key_state, DROPEFFECT_COPY | DROPEFFECT_MOVE);
+}
+POINT DockStackPopup::EntryCenterDip(int index) const {
+    const auto& im = *impl_;
+    if (!im.open || index < 0 || index >= im.shown) return POINT{-1, -1};
+    const D2D1_RECT_F r = im.view == DockStackView::Fan ? im.FanIconRect(index) : im.CellRect(index);
+    return POINT{static_cast<LONG>((r.left + r.right) * 0.5f), static_cast<LONG>((r.top + r.bottom) * 0.5f)};
+}
+int DockStackPopup::EntryIndexByName(const std::wstring& name) const {
+    for (size_t i = 0; i < impl_->entries.size(); ++i)
+        if (impl_->entries[i].name == name) return static_cast<int>(i);
+    return -1;
+}
 bool DockStackPopup::Show(const DockStackRequest& request) { return impl_->Show(request); }
 void DockStackPopup::Close(bool animate) { impl_->Close(animate); }
 bool DockStackPopup::IsOpen() const noexcept { return impl_->open; }

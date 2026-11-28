@@ -6639,5 +6639,15 @@
 #define IDS_LAYOUT_SNAPSHOT_RECOVERED                                                    8020
 #define IDS_LAYOUT_SNAPSHOT_FAILED                                                       8021
 #define IDS_LAYOUT_SNAPSHOT_NONE                                                         8022
+#define IDS_DESKTOP_GROUP_FILTER                                                         8023
+#define IDS_DESKTOP_GROUP_FILTER_CLEAR                                                   8024
+#define IDS_DESKTOP_GROUP_FILTER_CUE                                                     8025
+#define IDS_DESKTOP_GROUP_FILTER_NO_MATCH                                                8026
+#define IDS_DOCK_PREVIEW_CLOSE_WINDOW                                                    8027
+#define IDS_DOCK_PREVIEW_MINIMIZED                                                       8028
+#define IDS_DOCK_PREVIEW_SETTING                                                         8029
+#define IDS_DOCK_SPRING_MOVE_FORMAT                                                      8030
+#define IDS_DOCK_SPRING_COPY_FORMAT                                                      8031
+#define IDS_DOCK_SPRING_DROPPED                                                          8032
 
 #endif  // PULSE_STRING_IDS_H

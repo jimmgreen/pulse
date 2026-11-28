@@ -161,6 +161,7 @@ struct ContextMenuSpec {
     model::GroupViewMode group_view_mode = model::GroupViewMode::Icons;
     bool group_focus_visible = false;
     bool group_locked = false;
+    bool group_filtered = false;               // 筛选 is active: offer 清除筛选
     int group_cols = 4;
     model::CardMaterial group_material = model::CardMaterial::FollowHost;
     model::GroupSortBy group_sort = model::GroupSortBy::ModifiedTime;
@@ -412,7 +413,11 @@ public:
                            const std::wstring& initial_text, bool multiline,
                            std::function<void(const std::wstring& committed_text)> on_commit,
                            int select_end_char = -1,
-                           bool allow_empty = false);
+                           bool allow_empty = false,
+                           const std::wstring& cue = {});
+    // For the inline edit just begun: every change as it is typed, and Esc (or any end without Enter).
+    void SetInlineEditLiveHandlers(std::function<void(const std::wstring& text)> on_change,
+                                   std::function<void()> on_cancel);
     void CancelInlineRename(bool commit) noexcept;
     bool IsInlineRenaming() const noexcept {
         return active_kind_ == OverlayKind::InlineRename ||
@@ -790,6 +795,8 @@ private:
     bool edit_allow_empty_ = false;
     int rename_stem_len_ = -1;
     std::function<void(const std::wstring&)> edit_on_commit_;
+    std::function<void(const std::wstring&)> edit_on_change_;
+    std::function<void()> edit_on_cancel_;
 };
 
 } // namespace pulse::desktop::overlays

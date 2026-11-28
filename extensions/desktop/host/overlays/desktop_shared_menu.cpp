@@ -351,6 +351,8 @@ void DesktopOverlayController::SyncHostedPopupEditChanged() {
                 callbacks_.on_sticky_note_changed(sticky_tile_id_, sticky_note_text_);
             }
         }
+    } else if (active_kind_ == OverlayKind::InlineRename) {
+        if (edit_on_change_) edit_on_change_(current);
     } else if (active_kind_ == OverlayKind::SearchPopup) {
         if (current != search_query_) {
             const bool empty_flipped = (search_query_.empty() != current.empty());

@@ -1,5 +1,6 @@
 #include "host/model/group_tabs.h"
 #include "host/model/drag_damage.h"
+#include "host/group_interaction.h"
 #include <cstdio>
 #include <unordered_map>
 using namespace pulse::desktop::model;
@@ -182,6 +183,60 @@ int main() {
         DesktopModelState old_file;
         check(DeserializeModelStateJson(SerializeModelStateJson(DesktopModelState{}),old_file)&&(old_file.groups.empty()||!old_file.groups[0].locked),
               "older layouts load unlocked");
+    }
+    {   // 筛选 (in-group filter) and hover-expand of rolled-up groups
+        DesktopModelState fs;fs.settings.organize_enabled=true;
+        DesktopGroup fg;fg.id="docs";fg.x=24;fg.y=32;fg.cols=2;fg.visible_rows=2;fg.sort_by=GroupSortBy::Name;fs.groups.push_back(fg);
+        const wchar_t* names[]={L"Budget 2026.xlsx",L"budget-old.xlsx",L"Contract.pdf",L"Invoice March.pdf",L"Notes.txt",L"Photo.png"};
+        for(const wchar_t* n:names){DesktopItem it;it.name=n;it.path=std::wstring(L"C:\\d\\")+n;it.pinned_group_id="docs";fs.items.push_back(it);}
+        const auto plain=ComputeGroupViews(fs,0);
+        check(plain[0].total_item_count==6&&plain[0].unfiltered_item_count==6&&plain[0].shown_item_indices==plain[0].member_item_indices&&plain[0].page_count==2,
+              "without a filter every member is shown and paged");
+        check(NameMatchesGroupFilter(L"Budget 2026.xlsx",L"  bUdGeT ")&&!NameMatchesGroupFilter(L"Notes.txt",L"budget")&&
+              NameMatchesGroupFilter(L"Notes.txt",L"   ")&&NameMatchesGroupFilter(L"发票-三月.pdf",L"三月")&&!NameMatchesGroupFilter(L"ab",L"abc"),
+              "filter matches a case-insensitive substring and ignores surrounding spaces");
+        fs.groups[0].filter_text=L"budget";
+        const auto filtered=ComputeGroupViews(fs,0);
+        bool only_budget=filtered[0].total_item_count==2;
+        for(size_t idx:filtered[0].visible_item_indices)only_budget=only_budget&&NameMatchesGroupFilter(fs.items[idx].name,L"budget");
+        check(only_budget&&filtered[0].unfiltered_item_count==6&&filtered[0].page_count==1&&filtered[0].visible_item_indices.size()==2,
+              "a filter shows only matching names on a single page");
+        check(filtered[0].member_item_indices.size()==6&&filtered[0].frame==plain[0].frame,
+              "hidden files stay members (never fall back onto the desktop) and the card keeps its size");
+        std::unordered_map<std::string,int> pages{{"docs",1}};
+        check(ComputeGroupViews(fs,0,&pages)[0].page_index==0,"a stale page index is clamped into the filtered pages");
+        fs.groups[0].filter_text=L"zzz";
+        const auto none=ComputeGroupViews(fs,0);
+        check(none[0].total_item_count==0&&none[0].visible_item_indices.empty()&&none[0].member_item_indices.size()==6,"no match leaves the card empty");
+        DesktopModelState rt;fs.groups[0].filter_text=L"budget";
+        check(DeserializeModelStateJson(SerializeModelStateJson(fs),rt)&&rt.groups[0].filter_text.empty(),"the filter keyword is never saved");
+        const std::vector<size_t> members{0,1,2,3,4,5},shown{1,3,5};
+        check(FilteredToMemberIndex(members,shown,0)==1&&FilteredToMemberIndex(members,shown,2)==5&&FilteredToMemberIndex(members,shown,3)==6&&
+              FilteredToMemberIndex(members,{},0)==6,"a drop position among filtered icons maps before the same icon in the full order");
+        // Hover-expand: 250 ms to open, stays while the pointer (or an open edit) is on it, closes 400 ms after leaving.
+        pulse::desktop::interaction::GroupHoverSession hs;
+        hs.Update("docs",true,false,1000);
+        check(hs.Expanded().empty()&&hs.Pending(),"a rolled-up group does not open the instant the pointer arrives");
+        hs.Update("docs",true,false,1200);
+        check(hs.Expanded().empty(),"still closed before the 250 ms enter delay");
+        check(hs.Update("docs",true,false,1260)&&hs.Expanded()=="docs","it opens after hovering 250 ms");
+        hs.Update("",false,true,1300);hs.Update("",false,true,2000);
+        check(hs.Expanded()=="docs","an open edit or overlay keeps it open after the pointer leaves");
+        hs.Update("",false,false,2100);
+        check(hs.Expanded()=="docs","leaving starts the 400 ms close delay");
+        hs.Update("docs",true,false,2300);hs.Update("",false,false,2400);hs.Update("",false,false,2700);
+        check(hs.Expanded()=="docs","coming back within the delay keeps it open and restarts the delay");
+        check(hs.Update("",false,false,2800)&&hs.Expanded().empty(),"it rolls up again 400 ms after the pointer leaves");
+        hs.Update("docs",false,false,3000);hs.Update("docs",false,false,4000);
+        check(hs.Expanded().empty()&&!hs.Pending(),"an expanded group never hover-opens");
+        fs.groups[0].collapsed=true;fs.groups[0].filter_text.clear();
+        const auto rolled=ComputeGroupViews(fs,0);
+        const auto hovered=ComputeGroupViews(fs,0,nullptr,"docs");
+        check(!rolled[0].expanded&&rolled[0].visible_item_indices.empty()&&hovered[0].expanded&&hovered[0].temporarily_expanded&&
+              !hovered[0].visible_item_indices.empty()&&hovered[0].frame.h>rolled[0].frame.h&&fs.groups[0].collapsed,
+              "hover shows a rolled-up card's contents without changing its saved state");
+        hs.Reset();hs.Force("docs");
+        check(hs.Expanded()=="docs"&&ComputeGroupViews(fs,0,nullptr,hs.Expanded())[0].temporarily_expanded,"筛选 opens a rolled-up card at once");
     }
     return failures?1:0;
 }

@@ -4458,21 +4458,42 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
                           D2D1::RectF(title_x, rc.top, title_x + title_w + 4.0f, hdr_bottom),
                           Brush(text_pri));
 
-        wchar_t count_buf[24]{};
-        std::swprintf(count_buf, ARRAYSIZE(count_buf), L"%zu", view.total_item_count);
-        const float count_txt_w = MeasureSingleLineWidth(count_buf, fmt_pill_.Get(), 60.0f);
+        // 筛选: the pill reads "matches/all" in the accent tint, followed by a funnel and the keyword.
+        const bool filtered = !group.filter_text.empty();
+        wchar_t count_buf[48]{};
+        if (filtered) {
+            std::swprintf(count_buf, ARRAYSIZE(count_buf), L"%zu/%zu", view.total_item_count, view.unfiltered_item_count);
+        } else {
+            std::swprintf(count_buf, ARRAYSIZE(count_buf), L"%zu", view.total_item_count);
+        }
+        const float count_txt_w = MeasureSingleLineWidth(count_buf, fmt_pill_.Get(), 80.0f);
         const float count_pill_w = std::max(18.0f, count_txt_w + 10.0f);
         const float count_x = title_x + title_w + 7.0f;
         const D2D1_RECT_F count_rc = D2D1::RectF(count_x, rc.top + 10.0f, count_x + count_pill_w, rc.top + 28.0f);
         d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(count_rc, 9.0f, 9.0f),
-                                      Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
+                                      filtered ? Brush(accent_fg, 0.22f) : Brush(dark ? 0x1AFFFFFFu : 0x12000000u));
         DrawWidgetText(count_buf, static_cast<UINT32>(std::wcslen(count_buf)), fmt_pill_.Get(),
-                          count_rc, Brush(text_sec));
+                          count_rc, Brush(filtered ? text_pri : text_sec));
+        float after_count = count_rc.right;
         if (group.locked) {   // 锁定分组: a small padlock after the count
             const wchar_t lock_glyph[2] = {L'\xE72E', 0};
             DrawGlyph(d2d_dc_.Get(), lock_glyph, 1, fmt_fluent_12_.Get(),
                       D2D1::RectF(count_rc.right + 4.0f, rc.top, count_rc.right + 20.0f, hdr_bottom),
                       Brush(text_sec, 0.85f));
+            after_count = count_rc.right + 20.0f;
+        }
+        const float filter_room = rc.right - static_cast<float>(GroupHeaderActionsWidth(actual_frame.w)) - after_count - 24.0f;
+        if (filtered && filter_room > 24.0f) {
+            const wchar_t funnel[2] = {L'\xE71C', 0};
+            DrawGlyph(d2d_dc_.Get(), funnel, 1, fmt_fluent_12_.Get(),
+                      D2D1::RectF(after_count + 4.0f, rc.top, after_count + 20.0f, hdr_bottom), Brush(accent_fg));
+            const float kw_w = std::min(filter_room - 20.0f,
+                                        MeasureSingleLineWidth(group.filter_text, fmt_pill_.Get(), filter_room));
+            if (kw_w > 8.0f) {
+                DrawWidgetText(group.filter_text.c_str(), static_cast<UINT32>(group.filter_text.size()), fmt_pill_.Get(),
+                               D2D1::RectF(after_count + 22.0f, rc.top + 10.0f, after_count + 26.0f + kw_w, rc.top + 28.0f),
+                               Brush(text_sec));
+            }
         }
 
     }
@@ -4595,7 +4616,9 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
 
         if (view.total_item_count == 0) {
             const wchar_t* empty_msg = L"把文件拖到这里";
-            if (!group.mapped_folder_path.empty()) {
+            if (!group.filter_text.empty()) {
+                empty_msg = l10n::Get(l10n::StringId::DesktopGroupFilterNoMatch).c_str();
+            } else if (!group.mapped_folder_path.empty()) {
                 const DWORD attrs = GetFileAttributesW(group.mapped_folder_path.c_str());
                 empty_msg = (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
                                 ? L"关联的文件夹不存在或已移动"

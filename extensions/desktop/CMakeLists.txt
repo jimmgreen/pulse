@@ -135,6 +135,7 @@ add_library(pulse_desktop_mount_gfx STATIC
     host/render/dock_genie.cpp
     host/overlays/desktop_overlays.cpp
     host/overlays/dock_stack_popup.cpp
+    host/overlays/dock_window_preview.cpp
     host/overlays/dock_system_panel.cpp
     host/overlays/desktop_menu_policy.cpp
     host/overlays/widget_icons.cpp

@@ -12,6 +12,8 @@
 #endif
 #include <windows.h>
 
+#include "host/overlays/drop_effect.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -65,12 +67,18 @@ struct DockStackRequest {
     uint8_t dock_edge = 0; // 0 bottom, 1 left, 2 right
     bool dark = true;
     bool headless = false; // lay out and enumerate only; never shown (tests / review snapshots)
+    // 弹簧文件夹: opened by a file drag resting on the Dock icon. It does not take the focus, a subfolder
+    // held under the drag opens in place, a drop lands in the folder under the pointer, and it closes
+    // when the drag ends or wanders off.
+    bool spring = false;
 };
 
 class DockStackPopup {
 public:
     // Opens an entry: a file or app is launched, a folder (or 在 Pulse 中打开) opens in Pulse.
     using OpenFn = std::function<void(const DockStackEntry& entry)>;
+    // Files dropped on the stack (or on one of its folders) go into `folder`.
+    using DropFn = std::function<void(const std::wstring& folder, const std::vector<std::wstring>& paths, bool copy)>;
 
     DockStackPopup();
     ~DockStackPopup();
@@ -78,6 +86,7 @@ public:
     DockStackPopup& operator=(const DockStackPopup&) = delete;
 
     void SetOpenHandler(OpenFn fn);
+    void SetDropHandler(DropFn fn);
     bool Show(const DockStackRequest& request);
     void Close(bool animate = true);
     bool IsOpen() const noexcept;
@@ -86,6 +95,15 @@ public:
     // taking focus away) does not open it again.
     bool RecentlyClosedFor(const std::wstring& key, ULONGLONG window_ms = 350) const noexcept;
     HWND Hwnd() const noexcept;
+    bool IsSpringLoaded() const noexcept;
+    std::wstring CurrentFolder() const;
+    // Test hooks for the drop target (window DIP point; `key_state` as in IDropTarget).
+    DWORD SimulateDragOver(const std::vector<std::wstring>& paths, float x_dip, float y_dip, DWORD key_state, ULONGLONG now);
+    void SimulateSpringTick(ULONGLONG now);
+    DWORD SimulateDrop(const std::vector<std::wstring>& paths, float x_dip, float y_dip, DWORD key_state);
+    // Window-DIP centre of entry `index` as laid out (tests), or {-1,-1}.
+    POINT EntryCenterDip(int index) const;
+    int EntryIndexByName(const std::wstring& name) const;
 
     // Headless render of the open stack's current frame (tests / review snapshots).
     bool RenderSnapshot(std::vector<uint32_t>& out_bgra, int& out_w, int& out_h, float progress = 1.0f);

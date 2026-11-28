@@ -1,7 +1,9 @@
 #include "host/overlays/ole_drag_drop.h"
+#include "host/overlays/drop_effect.h"
 
 #include <shellapi.h>
 #include <cstring>
+#include <cwchar>
 #include <utility>
 
 namespace pulse::desktop::overlays {
@@ -214,6 +216,16 @@ DWORD DesktopDropTarget::EvaluateHover(model::PointI client_pt, DWORD key_state,
     case DropZoneKind::DockApp:
         out_hint = out_zone.hint.empty() ? out_zone.target_title : out_zone.hint;
         return DROPEFFECT_COPY;
+    case DropZoneKind::DockFolder: {
+        const DWORD eff = DockStackDropEffect(cached_paths_, out_zone.target_path, key_state);
+        if (eff == DROPEFFECT_NONE) {
+            out_hint.clear();
+            return DROPEFFECT_NONE;
+        }
+        // The host words both pills: `hint` for a move, `hint_copy` for a copy.
+        out_hint = eff == DROPEFFECT_COPY ? out_zone.hint_copy : out_zone.hint;
+        return eff;
+    }
     case DropZoneKind::StagingTrayTile:
         out_hint = L"加入 Pulse 暂存区";
         return DROPEFFECT_COPY;

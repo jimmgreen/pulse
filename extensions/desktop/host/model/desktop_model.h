@@ -186,6 +186,7 @@ struct BeautifySettings {
     uint8_t dock_stack_view = 0;      // 0=Automatic, 1=Fan, 2=Grid, 3=List (overlays::DockStackView)
     uint8_t dock_stack_sort = 0;      // 0=Date created, 1=Name, 2=Date modified, 3=Kind
     bool dock_apps_stack = true;      // 应用程序 stack (Start menu apps in a grid) beside 下载
+    bool dock_window_preview = true;  // 窗口预览: live thumbnails of a running app's windows on hover
     std::vector<std::wstring> dock_pinned_paths;     // empty => auto-discover default Windows apps
     std::vector<std::wstring> dock_tray_pinned_keys; // tray icons pinned directly inside Dock .dk-sys
     // 天气: the city picked in settings (no location API); coordinates come from Open-Meteo's geocoder.
@@ -356,6 +357,7 @@ struct DesktopGroup {
     bool tab_active = true;
     bool focus_visible = false;                // kept expanded & full-opacity in Focus scene
     bool locked = false;                       // 锁定分组: the card keeps its place and size
+    std::wstring filter_text;                  // transient 筛选: only names containing it are shown (not saved)
     int x = 24;
     int y = 24;
     int cols = 4;                              // 2..7
@@ -372,6 +374,8 @@ struct GroupComputedView {
     std::vector<size_t> visible_item_indices;  // indices into DesktopModelState::items for active page
     std::vector<size_t> member_item_indices;   // every member, across all pages
     size_t total_item_count = 0;
+    size_t unfiltered_item_count = 0;          // members before 筛选 (== total_item_count without a filter)
+    std::vector<size_t> shown_item_indices;    // members that pass 筛选, across all pages (all members without one)
     size_t overflow_count = 0;                 // >0 when total_item_count > page_capacity (multi-page card)
     int page_index = 0;                        // 0-based active page inside this group card
     int page_count = 1;                        // total pages (>= 1)
@@ -585,6 +589,12 @@ std::vector<GroupComputedView> ComputeGroupViews(
     const std::unordered_map<std::string, int>* group_pages = nullptr,
     std::string_view hover_expanded_group_id = {});
 RectI GroupItemRect(const GroupComputedView& view, size_t visible_index) noexcept;
+// 筛选: an insert position counted among `shown` (a filtered subsequence of `members`) as a position in
+// `members` — before the same item, or right after the last shown item when it is past the end.
+size_t FilteredToMemberIndex(const std::vector<size_t>& members, const std::vector<size_t>& shown,
+                             size_t shown_index) noexcept;
+// 筛选: a name matches when it contains the filter (case-insensitive, surrounding spaces ignored).
+bool NameMatchesGroupFilter(std::wstring_view name, std::wstring_view filter) noexcept;
 
 // Files dragged onto a group card (group_drop.cpp). The slot is where they land: an index into the card's
 // member order across pages, and the caret drawn between icons (empty for an empty card). Outside the

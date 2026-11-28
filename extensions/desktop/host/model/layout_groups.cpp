@@ -652,6 +652,32 @@ void ResizeGroupColumns(std::vector<DesktopGroup>& groups, size_t group_index,
     ResolveGroupCollisions(groups, group_index, work_area, tile_board_rect, icon_size, extra_obstacles);
 }
 
+size_t FilteredToMemberIndex(const std::vector<size_t>& members, const std::vector<size_t>& shown,
+                             size_t shown_index) noexcept {
+    if (shown.empty()) return members.size();
+    const bool past_end = shown_index >= shown.size();
+    const size_t anchor = shown[past_end ? shown.size() - 1 : shown_index];
+    const auto it = std::find(members.begin(), members.end(), anchor);
+    if (it == members.end()) return members.size();
+    return static_cast<size_t>(it - members.begin()) + (past_end ? 1u : 0u);
+}
+
+bool NameMatchesGroupFilter(std::wstring_view name, std::wstring_view filter) noexcept {
+    size_t a = 0;
+    while (a < filter.size() && std::iswspace(filter[a])) ++a;
+    size_t b = filter.size();
+    while (b > a && std::iswspace(filter[b - 1])) --b;
+    filter = filter.substr(a, b - a);
+    if (filter.empty()) return true;
+    if (filter.size() > name.size()) return false;
+    for (size_t i = 0; i + filter.size() <= name.size(); ++i) {
+        size_t k = 0;
+        while (k < filter.size() && std::towlower(name[i + k]) == std::towlower(filter[k])) ++k;
+        if (k == filter.size()) return true;
+    }
+    return false;
+}
+
 std::vector<GroupComputedView> ComputeGroupViews(const DesktopModelState& state,
                                                  int64_t now_unix_ms,
                                                  const std::unordered_map<std::string, int>* group_pages,
@@ -810,7 +836,13 @@ std::vector<GroupComputedView> ComputeGroupViews(const DesktopModelState& state,
         size_t capacity = effective_collapsed ? 0u : static_cast<size_t>(cols * rows);
         if(group.view_mode!=GroupViewMode::Icons)capacity=effective_collapsed?0u:
             static_cast<size_t>(view.item_columns*(std::max(0,view.content_rect.h-view.details_header_height)/std::max(1,view.cell_height)));
-        const size_t total = indices.size();
+        // 筛选: pages and visible cells come from the matching members only; every member still belongs to the
+        // card (member_item_indices), so a hidden file never falls back onto the desktop.
+        std::vector<size_t> shown = indices;
+        if (!group.filter_text.empty()) {
+            std::erase_if(shown, [&](size_t idx) { return !NameMatchesGroupFilter(state.items[idx].name, group.filter_text); });
+        }
+        const size_t total = shown.size();
         const int page_count = (!effective_collapsed && capacity > 0 && total > 0)
                                    ? static_cast<int>((total + capacity - 1) / capacity)
                                    : 1;
@@ -827,15 +859,18 @@ std::vector<GroupComputedView> ComputeGroupViews(const DesktopModelState& state,
 
         if(!view.tab_active)view.frame={};
         view.visible_item_indices.assign(
-            indices.begin() + static_cast<std::ptrdiff_t>(first),
-            indices.begin() + static_cast<std::ptrdiff_t>(first + visible_count));
+            shown.begin() + static_cast<std::ptrdiff_t>(first),
+            shown.begin() + static_cast<std::ptrdiff_t>(first + visible_count));
         view.member_item_indices = indices;
+        view.shown_item_indices = std::move(shown);
         view.total_item_count = total;
+        view.unfiltered_item_count = indices.size();
         view.overflow_count = (total > capacity) ? (total - capacity) : 0u;
         view.page_index = cur_page;
         view.page_count = page_count;
         view.page_capacity = capacity;
-        if (group.mapped_folder_path.empty() && !group.rule.fallback_catch_all && indices.size() == 1) {
+        if (group.mapped_folder_path.empty() && !group.rule.fallback_catch_all && group.filter_text.empty() &&
+            indices.size() == 1) {
             const DesktopItem& sole = state.items[indices[0]];
             if (sole.is_folder) {
                 view.single_subfolder_path = sole.path;

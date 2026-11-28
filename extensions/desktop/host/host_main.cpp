@@ -53,6 +53,7 @@
 #include "host/render/liquid_dock_bar.h"
 #include "host/render/dock_genie.h"
 #include "host/overlays/dock_stack_popup.h"
+#include "host/overlays/dock_window_preview.h"
 #include "host/video/video_visibility.h"
 #include "host/video/video_wallpaper_controller.h"
 #include "ipc/assistant_availability.h"
@@ -129,6 +130,8 @@ constexpr UINT_PTR kTimerTilePress = 107;  // a pressed card sinking in or sprin
 constexpr UINT_PTR kTimerLongPress = 103;    // a held tile enters 编辑磁贴区
 constexpr UINT_PTR kTimerEditJiggle = 104;   // the jiggle while editing (stops with edit mode)
 constexpr UINT_PTR kTimerWeatherCity = 105;
+constexpr UINT_PTR kTimerDockPreview = 114;   // 窗口预览: while a preview is pending or open
+constexpr UINT_PTR kTimerSpringLoad = 115;    // 弹簧文件夹: a file drag resting on a Dock folder
 constexpr UINT_PTR kTimerDragPageFlip = 113;  // a dragged file held on a group's 上一页/下一页 turns the page  // the city is still being typed in settings: fetch when it settles
 
 int64_t NowUnixMs() noexcept {
@@ -1686,6 +1689,7 @@ public:
 #endif
         dock_genie_.Shutdown();
         dock_stack_.Close(/*animate=*/false);
+        dock_preview_.Close();
         if (mount_.Hwnd()) {
             KillTimer(mount_.Hwnd(), kTimerDockAutoHide);
         }
@@ -2819,6 +2823,124 @@ private:
         return true;
     }
 
+    // 窗口预览: the running app under the pointer whose windows may be previewed now (-1 for none).
+    // `blocked` tells a press, a drag, a menu or a stack apart from simply pointing elsewhere.
+    int DockPreviewTargetIndex(bool* blocked = nullptr) const {
+        const bool busy = interaction_.dock_bar_drag.active || dock_bar_pressed_idx_ >= 0 || dock_bar_resizing_ ||
+                          (overlays_.IsOpen() && overlays_.ActiveKind() != overlays::OverlayKind::ToastCapsule &&
+                           overlays_.ActiveKind() != overlays::OverlayKind::DockVolumeOsd) ||
+                          dock_stack_.IsOpen() || interaction_.dragging_items ||
+                          interaction_.drop_hint_visible;
+        if (blocked) *blocked = busy;
+        if (busy || !state_.settings.dock_enabled || !state_.settings.dock_window_preview) return -1;
+        if (!dock_bar_pointer_inside_ || dock_bar_reveal_ < 0.85f) return -1;
+        const int idx = dock_bar_hovered_idx_;
+        if (idx < 0 || static_cast<size_t>(idx) >= live_data_.dock.items.size()) return -1;
+        const auto& it = live_data_.dock.items[static_cast<size_t>(idx)];
+        if (it.kind != render::DockBarItemKind::App || it.is_ghost || it.windows.empty()) return -1;
+        return idx;
+    }
+
+    std::vector<HWND> DockPreviewWindows(const render::DockBarItem& item) const {
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        return item.windows;   // fixtures use stand-in handles
+#else
+        std::vector<HWND> wins;
+        for (HWND h : item.windows)
+            if (render::LiquidDockBarState::IsWindowLiveForActivation(h)) wins.push_back(h);
+        return wins;
+#endif
+    }
+
+    bool PointerOverDockPreview() const {
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        return test_pointer_over_preview_;
+#else
+        POINT cur{};
+        return GetCursorPos(&cur) && dock_preview_.ContainsScreenPoint(cur);
+#endif
+    }
+
+    bool ShowDockPreview(size_t idx) {
+        if (idx >= live_data_.dock.items.size()) return false;
+        const auto& item = live_data_.dock.items[idx];
+        overlays::DockWindowPreviewRequest rq;
+        rq.key = item.key;
+        rq.windows = DockPreviewWindows(item);
+        if (rq.windows.empty()) return false;
+        const overlays::DockStackRequest geo = BuildDockStackRequest(idx);
+        rq.icon_screen = geo.icon_screen;
+        rq.work_screen = geo.work_screen;
+        rq.scale = geo.scale;
+        rq.dock_edge = geo.dock_edge;
+        rq.dark = geo.dark;
+        rq.accent_argb = EffectiveAccentArgb();
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        rq.headless = true;
+#endif
+        const std::wstring key = item.key;
+        dock_preview_.SetActivateHandler([this, key](HWND h) {
+            dock_preview_hover_.Dismissed(key);
+#ifdef PULSE_DESKTOP_DRAG_TEST
+            test_dock_activations_.push_back(L"preview:" + std::to_wstring(reinterpret_cast<uintptr_t>(h)));
+#else
+            if (IsIconic(h)) RestoreWindowWithGenie(h, live_data_.dock.FindItemIndexByKey(key));
+            else ActivateWindowReliably(h);
+#endif
+        });
+        dock_preview_.SetCloseHandler([this](HWND h) {
+#ifdef PULSE_DESKTOP_DRAG_TEST
+            test_dock_activations_.push_back(L"preview-close:" + std::to_wstring(reinterpret_cast<uintptr_t>(h)));
+#else
+            PostMessageW(h, WM_CLOSE, 0, 0);
+#endif
+        });
+        const bool shown = dock_preview_.Show(rq);
+        if (shown) InvalidateDockBar();   // the tooltip gives way
+        return shown;
+    }
+
+    void DismissDockPreview() {
+        if (!dock_preview_.IsOpen() && !dock_preview_hover_.NeedsTick()) return;
+        const int idx = dock_bar_hovered_idx_;
+        const std::wstring key = (idx >= 0 && static_cast<size_t>(idx) < live_data_.dock.items.size())
+            ? live_data_.dock.items[static_cast<size_t>(idx)].key : dock_preview_hover_.Shown();
+        dock_preview_.Close();
+        dock_preview_hover_.Dismissed(key);
+        if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerDockPreview);
+    }
+
+    // Driven by pointer moves (through the animation tick) and a 50 ms timer while anything is pending.
+    void TickDockPreview(uint64_t now) {
+        if (!dock_preview_hover_.Shown().empty() && !dock_preview_.IsOpen()) {
+            dock_preview_hover_.Dismissed(dock_preview_hover_.Shown());   // its last window was closed from it
+        }
+        bool blocked = false;
+        const int idx = DockPreviewTargetIndex(&blocked);
+        if (blocked) {
+            DismissDockPreview();
+            return;
+        }
+        const std::wstring key = idx >= 0 ? live_data_.dock.items[static_cast<size_t>(idx)].key : std::wstring{};
+        switch (dock_preview_hover_.Update(key, PointerOverDockPreview(), now)) {
+        case overlays::DockPreviewHover::Action::Show:
+            if (idx < 0 || !ShowDockPreview(static_cast<size_t>(idx))) {
+                dock_preview_.Close();
+                dock_preview_hover_.Dismissed(key);
+            }
+            break;
+        case overlays::DockPreviewHover::Action::Close:
+            dock_preview_.Close();
+            InvalidateDockBar();
+            break;
+        default:
+            break;
+        }
+        if (!mount_.Hwnd()) return;
+        if (dock_preview_hover_.NeedsTick()) SetTimer(mount_.Hwnd(), kTimerDockPreview, 50, nullptr);
+        else KillTimer(mount_.Hwnd(), kTimerDockPreview);
+    }
+
     void PinPathsToDock(const std::vector<std::wstring>& raw_paths) {
         if (raw_paths.empty()) return;
         const model::RectI wa = PrimaryWorkAreaClient();
@@ -3088,6 +3210,105 @@ private:
             }
         });
         dock_stack_.Show(BuildDockStackRequest(idx));
+    }
+
+    // 弹簧文件夹: a Dock folder (下载, a pinned folder — not 应用程序) takes dropped files.
+    static bool DockItemTakesFilesAsFolder(const render::DockBarItem& item) {
+        return item.kind == render::DockBarItemKind::Folder && item.key != L"special:apps" && !item.launch_path.empty();
+    }
+
+    static std::wstring FormatWithTitle(l10n::StringId id, const std::wstring& title) {
+        wchar_t buf[320]{};
+        swprintf_s(buf, l10n::Get(id).c_str(), title.c_str());
+        return buf;
+    }
+
+    // A file drag resting on a Dock folder opens its stack after a moment, as on the Mac; inside it a
+    // subfolder held under the drag opens in turn, and the drop lands where the pointer is.
+    void ArmSpringLoad(const std::wstring& key) {
+        if (dock_stack_.IsOpenFor(key)) {
+            spring_key_.clear();
+            return;
+        }
+        if (spring_key_ == key) return;
+        spring_key_ = key;
+        spring_due_ = GetTickCount64() + 650;
+        if (mount_.Hwnd()) SetTimer(mount_.Hwnd(), kTimerSpringLoad, 60, nullptr);
+    }
+
+    void TickSpringLoad(uint64_t now) {
+        if (spring_key_.empty()) {
+            if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerSpringLoad);
+            return;
+        }
+        const int idx = live_data_.dock.FindItemIndexByKey(spring_key_);
+#ifndef PULSE_DESKTOP_DRAG_TEST
+        // Still resting there? (OLE only reports moves, so look at the pointer itself.)
+        POINT cur{};
+        bool still = false;
+        if (idx >= 0 && GetCursorPos(&cur)) {
+            const POINT c = mount_.ScreenPxToClientDip(cur);
+            still = live_data_.dock.HitTestItem(static_cast<float>(c.x), static_cast<float>(c.y)) == idx;
+        }
+        if (!still) {
+            spring_key_.clear();
+            if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerSpringLoad);
+            return;
+        }
+#endif
+        if (now < spring_due_) return;
+        spring_key_.clear();
+        if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerSpringLoad);
+        if (idx < 0) return;
+        OpenSpringLoadedStack(static_cast<size_t>(idx));
+    }
+
+    void OpenSpringLoadedStack(size_t idx) {
+        if (idx >= live_data_.dock.items.size() || !DockItemTakesFilesAsFolder(live_data_.dock.items[idx])) return;
+        DismissDockPreview();
+        dock_stack_.SetOpenHandler([this, key = live_data_.dock.items[idx].key](const overlays::DockStackEntry& e) {
+            if (e.is_dir) {
+                const int i = live_data_.dock.FindItemIndexByKey(key);
+                const model::RectI origin = DockItemClientRect(i);
+                OpenPathInPulseOrShell(e.path, i >= 0 ? &origin : nullptr);
+            } else {
+                LaunchDetached(e.path);
+            }
+        });
+        dock_stack_.SetDropHandler([this](const std::wstring& folder, const std::vector<std::wstring>& paths, bool copy) {
+            DropPathsIntoFolder(folder, paths, copy);
+        });
+        overlays::DockStackRequest rq = BuildDockStackRequest(idx);
+        rq.spring = true;
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        rq.headless = true;
+#endif
+        dock_stack_.Show(rq);
+    }
+
+    // Files dropped into a folder through the Dock (its icon or its stack): moved or copied, renamed on a
+    // clash, then a short note names the folder.
+    void DropPathsIntoFolder(const std::wstring& folder, const std::vector<std::wstring>& paths, bool copy) {
+        if (folder.empty() || paths.empty()) return;
+#ifdef PULSE_DESKTOP_DRAG_TEST
+        std::wstring rec = (copy ? L"spring-copy:" : L"spring-move:") + folder;
+        for (const auto& p : paths) rec += L"|" + p;
+        test_dock_activations_.push_back(std::move(rec));
+#else
+        size_t done = 0;
+        for (const auto& src : paths)
+            if (!MoveOrCopyToDirectoryCollisionSafe(src, folder, copy).empty()) ++done;
+        SyncWatcherDirectories();
+        RefreshDesktopItems();
+        RecomputeLayout();
+        SaveModel();
+        renderer_.InvalidateAll();
+        if (done > 0) {
+            const size_t slash = folder.find_last_of(L"\\/");
+            const std::wstring name = (slash == std::wstring::npos || slash + 1 >= folder.size()) ? folder : folder.substr(slash + 1);
+            ShowInfoToast(FormatWithTitle(l10n::StringId::DockSpringDropped, name));
+        }
+#endif
     }
 
     void ActivateDockBarItem(size_t idx, bool force_new_instance, bool allow_minimize_if_front = true) {
@@ -3617,7 +3838,9 @@ private:
                 }
             }
 
-            const bool want_tip = dock_bar_pointer_inside_ && dock_bar_reveal_ > 0.85f && (dock_bar_hovered_idx_ >= 0);
+            TickDockPreview(GetTickCount64());
+            const bool want_tip = dock_bar_pointer_inside_ && dock_bar_reveal_ > 0.85f && (dock_bar_hovered_idx_ >= 0) &&
+                                  !dock_preview_.IsOpen();   // the preview names the windows itself
             if (want_tip) interaction_.dock_bar_tooltip_index = dock_bar_hovered_idx_;
             const float target_tip = want_tip ? 1.0f : 0.0f;
             const float next_tip = interaction_.dock_bar_tooltip_alpha + (target_tip - interaction_.dock_bar_tooltip_alpha) * (1.0f - std::exp(-dt_sec * 18.0f));
@@ -4185,6 +4408,7 @@ private:
         spec.group_tabbed = model::TabMembers(state_.groups, g.id).size() > 1;
         spec.group_focus_visible = g.focus_visible;
         spec.group_locked = GroupLocked(group_idx);
+        spec.group_filtered = !g.filter_text.empty();
         spec.group_cols = g.cols;
         spec.group_material = g.material;
         spec.group_sort = g.sort_by;
@@ -4584,6 +4808,7 @@ private:
     void CancelGroupDrag(bool redraw = true) {
         if (!group_drag_session_.Pending()) return;
         group_drag_session_.Cancel(state_.groups);
+        locked_press_.reset();
         interaction_.drop_target_group_id.clear();
         interaction_.dragging_group = false;
         interaction_.dragging_group_id.clear();
@@ -4770,6 +4995,64 @@ private:
         }
     }
 
+    // 筛选 (in-group filter): the title bar becomes a search box; the card narrows to matching names as you
+    // type. Enter keeps the keyword (shown in the header, cleared from the menu, Ctrl+F or Esc on a new edit),
+    // Esc drops it. The keyword is transient: it is never saved and never pushes undo.
+    void SetGroupFilter(const std::string& gid, const std::wstring& text) {
+        bool changed = false;
+        for (auto& g : state_.groups) {
+            if (g.id != gid || g.filter_text == text) continue;
+            g.filter_text = text;
+            changed = true;
+        }
+        if (!changed) return;
+        interaction_.group_pages.erase(gid);
+        RecomputeLayout();
+        renderer_.InvalidateAll();
+    }
+
+    void BeginGroupFilter(const std::string& gid) {
+        for (size_t i = 0; i < state_.groups.size() && i < group_views_.size(); ++i) {
+            const auto& g = state_.groups[i];
+            if (g.id != gid) continue;
+            if (group_views_[i].tab_active && !group_views_[i].expanded) {
+                group_hover_.Force(gid);   // a rolled-up card opens while its filter is typed
+                RefreshGroupViews();
+                ArmGroupInteractionTimer();
+                renderer_.InvalidateAll();
+            }
+            if (i >= group_views_.size()) return;
+            const model::RectI r{g.x + 34, g.y + 6, std::max(120, group_views_[i].frame.w - 96), 28};
+            const std::wstring before = g.filter_text;
+            overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+            overlays_.BeginInlineRename(mount_.Hwnd(), r, before, false,
+                                        [this, gid](const std::wstring& txt) { SetGroupFilter(gid, TrimFilter(txt)); },
+                                        -1, /*allow_empty=*/true, l10n::Get(l10n::StringId::DesktopGroupFilterCue));
+            overlays_.SetInlineEditLiveHandlers([this, gid](const std::wstring& txt) { SetGroupFilter(gid, TrimFilter(txt)); },
+                                                [this, gid] { SetGroupFilter(gid, {}); });
+            return;
+        }
+    }
+
+    static std::wstring TrimFilter(const std::wstring& s) {
+        size_t a = 0, b = s.size();
+        while (a < b && iswspace(s[a])) ++a;
+        while (b > a && iswspace(s[b - 1])) --b;
+        return s.substr(a, b - a);
+    }
+
+    // Ctrl+F over a group card filters that group; anywhere else it opens quick search.
+    std::string GroupUnderCursor() {
+        POINT screen{};
+        if (!GetCursorPos(&screen)) return {};
+        const POINT c = mount_.ScreenPxToClientDip(screen);
+        for (size_t i = group_views_.size(); i-- > 0;) {
+            if (i >= state_.groups.size() || !group_views_[i].tab_active) continue;
+            if (group_views_[i].frame.contains(c.x, c.y)) return state_.groups[i].id;
+        }
+        return {};
+    }
+
     // 新建分组: an empty group at the free spot nearest (x, y) — or right of `beside_id` — that never covers
     // another group, a widget or the dock; `paths` move into it. Its name is then ready to type.
     std::string CreateNewGroupNear(int x, int y, const std::vector<std::wstring>& paths = {},
@@ -4897,9 +5180,14 @@ private:
         if (gi == state_.groups.size() || paths.empty()) return;
         // The group's order as shown, before anything moves (an insert index counts in it).
         std::vector<std::wstring> shown;
-        if (gi < group_views_.size())
-            for (const size_t idx : group_views_[gi].member_item_indices)
+        if (gi < group_views_.size()) {
+            const auto& gv = group_views_[gi];
+            for (const size_t idx : gv.member_item_indices)
                 if (idx < state_.items.size()) shown.push_back(state_.items[idx].path);
+            // 筛选: the drop index counts the matching icons only; land before the same icon in the full order.
+            if (insert_index && gv.shown_item_indices.size() != gv.member_item_indices.size())
+                insert_index = model::FilteredToMemberIndex(gv.member_item_indices, gv.shown_item_indices, *insert_index);
+        }
         // Dragged files in the order the user sees them: the group's order first, then the rest.
         std::vector<std::wstring> dragged;
         for (const auto& p : shown)
@@ -5089,8 +5377,8 @@ private:
                         }
                     }
                     if (!visible_has_match) {
-                        for (size_t pos = 0; pos < gv.member_item_indices.size(); ++pos) {
-                            if (matches(gv.member_item_indices[pos])) {
+                        for (size_t pos = 0; pos < gv.shown_item_indices.size(); ++pos) {
+                            if (matches(gv.shown_item_indices[pos])) {
                                 interaction_.group_pages[gv.group_id] = static_cast<int>(pos / gv.page_capacity);
                                 page_changed = true;
                                 break;
@@ -5575,6 +5863,18 @@ private:
                     return z;
                 }
                 if (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size() &&
+                    DockItemTakesFilesAsFolder(live_data_.dock.items[static_cast<size_t>(hit)])) {
+                    const auto& folder = live_data_.dock.items[static_cast<size_t>(hit)];
+                    z.kind = overlays::DropZoneKind::DockFolder;
+                    z.target_title = folder.title;
+                    z.target_path = folder.launch_path;
+                    z.hint = FormatWithTitle(l10n::StringId::DockSpringMoveFormat, folder.title);
+                    z.hint_copy = FormatWithTitle(l10n::StringId::DockSpringCopyFormat, folder.title);
+                    ArmSpringLoad(folder.key);
+                    return z;
+                }
+                spring_key_.clear();
+                if (hit >= 0 && static_cast<size_t>(hit) < live_data_.dock.items.size() &&
                     DockItemOpensFiles(live_data_.dock.items[static_cast<size_t>(hit)])) {
                     const auto& app = live_data_.dock.items[static_cast<size_t>(hit)];
                     z.kind = overlays::DropZoneKind::DockApp;
@@ -5586,6 +5886,7 @@ private:
                 z.kind = overlays::DropZoneKind::DockBar;
                 return z;
             }
+            spring_key_.clear();
             for (const size_t i : GroupHitOrder()) {
                 if (group_views_[i].frame.contains(pt.x, pt.y)) {
                     z.kind = overlays::DropZoneKind::GroupCard;
@@ -5631,6 +5932,13 @@ private:
         };
         dcb.on_drop_files = [this](const overlays::DropZoneQueryResult& zone, model::PointI pt,
                                    const std::vector<std::wstring>& paths, DWORD key_state, DWORD& /*eff*/) {
+            spring_key_.clear();
+            if (zone.kind == overlays::DropZoneKind::DockFolder) {
+                const DWORD eff = overlays::DockStackDropEffect(paths, zone.target_path, key_state);
+                if (dock_stack_.IsSpringLoaded()) dock_stack_.Close(true);
+                if (eff != DROPEFFECT_NONE) DropPathsIntoFolder(zone.target_path, paths, eff == DROPEFFECT_COPY);
+                return;
+            }
             HandleDroppedFiles(zone, pt, paths, (key_state & MK_CONTROL) != 0);
         };
         dcb.to_client = [this](POINTL p) {
@@ -6582,6 +6890,10 @@ private:
                                             l10n::StringId::ColumnModified, l10n::StringId::ColumnType};
             ShowUndoToast(std::wstring(l10n::Get(l10n::StringId::SortBy)) + L" \u00B7 " +
                           std::wstring(l10n::Get(names[v])));
+        } else if (cmd.starts_with("dock-preview:")) {
+            state_.settings.dock_window_preview = std::atoi(cmd.c_str() + 13) != 0;
+            if (!state_.settings.dock_window_preview) DismissDockPreview();
+            SaveModel();
         } else if (cmd.starts_with("dock-apps-stack:")) {
             const bool on = std::atoi(cmd.c_str() + 16) != 0;
             if (!on) dock_stack_.Close(false);
@@ -6774,6 +7086,12 @@ private:
                     g.collapsed = !g.collapsed;
                 } else if (cmd == "rename-group") {
                     BeginGroupTitleRename(g.id);
+                    return;
+                } else if (cmd == "group-filter") {
+                    BeginGroupFilter(g.id);
+                    return;
+                } else if (cmd == "group-filter-clear") {
+                    SetGroupFilter(g.id, {});
                     return;
                 } else if (cmd == "edit-rule") {
                     OpenGroupRulePopoverForIndex(i);
@@ -8907,6 +9225,7 @@ private:
         case WM_RBUTTONDOWN:
         case WM_MBUTTONDOWN:
             CancelHoverPreview();
+            DismissDockPreview();
             break;
         case WM_MBUTTONUP: {
             const int x = GET_X_LPARAM(lp);
@@ -9069,6 +9388,14 @@ private:
                     return 0;
                 }
                 (void)TickMotionAnimations(NowAnimMs());
+                return 0;
+            }
+            if (wp == kTimerDockPreview) {
+                TickDockPreview(GetTickCount64());
+                return 0;
+            }
+            if (wp == kTimerSpringLoad) {
+                TickSpringLoad(GetTickCount64());
                 return 0;
             }
             if (wp == kTimerDragPageFlip) {
@@ -9342,6 +9669,7 @@ private:
 
         case WM_LBUTTONDOWN: {
             CancelHoverPreview();
+            DismissDockPreview();
             handled = true;
             overlays_.Dismiss();
             SetFocus(hwnd);
@@ -11012,7 +11340,11 @@ private:
             } else if (ctrl && shift && wp == 'A') {
                 OpenAiOrganizeDrawer();
             } else if (ctrl && wp == 'F') {
-                OpenSearchOverlay(L"");
+                if (const std::string gid = GroupUnderCursor(); !gid.empty() && state_.settings.organize_enabled) {
+                    BeginGroupFilter(gid);
+                } else {
+                    OpenSearchOverlay(L"");
+                }
             } else if (ctrl && wp == 'A') {
                 interaction_.selected_paths.clear();
                 for (const auto& it : state_.items) {
@@ -11239,6 +11571,13 @@ private:
     render::DockGenieAnimator dock_genie_{};
     bool dock_genie_ready_ = false;
     overlays::DockStackPopup dock_stack_{}; // Dock stacks (叠放): Fan / Grid / List popups
+    overlays::DockWindowPreview dock_preview_{};       // 窗口预览 above a running app
+    overlays::DockPreviewHover dock_preview_hover_{};
+    std::wstring spring_key_;                          // 弹簧文件夹: the Dock folder a file drag rests on
+    uint64_t spring_due_ = 0;
+#ifdef PULSE_DESKTOP_DRAG_TEST
+    bool test_pointer_over_preview_ = false;
+#endif
     std::vector<RecentWindowSnap> recent_win_snaps_;
     double last_fg_snap_ms_ = 0.0;
     double last_fg_snap_prune_ms_ = 0.0;

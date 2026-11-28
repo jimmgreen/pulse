@@ -1,6 +1,7 @@
 // Exercise the real host message dispatch with model persistence redirected in-memory.
 #include "../../../src/common/utf8_file.h"
 
+#include <fstream>
 #define PULSE_DESKTOP_DRAG_TEST 1
 #define main DesktopPluginEntryForGroupTest
 #include "host/host_main.cpp"
@@ -530,6 +531,172 @@ struct DesktopGroupHostTestPeer {
                   "a full notch of them moves one window");
             check(!host.CycleDockAppWindows(0, -WHEEL_DELTA), "an app with no windows leaves the wheel to the desktop");
             host.live_data_.dock.items = keep_items;
+        }
+
+        // 筛选: the keyword narrows a card without saving or undo; drops count among the shown icons.
+        Prepare(host);
+        {
+            overlays::ContextMenuSpec fl_spec{};
+            host.FillGroupContextMenuSpec(0, fl_spec);
+            check(!fl_spec.group_filtered, "a group starts unfiltered");
+            host.SetGroupFilter("group-0", L"3");
+            check(host.group_views_[0].total_item_count == 1 && host.group_views_[0].unfiltered_item_count == 7 &&
+                  host.group_views_[0].member_item_indices.size() == 7, "筛选 shows only matching names");
+            check(host.undo_.UndoDepth() == 0 && host.test_saved_model_.empty(), "filtering neither saves nor adds undo");
+            host.FillGroupContextMenuSpec(0, fl_spec);
+            check(fl_spec.group_filtered, "the menu offers 清除筛选 while filtered");
+            host.ExecuteContextMenuCommand("group-filter-clear", fl_spec);
+            check(host.state_.groups[0].filter_text.empty() && host.group_views_[0].total_item_count == 7, "清除筛选 shows everything again");
+            host.SetGroupFilter("group-0", L"5");
+            const std::wstring fl_foreign = L"C:\\fixture\\1-0.txt";
+            host.DropItemsIntoGroup("group-0", {fl_foreign}, size_t{0});
+            const auto fl_order = member_paths(0);
+            const auto fl_new = std::find(fl_order.begin(), fl_order.end(), fl_foreign);
+            check(fl_new != fl_order.end() && fl_new + 1 != fl_order.end() && *(fl_new + 1) == L"C:\\fixture\\0-5.txt",
+                  "a drop before the only shown icon lands before it in the full order");
+            host.SetGroupFilter("group-0", {});
+            host.state_.groups[1].collapsed = true; host.RefreshGroupViews();
+            check(!host.group_views_[1].expanded, "a rolled-up card shows no icons");
+            host.BeginGroupFilter("group-1");
+            check(host.group_hover_.Expanded() == "group-1" && host.group_views_[1].temporarily_expanded &&
+                  host.state_.groups[1].collapsed, "筛选 opens a rolled-up card for the search without unrolling it");
+            host.group_hover_.Reset();
+        }
+
+        // 窗口预览: resting on a running app opens live previews; they stay while the pointer is on them.
+        Prepare(host);
+        {
+            render::DockBarItem pv_app;
+            pv_app.kind = render::DockBarItemKind::App; pv_app.key = L"c:\\apps\\editor.exe";
+            pv_app.launch_path = L"C:\\Apps\\Editor.exe"; pv_app.title = L"Editor"; pv_app.pinned = true;
+            render::DockBarItem pv_viewer = pv_app;
+            pv_viewer.key = L"c:\\apps\\viewer.exe"; pv_viewer.running = true;
+            pv_viewer.windows = {reinterpret_cast<HWND>(0x10), reinterpret_cast<HWND>(0x20), reinterpret_cast<HWND>(0x30)};
+            pv_viewer.draw_cx = 640.0f; pv_viewer.draw_cy = 690.0f; pv_viewer.draw_size = 48.0f;
+            const auto pv_keep = host.live_data_.dock.items;
+            host.live_data_.dock.items = {pv_app, pv_viewer};
+            host.state_.settings.dock_enabled = true;
+            host.dock_preview_hover_.Reset();
+            host.dock_bar_pointer_inside_ = true; host.dock_bar_reveal_ = 1.0f; host.dock_bar_hovered_idx_ = 1;
+            host.test_pointer_over_preview_ = false;
+            host.TickDockPreview(1000);
+            host.TickDockPreview(1300);
+            check(!host.dock_preview_.IsOpen(), "no preview the instant the pointer arrives");
+            host.TickDockPreview(1460);
+            check(host.dock_preview_.IsOpenFor(pv_viewer.key) && host.dock_preview_.Windows().size() == 3 &&
+                  host.dock_preview_.Layout().shown == 3, "resting on a running app previews each of its windows");
+            const RECT pv_panel = host.dock_preview_.Layout().panel;
+            const RECT pv_icon = host.BuildDockStackRequest(1).icon_screen;
+            check(pv_panel.bottom <= pv_icon.top && pv_panel.left < (pv_icon.left + pv_icon.right) / 2 &&
+                  pv_panel.right > (pv_icon.left + pv_icon.right) / 2, "the previews sit above the icon, centred on it");
+            host.dock_bar_hovered_idx_ = -1; host.dock_bar_pointer_inside_ = false; host.test_pointer_over_preview_ = true;
+            host.TickDockPreview(1500); host.TickDockPreview(2400);
+            check(host.dock_preview_.IsOpen(), "moving onto the previews keeps them open");
+            host.test_pointer_over_preview_ = false;
+            host.TickDockPreview(2500);
+            check(host.dock_preview_.IsOpen(), "leaving gives a moment of grace");
+            host.TickDockPreview(2900);
+            check(!host.dock_preview_.IsOpen(), "then the previews close");
+            host.dock_bar_pointer_inside_ = true; host.dock_bar_hovered_idx_ = 1;
+            host.TickDockPreview(3000); host.TickDockPreview(3500);
+            check(host.dock_preview_.IsOpen(), "coming back opens them again");
+            host.DismissDockPreview();
+            host.TickDockPreview(3600); host.TickDockPreview(4600);
+            check(!host.dock_preview_.IsOpen(), "a click on the icon closes them until the pointer leaves it");
+            host.dock_bar_hovered_idx_ = 0; host.TickDockPreview(4700);
+            host.dock_bar_hovered_idx_ = 1; host.TickDockPreview(4800); host.TickDockPreview(5300);
+            check(host.dock_preview_.IsOpen(), "after leaving the icon it previews again");
+            host.dock_bar_hovered_idx_ = 0; host.TickDockPreview(5400); host.TickDockPreview(5800);
+            check(!host.dock_preview_.IsOpen(), "an app without windows has no preview");
+            host.dock_bar_hovered_idx_ = 1; host.TickDockPreview(5900); host.TickDockPreview(6400);
+            host.interaction_.dragging_items = true; host.TickDockPreview(6450);
+            check(!host.dock_preview_.IsOpen(), "a drag closes the previews at once");
+            host.interaction_.dragging_items = false;
+            host.state_.settings.dock_window_preview = false;
+            host.TickDockPreview(7000); host.TickDockPreview(8000);
+            check(!host.dock_preview_.IsOpen(), "turned off in the Dock settings, there are no previews");
+            host.state_.settings.dock_window_preview = true;
+            // Layout: a side Dock puts them beside the icon; too many shrink, then the rest is left out.
+            const RECT pv_work{0, 0, 1280, 720}, pv_side_icon{0, 300, 56, 356};
+            const auto pv_side = overlays::LayoutDockWindowPreview({SIZE{1600, 900}, SIZE{800, 1200}}, pv_side_icon, pv_work, 1.0f, 1);
+            check(pv_side.shown == 2 && pv_side.panel.left >= pv_side_icon.right && pv_side.cards[1].top > pv_side.cards[0].top,
+                  "beside a left Dock the previews stack to the right of it");
+            const RECT pv_t0 = pv_side.thumbs[0], pv_t1 = pv_side.thumbs[1];
+            check((pv_t0.right - pv_t0.left) > (pv_t0.bottom - pv_t0.top) && (pv_t1.bottom - pv_t1.top) > (pv_t1.right - pv_t1.left),
+                  "each thumbnail keeps its window's shape");
+            const auto pv_many = overlays::LayoutDockWindowPreview(std::vector<SIZE>(12, SIZE{1600, 1000}), RECT{600, 670, 648, 718},
+                                                                   pv_work, 1.0f, 0);
+            check(pv_many.shown < 12 && pv_many.shown >= 4 && pv_many.panel.left >= 0 && pv_many.panel.right <= 1280,
+                  "many windows shrink to fit the screen and the rest is left out");
+            host.dock_preview_.Close();
+            host.dock_preview_hover_.Reset();
+            host.dock_bar_pointer_inside_ = false; host.dock_bar_hovered_idx_ = -1;
+            host.live_data_.dock.items = pv_keep;
+        }
+
+        // 弹簧文件夹: a file drag resting on a Dock folder opens it; a subfolder held under the drag opens in
+        // turn; the drop lands in the folder under the pointer.
+        Prepare(host);
+        {
+            const std::filesystem::path sp_tmp = std::filesystem::current_path();
+            const std::filesystem::path sp_dir = sp_tmp / (L"pulse_spring_" + std::to_wstring(GetCurrentProcessId()));
+            std::error_code sp_ec;
+            std::filesystem::remove_all(sp_dir, sp_ec);
+            std::filesystem::create_directories(sp_dir / L"Sub", sp_ec);
+            { std::ofstream(sp_dir / L"a.txt") << "x"; }
+            const std::wstring sp_src = (sp_tmp / L"pulse_spring_src.txt").wstring();
+            render::DockBarItem sp_folder;
+            sp_folder.kind = render::DockBarItemKind::Folder; sp_folder.key = L"special:downloads";
+            sp_folder.launch_path = sp_dir.wstring(); sp_folder.title = L"下载";
+            sp_folder.draw_cx = 700.0f; sp_folder.draw_cy = 690.0f; sp_folder.draw_size = 48.0f;
+            render::DockBarItem sp_apps = sp_folder;
+            sp_apps.key = L"special:apps"; sp_apps.launch_path.clear();
+            const auto sp_keep = host.live_data_.dock.items;
+            host.live_data_.dock.items = {sp_folder, sp_apps};
+            check(host.DockItemTakesFilesAsFolder(sp_folder) && !host.DockItemTakesFilesAsFolder(sp_apps),
+                  "a Dock folder takes dropped files; the 应用程序 stack does not");
+            host.ArmSpringLoad(sp_folder.key);
+            host.TickSpringLoad(GetTickCount64());
+            check(!host.dock_stack_.IsOpen(), "the folder does not spring open at once");
+            host.TickSpringLoad(GetTickCount64() + 1000);
+            check(host.dock_stack_.IsOpenFor(sp_folder.key) && host.dock_stack_.IsSpringLoaded(), "resting on it opens its stack");
+            const int sp_sub = host.dock_stack_.EntryIndexByName(L"Sub");
+            const POINT sp_sub_pt = host.dock_stack_.EntryCenterDip(sp_sub);
+            const ULONGLONG sp_t0 = 50000;
+            const DWORD sp_eff = host.dock_stack_.SimulateDragOver({sp_src}, static_cast<float>(sp_sub_pt.x),
+                                                                   static_cast<float>(sp_sub_pt.y), 0, sp_t0);
+            check(sp_sub >= 0 && sp_eff == DROPEFFECT_MOVE, "over a subfolder on the same drive the drop is a move");
+            host.dock_stack_.SimulateSpringTick(sp_t0 + 300);
+            check(_wcsicmp(host.dock_stack_.CurrentFolder().c_str(), sp_dir.wstring().c_str()) == 0, "not yet inside");
+            host.dock_stack_.SimulateSpringTick(sp_t0 + 700);
+            check(_wcsicmp(host.dock_stack_.CurrentFolder().c_str(), (sp_dir / L"Sub").wstring().c_str()) == 0,
+                  "holding the drag on a subfolder opens it inside the stack");
+            host.test_dock_activations_.clear();
+            const POINT sp_any{40, 80};
+            host.dock_stack_.SimulateDrop({sp_src}, static_cast<float>(sp_any.x), static_cast<float>(sp_any.y), 0);
+            check(host.test_dock_activations_.size() == 1 &&
+                  host.test_dock_activations_[0] == L"spring-move:" + (sp_dir / L"Sub").wstring() + L"|" + sp_src &&
+                  !host.dock_stack_.IsOpen(), "the drop lands in the open subfolder and the stack closes");
+            host.OpenSpringLoadedStack(0);
+            const int sp_file = host.dock_stack_.EntryIndexByName(L"a.txt");
+            const POINT sp_file_pt = host.dock_stack_.EntryCenterDip(sp_file);
+            host.test_dock_activations_.clear();
+            host.dock_stack_.SimulateDrop({sp_src}, static_cast<float>(sp_file_pt.x), static_cast<float>(sp_file_pt.y), MK_CONTROL);
+            check(sp_file >= 0 && host.test_dock_activations_.size() == 1 &&
+                  host.test_dock_activations_[0] == L"spring-copy:" + sp_dir.wstring() + L"|" + sp_src,
+                  "Ctrl copies, and a drop on a file goes into the folder shown");
+            using overlays::DockStackDropEffect;
+            check(DockStackDropEffect({L"C:\\d\\a.txt"}, L"C:\\d", 0) == DROPEFFECT_NONE &&
+                  DockStackDropEffect({L"C:\\d\\sub"}, L"C:\\d\\sub\\deeper", 0) == DROPEFFECT_NONE &&
+                  DockStackDropEffect({L"C:\\d\\a.txt"}, L"D:\\e", 0) == DROPEFFECT_COPY &&
+                  DockStackDropEffect({L"C:\\d\\a.txt"}, L"D:\\e", MK_SHIFT) == DROPEFFECT_MOVE &&
+                  DockStackDropEffect({L"C:\\d\\a.txt"}, L"c:/E/", 0) == DROPEFFECT_MOVE &&
+                  DockStackDropEffect({L"C:\\d\\a.txt"}, L"C:\\", MK_CONTROL) == DROPEFFECT_COPY &&
+                  DockStackDropEffect({L"C:\\d\\a.txt"}, L"", 0) == DROPEFFECT_NONE,
+                  "move on the same drive, copy across drives, never into the same folder or itself");
+            host.dock_stack_.Close(false);
+            host.live_data_.dock.items = sp_keep;
+            std::filesystem::remove_all(sp_dir, sp_ec);
         }
 
         // 布局快照: save, list, restore as one undo, the daily snapshot, and nothing outside the folder.

@@ -6619,6 +6619,16 @@ BEGIN
     IDS_LAYOUT_SNAPSHOT_RECOVERED "布局文件损坏，已从最近的快照恢复"
     IDS_LAYOUT_SNAPSHOT_FAILED "无法读取这个快照"
     IDS_LAYOUT_SNAPSHOT_NONE "还没有快照"
+    IDS_DESKTOP_GROUP_FILTER "筛选此分组…"
+    IDS_DESKTOP_GROUP_FILTER_CLEAR "清除筛选"
+    IDS_DESKTOP_GROUP_FILTER_CUE "输入关键字筛选"
+    IDS_DESKTOP_GROUP_FILTER_NO_MATCH "没有匹配的项目"
+    IDS_DOCK_PREVIEW_CLOSE_WINDOW "关闭窗口"
+    IDS_DOCK_PREVIEW_MINIMIZED "已最小化"
+    IDS_DOCK_PREVIEW_SETTING "悬停显示窗口预览"
+    IDS_DOCK_SPRING_MOVE_FORMAT "移动到「%s」"
+    IDS_DOCK_SPRING_COPY_FORMAT "复制到「%s」"
+    IDS_DOCK_SPRING_DROPPED "已放入「%s」"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13237,6 +13247,16 @@ BEGIN
     IDS_LAYOUT_SNAPSHOT_RECOVERED "The layout file was damaged, so the latest snapshot was restored"
     IDS_LAYOUT_SNAPSHOT_FAILED "Couldn't read this snapshot"
     IDS_LAYOUT_SNAPSHOT_NONE "No snapshots yet"
+    IDS_DESKTOP_GROUP_FILTER "Filter this group…"
+    IDS_DESKTOP_GROUP_FILTER_CLEAR "Clear filter"
+    IDS_DESKTOP_GROUP_FILTER_CUE "Type to filter"
+    IDS_DESKTOP_GROUP_FILTER_NO_MATCH "No matching items"
+    IDS_DOCK_PREVIEW_CLOSE_WINDOW "Close window"
+    IDS_DOCK_PREVIEW_MINIMIZED "Minimized"
+    IDS_DOCK_PREVIEW_SETTING "Show window previews on hover"
+    IDS_DOCK_SPRING_MOVE_FORMAT "Move to %s"
+    IDS_DOCK_SPRING_COPY_FORMAT "Copy to %s"
+    IDS_DOCK_SPRING_DROPPED "Moved to %s"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

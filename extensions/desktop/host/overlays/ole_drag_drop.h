@@ -32,6 +32,7 @@ enum class DropZoneKind : uint8_t {
     DockBar = 6,
     DockTrash = 7,
     DockApp = 8,     // an app icon on the Dock: the files open with it
+    DockFolder = 9,  // a folder on the Dock (下载, a pinned folder): the files go in; resting opens it (弹簧文件夹)
 };
 
 struct DropZoneQueryResult {
@@ -40,6 +41,7 @@ struct DropZoneQueryResult {
     std::wstring target_title;      // group title or folder name
     std::wstring target_path;       // destination folder path when applicable
     std::wstring hint;              // the pill text when the host words it (DockApp: 用「…」打开)
+    std::wstring hint_copy;         // DockFolder: the pill for a copy (`hint` is the move)
 };
 
 struct DropTargetCallbacks {

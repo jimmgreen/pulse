@@ -916,6 +916,8 @@ void DesktopOverlayController::Dismiss() noexcept {
     }
     DestroyHostedPopupEdit();
     edit_on_commit_ = {};
+    edit_on_change_ = {};
+    edit_on_cancel_ = {};
     edit_allow_empty_ = false;
     edit_multiline_ = false;
     rename_stem_len_ = -1;
@@ -1334,6 +1336,10 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             menu_rows_.push_back(mk_row("group-detach-tab", L'\xE8A7', l10n::Get(l10n::StringId::DesktopGroupDetachTab)));
         }
         menu_rows_.push_back(mk_row("rename-group", L'\xE8AC', L"重命名分组", L"F2"));
+        menu_rows_.push_back(mk_row("group-filter", L'\xE71C', l10n::Get(l10n::StringId::DesktopGroupFilter), L"Ctrl+F"));
+        if (menu_spec_.group_filtered) {
+            menu_rows_.push_back(mk_row("group-filter-clear", L'\xE894', l10n::Get(l10n::StringId::DesktopGroupFilterClear)));
+        }
         if (menu_spec_.group_mapped_folder_path.empty()) {
             menu_rows_.push_back(mk_row("edit-rule", L'\xE71C', L"整理规则…"));
         }
@@ -1512,6 +1518,9 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             sub.submenu_rows.push_back(mk_row(settings.dock_apps_stack ? "dock-apps-stack:0" : "dock-apps-stack:1", 0,
                                               std::wstring(l10n::Get(l10n::StringId::DockStackShowApps)), {}, false,
                                               settings.dock_apps_stack));
+            sub.submenu_rows.push_back(mk_row(settings.dock_window_preview ? "dock-preview:0" : "dock-preview:1", 0,
+                                              std::wstring(l10n::Get(l10n::StringId::DockPreviewSetting)), {}, false,
+                                              settings.dock_window_preview));
             sub.submenu_rows.push_back(mk_row("dock-sys-toggle", 0, L"显示系统状态与托盘区", {}, true,
                                               settings.dock_system_area));
             sub.submenu_rows.push_back(mk_row("dock-pos:0", 0, L"停靠在屏幕底部", {}, false,
@@ -2658,8 +2667,11 @@ bool DesktopOverlayController::BeginInlineRename(
     const std::wstring& initial_text, bool multiline,
     std::function<void(const std::wstring& committed_text)> on_commit,
     int select_end_char,
-    bool allow_empty) {
+    bool allow_empty,
+    const std::wstring& cue) {
     CancelInlineRename(false);
+    edit_on_change_ = {};
+    edit_on_cancel_ = {};
     if (!parent_hwnd || !IsWindow(parent_hwnd) || target_rect.empty()) return false;
 
     const int len = static_cast<int>(initial_text.size());
@@ -2703,7 +2715,7 @@ bool DesktopOverlayController::BeginInlineRename(
 
     if (!AttachHostedPopupEdit(
             D2D1::RectF(8.0f, 2.0f, static_cast<float>(sw) - 8.0f, static_cast<float>(sh) - 2.0f),
-            initial_text, L"", multiline, true, 0, sel_end, 255)) {
+            initial_text, cue, multiline, true, 0, sel_end, 255)) {
         Dismiss();
         return false;
     }
@@ -2711,10 +2723,20 @@ bool DesktopOverlayController::BeginInlineRename(
     return true;
 }
 
+void DesktopOverlayController::SetInlineEditLiveHandlers(std::function<void(const std::wstring&)> on_change,
+                                                         std::function<void()> on_cancel) {
+    if (active_kind_ != OverlayKind::InlineRename) return;
+    edit_on_change_ = std::move(on_change);
+    edit_on_cancel_ = std::move(on_cancel);
+}
+
 void DesktopOverlayController::CancelInlineRename(bool commit) noexcept {
     const bool is_drawer_edit = (active_kind_ == OverlayKind::AiOrganizeDrawer && popup_edit_hwnd_ != nullptr);
     const bool is_desktop_rename = (active_kind_ == OverlayKind::InlineRename);
     if (!is_drawer_edit && !is_desktop_rename) return;
+    edit_on_change_ = {};
+    auto on_cancel = std::move(edit_on_cancel_);
+    edit_on_cancel_ = {};
 
     const std::wstring text = commit ? ReadHostedPopupEditText() : std::wstring{};
     auto cb = std::move(edit_on_commit_);
@@ -2737,6 +2759,8 @@ void DesktopOverlayController::CancelInlineRename(bool commit) noexcept {
 
     if (commit && cb && (allow_empty || !text.empty())) {
         cb(text);
+    } else if (!commit && on_cancel) {
+        on_cancel();
     }
 }
 

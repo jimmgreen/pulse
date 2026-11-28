@@ -6646,3 +6646,13 @@ LayoutSnapshotRestoredFormat	IDS_LAYOUT_SNAPSHOT_RESTORED_FORMAT	8019	已恢复 
 LayoutSnapshotRecovered	IDS_LAYOUT_SNAPSHOT_RECOVERED	8020	布局文件损坏，已从最近的快照恢复	The layout file was damaged, so the latest snapshot was restored	版面檔案損毀，已從最近的快照還原
 LayoutSnapshotFailed	IDS_LAYOUT_SNAPSHOT_FAILED	8021	无法读取这个快照	Couldn't read this snapshot	無法讀取這個快照
 LayoutSnapshotNone	IDS_LAYOUT_SNAPSHOT_NONE	8022	还没有快照	No snapshots yet	還沒有快照
+DesktopGroupFilter	IDS_DESKTOP_GROUP_FILTER	8023	筛选此分组…	Filter this group…	篩選此群組…
+DesktopGroupFilterClear	IDS_DESKTOP_GROUP_FILTER_CLEAR	8024	清除筛选	Clear filter	清除篩選
+DesktopGroupFilterCue	IDS_DESKTOP_GROUP_FILTER_CUE	8025	输入关键字筛选	Type to filter	輸入關鍵字篩選
+DesktopGroupFilterNoMatch	IDS_DESKTOP_GROUP_FILTER_NO_MATCH	8026	没有匹配的项目	No matching items	沒有符合的項目
+DockPreviewCloseWindow	IDS_DOCK_PREVIEW_CLOSE_WINDOW	8027	关闭窗口	Close window	關閉視窗
+DockPreviewMinimized	IDS_DOCK_PREVIEW_MINIMIZED	8028	已最小化	Minimized	已最小化
+DockPreviewSetting	IDS_DOCK_PREVIEW_SETTING	8029	悬停显示窗口预览	Show window previews on hover	游標停留時顯示視窗預覽
+DockSpringMoveFormat	IDS_DOCK_SPRING_MOVE_FORMAT	8030	移动到「%s」	Move to %s	移動到「%s」
+DockSpringCopyFormat	IDS_DOCK_SPRING_COPY_FORMAT	8031	复制到「%s」	Copy to %s	複製到「%s」
+DockSpringDropped	IDS_DOCK_SPRING_DROPPED	8032	已放入「%s」	Moved to %s	已放入「%s」
