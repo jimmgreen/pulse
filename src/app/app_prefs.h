@@ -19,6 +19,23 @@ namespace pulse::app {
 // Remembered folder-picker entry points (AppPrefs::picker_folders).
 inline constexpr size_t kPickerFolderLimit = 32;
 
+// Background image (Settings > 外观 > 背景与透明度): where the picture comes
+// from, how it fills its area, and when it changes.
+constexpr int kBackgroundSourceImage = 0;
+constexpr int kBackgroundSourceFolder = 1;
+constexpr int kBackgroundSourceUrl = 2;
+constexpr int kBackgroundSourceApi = 3;
+constexpr int kBackgroundFitContain = 0;
+constexpr int kBackgroundFitCover = 1;
+constexpr int kBackgroundFitStretch = 2;
+constexpr int kBackgroundFitOriginal = 3;
+constexpr int kBackgroundRegionWindow = 0;
+constexpr int kBackgroundRegionList = 1;
+constexpr int kBackgroundSwitchManual = 0;
+constexpr int kBackgroundSwitchOnStartup = 1;
+constexpr int kBackgroundSwitchTimed = 2;
+constexpr int kBackgroundSwitchOnNavigate = 3;
+
 struct AppPrefs {
     bool persist = true;
     bool launch_on_startup = false;
@@ -239,6 +256,20 @@ struct AppPrefs {
     // Menus blur the window under them (WinUI in-app acrylic); see FluentMenu.
     bool menu_acrylic = true;
     std::wstring background_image;
+    // Random background image: 0 the single image above, 1 a folder drawn at
+    // random, 2 an image URL, 3 an image API whose JSON body the pointer picks
+    // the URL from. The rest set where and when it is drawn.
+    int background_source = kBackgroundSourceImage;
+    std::wstring background_folder;
+    std::wstring background_url;
+    std::wstring background_api_pointer; // RFC 6901; empty = the body is the URL
+    int background_fit = kBackgroundFitCover;
+    int background_position = 4;      // 0..8 row-major in the 3x3 grid: 4 = the whole area
+    int background_ratio = 50;        // share of the window a non-centered position takes (20..100)
+    int background_region = kBackgroundRegionWindow;
+    int background_opacity = 100;     // picture alpha, independent of the interface transparency
+    int background_switch = kBackgroundSwitchManual;
+    int background_interval_min = 30; // 1..1440, timed switch only
     // Interface transparency 0..90 (json panel_transparency). 25/50/75 match the
     // former subtle/balanced/vivid levels; applies to image, Acrylic and Mica.
     int wallpaper_look = 50;
@@ -356,6 +387,8 @@ struct AppPrefs {
 
     bool StoreBackgroundImage(const std::wstring& source_path);
     void ClearBackgroundImage();
+    // 清除背景: forgets every source and the cached single image.
+    void ClearBackground();
 
     // Closing the last window hides it to the tray instead of exiting. Only
     // "keep running after close" decides this: features that need a running
@@ -402,6 +435,27 @@ inline int NormalizePreviewLoop(int value) noexcept {
 }
 inline int NormalizeHoldPreview(int ms) noexcept {
     return ms == 300 || ms == 500 || ms == 800 ? ms : 0;
+}
+inline int NormalizeBackgroundSource(int value) noexcept {
+    return std::clamp(value, kBackgroundSourceImage, kBackgroundSourceApi);
+}
+inline int NormalizeBackgroundFit(int value) noexcept {
+    return std::clamp(value, kBackgroundFitContain, kBackgroundFitOriginal);
+}
+inline int NormalizeBackgroundPosition(int value) noexcept {
+    return std::clamp(value, 0, 8);
+}
+inline int NormalizeBackgroundRatio(int percent) noexcept {
+    return std::clamp(percent, 20, 100);
+}
+inline int NormalizeBackgroundOpacity(int percent) noexcept {
+    return std::clamp(percent, 0, 100);
+}
+inline int NormalizeBackgroundSwitchMode(int value) noexcept {
+    return std::clamp(value, kBackgroundSwitchManual, kBackgroundSwitchOnNavigate);
+}
+inline int NormalizeBackgroundInterval(int minutes) noexcept {
+    return std::clamp(minutes, 1, 1440);
 }
 
 std::wstring FolderOpenCommandLine(const std::wstring& exe);

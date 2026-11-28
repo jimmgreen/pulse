@@ -32,6 +32,10 @@ namespace {
 constexpr const wchar_t* kRunKey =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr const wchar_t* kRunValue = L"Pulse";
+// Longest background folder / URL and API pointer kept from app.json; longer
+// values are dropped on load instead of being carried around.
+constexpr size_t kBackgroundPathLimit = 2048;
+constexpr size_t kBackgroundPointerLimit = 512;
 
 std::wstring ExePath() {
     return app_runtime_paths::StableEntryPath();
@@ -169,6 +173,17 @@ void AppPrefs::ResetToDefaults() {
     window_effect = L"mica-alt";
     menu_acrylic = true;
     background_image.clear();
+    background_source = kBackgroundSourceImage;
+    background_folder.clear();
+    background_url.clear();
+    background_api_pointer.clear();
+    background_fit = kBackgroundFitCover;
+    background_position = 4;
+    background_ratio = 50;
+    background_region = kBackgroundRegionWindow;
+    background_opacity = 100;
+    background_switch = kBackgroundSwitchManual;
+    background_interval_min = 30;
     wallpaper_look = 50;
     wallpaper_blur = 14;
     frame_transparency = 10;
@@ -215,11 +230,17 @@ void AppPrefs::ResetToDefaults() {
 std::wstring AppPrefs::ToJson() const {
     std::wstring escaped_effect;
     std::wstring escaped_image;
+    std::wstring escaped_folder;
+    std::wstring escaped_url;
+    std::wstring escaped_pointer;
     std::wstring escaped_language;
     std::wstring escaped_home;
     pulse::json::Escape(window_effect, escaped_effect);
     pulse::json::Escape(home_folder, escaped_home);
     pulse::json::Escape(background_image, escaped_image);
+    pulse::json::Escape(background_folder, escaped_folder);
+    pulse::json::Escape(background_url, escaped_url);
+    pulse::json::Escape(background_api_pointer, escaped_pointer);
     pulse::json::Escape(language, escaped_language);
     std::wstring out = L"{\n  \"version\":4,\n  \"launch_on_startup\":";
     out += launch_on_startup ? L"true" : L"false";
@@ -456,7 +477,29 @@ std::wstring AppPrefs::ToJson() const {
     out += menu_acrylic ? L"true" : L"false";
     out += L",\n  \"background_image\":\"";
     out += escaped_image;
-    out += L"\",\n  \"row_height\":";
+    out += L"\",\n  \"background_source\":";
+    out += std::to_wstring(background_source);
+    out += L",\n  \"background_folder\":\"";
+    out += escaped_folder;
+    out += L"\",\n  \"background_url\":\"";
+    out += escaped_url;
+    out += L"\",\n  \"background_api_pointer\":\"";
+    out += escaped_pointer;
+    out += L"\",\n  \"background_fit\":";
+    out += std::to_wstring(background_fit);
+    out += L",\n  \"background_position\":";
+    out += std::to_wstring(background_position);
+    out += L",\n  \"background_ratio\":";
+    out += std::to_wstring(background_ratio);
+    out += L",\n  \"background_region\":";
+    out += std::to_wstring(background_region);
+    out += L",\n  \"background_opacity\":";
+    out += std::to_wstring(background_opacity);
+    out += L",\n  \"background_switch\":";
+    out += std::to_wstring(background_switch);
+    out += L",\n  \"background_interval_min\":";
+    out += std::to_wstring(background_interval_min);
+    out += L",\n  \"row_height\":";
     out += std::to_wstring(row_height);
     out += L",\n  \"sidebar_width\":" + std::to_wstring(sidebar_width);
     out += L",\n  \"address_search_current\":" + std::to_wstring(address_search_current);
@@ -819,6 +862,27 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     else if (window_effect.empty()) window_effect = L"mica-alt";
     menu_acrylic = pulse::json::ExtractBool(json, L"menu_acrylic", true);
     background_image = pulse::json::ExtractString(json, L"background_image");
+    background_source = NormalizeBackgroundSource(
+        pulse::json::ExtractInt(json, L"background_source", kBackgroundSourceImage));
+    background_folder = pulse::json::ExtractString(json, L"background_folder");
+    if (background_folder.size() >= kBackgroundPathLimit) background_folder.clear();
+    background_url = pulse::json::ExtractString(json, L"background_url");
+    if (background_url.size() >= kBackgroundPathLimit) background_url.clear();
+    background_api_pointer = pulse::json::ExtractString(json, L"background_api_pointer");
+    if (background_api_pointer.size() >= kBackgroundPointerLimit) background_api_pointer.clear();
+    background_fit = NormalizeBackgroundFit(
+        pulse::json::ExtractInt(json, L"background_fit", kBackgroundFitCover));
+    background_position = NormalizeBackgroundPosition(
+        pulse::json::ExtractInt(json, L"background_position", 4));
+    background_ratio = NormalizeBackgroundRatio(
+        pulse::json::ExtractInt(json, L"background_ratio", 50));
+    background_region = std::clamp(pulse::json::ExtractInt(json, L"background_region", 0), 0, 1);
+    background_opacity = NormalizeBackgroundOpacity(
+        pulse::json::ExtractInt(json, L"background_opacity", 100));
+    background_switch = NormalizeBackgroundSwitchMode(
+        pulse::json::ExtractInt(json, L"background_switch", kBackgroundSwitchManual));
+    background_interval_min = NormalizeBackgroundInterval(
+        pulse::json::ExtractInt(json, L"background_interval_min", 30));
     row_height = pulse::json::ExtractInt(json, L"row_height", 34);
     sidebar_width = pulse::json::ExtractInt(json, L"sidebar_width", 224);
     // The stored value is the user's intent; the window caps it while drawing.
@@ -961,6 +1025,16 @@ void AppPrefs::ClearBackgroundImage() {
     const std::wstring dir = GetPulseDataDir();
     if (IsStoredWallpaper(background_image, dir)) DeleteFileW(background_image.c_str());
     background_image.clear();
+}
+
+void AppPrefs::ClearBackground() {
+    const std::wstring dir = GetPulseDataDir();
+    if (IsStoredWallpaper(background_image, dir)) DeleteFileW(background_image.c_str());
+    background_image.clear();
+    background_folder.clear();
+    background_url.clear();
+    background_api_pointer.clear();
+    background_source = kBackgroundSourceImage;
 }
 
 namespace {

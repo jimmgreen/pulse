@@ -618,6 +618,46 @@ int main(int argc, char** argv) {
         Check(!MostlyPictures(5, 5) && !MostlyPictures(0, 0) && !MostlyPictures(3, 7),
               "PICTURE-04 fewer than six pictures (or bad counts) never switch");
     }
+    {
+        // Random background image: an app.json written before the feature keeps
+        // today's single image, and every new field round trips through its key.
+        AppPrefs old_bg; old_bg.persist = false;
+        Check(old_bg.FromJson(LR"({"background_image":"C:\\old.png","panel_transparency":25})") &&
+              old_bg.background_source == 0 && old_bg.background_folder.empty() && old_bg.background_url.empty() &&
+              old_bg.background_api_pointer.empty() && old_bg.background_fit == 1 && old_bg.background_position == 4 &&
+              old_bg.background_ratio == 50 && old_bg.background_region == 0 && old_bg.background_opacity == 100 &&
+              old_bg.background_switch == 0 && old_bg.background_interval_min == 30,
+              "BACKGROUND-01 an app.json without the new keys keeps the single image and every default");
+        AppPrefs random_bg; random_bg.persist = false;
+        random_bg.background_source = 3; random_bg.background_fit = 2; random_bg.background_position = 0;
+        random_bg.background_ratio = 80; random_bg.background_region = 1; random_bg.background_opacity = 55;
+        random_bg.background_switch = 2; random_bg.background_interval_min = 45;
+        random_bg.background_url = L"https://example.invalid/daily.json";
+        random_bg.background_folder = L"D:\\Pictures";
+        random_bg.background_api_pointer = L"/data/url";
+        AppPrefs random_again; random_again.persist = false;
+        Check(random_again.FromJson(random_bg.ToJson()) &&
+              random_again.background_source == 3 && random_again.background_fit == 2 &&
+              random_again.background_position == 0 && random_again.background_ratio == 80 &&
+              random_again.background_region == 1 && random_again.background_opacity == 55 &&
+              random_again.background_switch == 2 && random_again.background_interval_min == 45 &&
+              random_again.background_url == random_bg.background_url &&
+              random_again.background_folder == random_bg.background_folder &&
+              random_again.background_api_pointer == random_bg.background_api_pointer,
+              "BACKGROUND-02 every background source and placement option survives a reload");
+        AppPrefs clamped_bg; clamped_bg.persist = false;
+        Check(clamped_bg.FromJson(LR"({"background_source":9,"background_position":99,"background_ratio":5,"background_opacity":200,"background_interval_min":0})") &&
+              clamped_bg.background_source == 3 && clamped_bg.background_position == 8 &&
+              clamped_bg.background_ratio == 20 && clamped_bg.background_opacity == 100 &&
+              clamped_bg.background_interval_min == 1,
+              "BACKGROUND-03 out-of-range background values clamp instead of leaking through");
+        Check(pulse::app::NormalizeBackgroundSource(-2) == 0 && pulse::app::NormalizeBackgroundFit(9) == 3 &&
+              pulse::app::NormalizeBackgroundPosition(99) == 8 && pulse::app::NormalizeBackgroundRatio(0) == 20 &&
+              pulse::app::NormalizeBackgroundOpacity(200) == 100 &&
+              pulse::app::NormalizeBackgroundSwitchMode(7) == 3 &&
+              pulse::app::NormalizeBackgroundInterval(0) == 1,
+              "BACKGROUND-04 each background value keeps its own bound");
+    }
     std::filesystem::remove_all(dir);
     return failures ? 1 : 0;
 }

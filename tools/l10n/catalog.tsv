@@ -418,7 +418,7 @@ TooltipNewTab	IDS_TOOLTIP_NEW_TAB	1180	新建标签页	New tab	新增分頁
 TooltipToggleTheme	IDS_TOOLTIP_TOGGLE_THEME	1181	切换主题	Toggle theme	切換主題
 WindowEffectFormat	IDS_WINDOW_EFFECT_FORMAT	1182	窗口效果：%s	Window effect: %s	視窗效果：%s
 TooltipChooseBackground	IDS_TOOLTIP_CHOOSE_BACKGROUND	1183	选择背景图	Choose background image	選擇背景圖
-TooltipClearBackground	IDS_TOOLTIP_CLEAR_BACKGROUND	1184	清除背景图	Clear background image	清除背景圖
+TooltipClearBackground	IDS_TOOLTIP_CLEAR_BACKGROUND	1184	清除背景图（含来源）	Clear the picture and its source	清除背景圖（含來源）
 TooltipFollowAccent	IDS_TOOLTIP_FOLLOW_ACCENT	1185	跟随 Windows 强调色	Follow Windows accent color	跟隨 Windows 強調色
 TooltipAddExclusion	IDS_TOOLTIP_ADD_EXCLUSION	1186	添加索引排除文件夹	Add an index exclusion	新增索引排除資料夾
 TooltipRemoveExclusion	IDS_TOOLTIP_REMOVE_EXCLUSION	1187	移除索引排除项	Remove index exclusion	移除索引排除項
@@ -6621,3 +6621,33 @@ QuickLookFilterPhotos	IDS_QUICK_LOOK_FILTER_PHOTOS	7995	图片	Photos	圖片
 QuickLookFilterVideos	IDS_QUICK_LOOK_FILTER_VIDEOS	7996	视频	Videos	影片
 QuickLookImmersive	IDS_QUICK_LOOK_IMMERSIVE	7997	沉浸式看图	Photo viewer layout	沉浸式看圖
 DockStackRemove	IDS_DOCK_STACK_REMOVE	7993	从程序坞移除	Remove from Dock	從程式塢移除
+SettingsBackgroundSource	IDS_SETTINGSBACKGROUNDSOURCE	8000	背景图来源	Background image source	背景圖來源
+BackgroundSourceImage	IDS_BACKGROUNDSOURCEIMAGE	8001	单张图片	Single image	單張圖片
+BackgroundSourceFolder	IDS_BACKGROUNDSOURCEFOLDER	8002	本地文件夹	Local folder	本機資料夾
+BackgroundSourceUrl	IDS_BACKGROUNDSOURCEURL	8003	网络地址	Image URL	網路位址
+BackgroundSourceApi	IDS_BACKGROUNDSOURCEAPI	8004	图片 API	Image API	圖片 API
+SettingsBackgroundFit	IDS_SETTINGSBACKGROUNDFIT	8005	展示方式	How it fits	展示方式
+BackgroundFitContain	IDS_BACKGROUNDFITCONTAIN	8006	适应	Fit	適應
+BackgroundFitCover	IDS_BACKGROUNDFITCOVER	8007	填充	Fill	填滿
+BackgroundFitStretch	IDS_BACKGROUNDFITSTRETCH	8008	拉伸	Stretch	拉伸
+BackgroundFitOriginal	IDS_BACKGROUNDFITORIGINAL	8009	原始大小	Original size	原始大小
+SettingsBackgroundPosition	IDS_SETTINGSBACKGROUNDPOSITION	8010	展示位置	Position	展示位置
+SettingsBackgroundPositionDesc	IDS_SETTINGSBACKGROUNDPOSITIONDESC	8011	九宫格选择图片出现的位置，中央为整窗	Pick where the picture sits; the centre fills the window	九宮格選擇圖片出現的位置，中央為整窗
+SettingsBackgroundRatio	IDS_SETTINGSBACKGROUNDRATIO	8012	区域占比	Area size	區域佔比
+SettingsBackgroundRegion	IDS_SETTINGSBACKGROUNDREGION	8013	展示区域	Where it shows	展示區域
+BackgroundRegionWindow	IDS_BACKGROUNDREGIONWINDOW	8014	整个窗口	Whole window	整個視窗
+BackgroundRegionList	IDS_BACKGROUNDREGIONLIST	8015	仅文件列表	File list only	僅檔案清單
+SettingsBackgroundOpacity	IDS_SETTINGSBACKGROUNDOPACITY	8016	图片不透明度	Image opacity	圖片不透明度
+SettingsBackgroundOpacityDesc	IDS_SETTINGSBACKGROUNDOPACITYDESC	8017	只影响背景图，与界面透明度相互独立	Affects the picture only, independent of the interface transparency	只影響背景圖，與介面透明度相互獨立
+SettingsBackgroundSwitch	IDS_SETTINGSBACKGROUNDSWITCH	8018	切换方式	Change picture	切換方式
+BackgroundSwitchManual	IDS_BACKGROUNDSWITCHMANUAL	8019	手动	Manual	手動
+BackgroundSwitchStartup	IDS_BACKGROUNDSWITCHSTARTUP	8020	启动时	On startup	啟動時
+BackgroundSwitchTimed	IDS_BACKGROUNDSWITCHTIMED	8021	定时	On a timer	定時
+BackgroundSwitchNavigate	IDS_BACKGROUNDSWITCHNAVIGATE	8022	导航时	On navigation	導覽時
+SettingsBackgroundInterval	IDS_SETTINGSBACKGROUNDINTERVAL	8023	切换间隔	Interval	切換間隔
+BackgroundNext	IDS_BACKGROUNDNEXT	8024	下一张	Next picture	下一張
+BackgroundApiPointer	IDS_BACKGROUNDAPIPOINTER	8025	JSON 路径	JSON pointer	JSON 路徑
+BackgroundApiPointerDesc	IDS_BACKGROUNDAPIPOINTERDESC	8026	从接口返回的 JSON 中取出图片地址，例如 /data/url；留空表示直接返回图片地址	Reads the picture URL from the JSON body, e.g. /data/url; leave empty when the body is the URL	從介面回傳的 JSON 中取出圖片網址，例如 /data/url；留空表示直接回傳圖片網址
+BackgroundFolderEmpty	IDS_BACKGROUNDFOLDEREMPTY	8027	该文件夹里没有图片	No pictures in that folder	該資料夾裡沒有圖片
+BackgroundLoadFailed	IDS_BACKGROUNDLOADFAILED	8028	背景图加载失败，已保留上一张	The picture could not be loaded; the previous one is kept	背景圖載入失敗，已保留上一張
+BackgroundUrlPlaceholder	IDS_BACKGROUNDURLPLACEHOLDER	8029	https://example.com/image.jpg	https://example.com/image.jpg	https://example.com/image.jpg
