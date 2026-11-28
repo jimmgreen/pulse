@@ -45,6 +45,9 @@ struct FluentMenuSwatch {
     std::wstring glyph;
     wchar_t mnemonic = 0;          // keyboard access key (case-insensitive), 0 = none
     std::wstring label;
+    // Context menu's action strip: draw the glyph bigger with `label` beneath
+    // it (File Explorer command-bar style) instead of a small icon button.
+    bool large_button = false;
     fluent::MenuPictogram pictogram = fluent::MenuPictogram::None;
     bool custom_color = false;   // color-wheel dot that opens a custom picker
 };

@@ -121,6 +121,18 @@ void MainRenderer::DrawSettingsPulseMenu(const WindowViewModel& vm,const D2D1_RE
             painter_.DrawText(l10n::Get(l10n::StringId::WindowsAppCommands).c_str(),D2D1::RectF(r.left+36*s,r.top,r.right-28*s,r.bottom),
                               compositor_->TextFormat(),theme.text);
         }
+        // Optional big icon strip with names under the real menu's buttons.
+        if(const auto r=l.context_large_icons_row;r.bottom>r.top) {
+            const bool hot=hot_hit(69);
+            if(hot) painter_.FillRoundedRect(r,6*s,theme.fill_hover);
+            const float mid=(r.top+r.bottom)*0.5f;
+            DrawIconText(r.left+10*s,mid-8*s,16*s,16*s,L"\xE8C8",L"",theme.text_secondary,0.75f);
+            fluent::ControlState state{};state.checked=vm.settings_context_large_icons;state.hovered=hot;
+            const auto sw=D2D1::RectF(r.right-12*s-44*s,mid-11*s,r.right-12*s,mid+11*s);
+            painter_.DrawSwitch(sw,L"",state);
+            painter_.DrawText(l10n::Get(I::SettingsContextLargeIcons),D2D1::RectF(r.left+36*s,r.top,sw.left-8*s,r.bottom),
+                              compositor_->SmallFormat(),theme.text);
+        }
     }
 
     // ---- middle card: head, presets, rows ----

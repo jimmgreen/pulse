@@ -2329,7 +2329,9 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         }
     }
     const bool native_explorer = NativeExplorerRequestForTab(ActiveTab(s), app::CmdOpenNativeExplorer).has_value();
-    std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label, folder, native_explorer);
+    std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label, folder,
+                                                               native_explorer,
+                                                               s.appPrefs.context_menu_large_icons);
     if (const auto* tab = ActiveTab(s))
         app::AppendRecentChangesCommand(items, app::RecentChangesMenuPath(*tab, false));
     ApplyWorkspacePinLabel(items, s);

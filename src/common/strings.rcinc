@@ -6629,6 +6629,8 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "移动到「%s」"
     IDS_DOCK_SPRING_COPY_FORMAT "复制到「%s」"
     IDS_DOCK_SPRING_DROPPED "已放入「%s」"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS "右键菜单大图标带文字"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC "将右键菜单顶部的剪切、复制、重命名、删除按钮放大，并在图标下方显示名称"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13257,6 +13259,8 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "Move to %s"
     IDS_DOCK_SPRING_COPY_FORMAT "Copy to %s"
     IDS_DOCK_SPRING_DROPPED "Moved to %s"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS "Large icons with labels in the context menu"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC "Enlarge the Cut, Copy, Rename and Delete buttons at the top of the context menu and show their names underneath"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

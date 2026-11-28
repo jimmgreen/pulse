@@ -384,6 +384,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             if (ContainsPt(lay.context_system_hint, x, y)) {
                 r.region = HitTestResult::SettingsNav; r.index = 6; return r;
             }
+            if (ContainsPt(lay.context_large_icons_row, x, y)) {
+                r.region = HitTestResult::SettingsToggle; r.index = 69; return r;
+            }
             for(int i=0;i<4;++i) if(ContainsPt(lay.disclosure[i],x,y)) {
                 r.region=HitTestResult::SettingsDisclosure;r.index=i;return r;
             }

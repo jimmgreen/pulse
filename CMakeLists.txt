@@ -2767,7 +2767,11 @@ add_executable(pulse_decode_memory_budget_test src/bench/decode_memory_budget_te
 add_executable(pulse_thumb_scale_bench src/bench/thumb_scale_bench.cpp)
 
 add_executable(pulse_builtin_menu_coverage_test src/bench/builtin_menu_coverage_test.cpp
+    src/bench/localization_test.rc
     src/app/context_menu.cpp src/app/context_menu_prefs.cpp src/app/builtin_menu_items.cpp src/ui/view_layout.cpp)
+set_property(SOURCE src/bench/localization_test.rc APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings.rcinc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings_zh_tw.rcinc")
 target_link_libraries(pulse_builtin_menu_coverage_test PRIVATE pulse_localization shell32 shlwapi advapi32 ole32)
 # Keep this focused executable independent of unused palette/navigation builders.
 target_compile_options(pulse_builtin_menu_coverage_test PRIVATE /Gy)

@@ -1623,6 +1623,7 @@ struct WindowViewModel {
     int settings_external_open = 0; // 0 smart, 1 tab, 2 new window (multi-window M7b)
     bool settings_close_last_tab = false;
     bool settings_close_tab_double_click = false;
+    bool settings_context_large_icons = false; // Settings > 右键菜单: label the icon strip
     bool settings_confirm_delete = false;
     std::wstring settings_home_folder; // default location; empty = This PC
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth

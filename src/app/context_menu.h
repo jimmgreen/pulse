@@ -233,7 +233,8 @@ inline wchar_t BuiltinMenuMnemonic(int command) {
 // rename) + built-in verbs + undo. Explorer rows are appended afterwards via
 // AppendShellSection (they grow the menu downward so open rows never move).
 std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
-                                              bool folder = false, bool native_explorer = false);
+                                              bool folder = false, bool native_explorer = false,
+                                              bool large_icons = false);
 
 // Pure request selection shared by menu visibility and dispatch. Multiple selected
 // items are intentionally unsupported; background ignores the selection entirely.

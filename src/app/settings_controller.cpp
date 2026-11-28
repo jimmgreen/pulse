@@ -1464,6 +1464,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 35) {
         prefs_->close_tab_on_double_click = !prefs_->close_tab_on_double_click;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 69) {
+        prefs_->context_menu_large_icons = !prefs_->context_menu_large_icons;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 32) {
         prefs_->confirm_recycle_delete = !prefs_->confirm_recycle_delete;
         SaveAndApply(SettingsEffect::None);

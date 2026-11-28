@@ -138,12 +138,18 @@ bool HasLayoutTiles(const FluentMenuItem& it) {
     return !it.quick_swatches.empty() && !it.quick_swatches.front().label.empty();
 }
 
+bool HasLargeButtons(const FluentMenuItem& it) {
+    return !it.quick_swatches.empty() && it.quick_swatches.front().large_button;
+}
+
 float SwatchSpacingDip(const FluentMenuItem& it) {
+    if (HasLargeButtons(it)) return 72.0f;
     if (HasLayoutTiles(it)) return 94.0f;
     return SwatchStripHasGlyphs(it) ? 44.0f : 28.0f;
 }
 
 float SwatchHitRadiusDip(const FluentMenuItem& it) {
+    if (HasLargeButtons(it)) return 36.0f;
     if (HasLayoutTiles(it)) return 44.0f;
     return SwatchStripHasGlyphs(it) ? 20.0f : 13.0f;
 }
@@ -388,7 +394,8 @@ void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_wid
 
     float h = pad_v_ * 2.0f;
     for (const auto& it : items_) {
-        h += HasLayoutTiles(it) ? 72.0f * scale_ : it.heading ? heading_h_ : it.group_tint ? (it.detail.empty() ? 32.0f : 46.0f) * scale_ : it.detail.empty() || it.detail_inline ? row_h_ : detail_row_h_;
+        h += HasLargeButtons(it) ? 62.0f * scale_
+           : HasLayoutTiles(it) ? 72.0f * scale_ : it.heading ? heading_h_ : it.group_tint ? (it.detail.empty() ? 32.0f : 46.0f) * scale_ : it.detail.empty() || it.detail_inline ? row_h_ : detail_row_h_;
         if (it.separator_after) h += sep_h_;
     }
     height_ = (int)std::ceil(h);
@@ -404,7 +411,8 @@ bool FluentMenuModel::Truncated(int i) const {
 
 float FluentMenuModel::RowHeightPx(int i) const {
     const FluentMenuItem* it = At(i);
-    return it && HasLayoutTiles(*it) ? 72.0f * scale_ : it && it->heading ? heading_h_
+    return it && HasLargeButtons(*it) ? 62.0f * scale_
+        : it && HasLayoutTiles(*it) ? 72.0f * scale_ : it && it->heading ? heading_h_
         : it && it->group_tint ? (it->detail.empty() ? 32.0f : 46.0f) * scale_
         : it && !it->detail.empty() && !it->detail_inline ? detail_row_h_ : row_h_;
 }
@@ -1383,7 +1391,24 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
                     const float center_x = first + spacing * static_cast<float>(swatch_index);
                     const bool hovered = i == hover_row &&
                                          static_cast<int>(swatch_index) == hover_swatch;
-                    if (!swatch.label.empty()) {
+                    if (swatch.large_button) {
+                        // File Explorer style action: big glyph on top, its
+                        // name underneath. The whole tile is the hit target.
+                        const auto tile = D2D1::RectF(center_x - 30*scale_, center_y - 28*scale_,
+                                                      center_x + 30*scale_, center_y + 28*scale_);
+                        if (hovered && it->enabled)
+                            painter_.FillRoundedRect(tile, 6*scale_, theme.fill_hover);
+                        const auto ink = it->enabled ? theme.text : theme.text_disabled;
+                        if (!swatch.glyph.empty())
+                            painter_.DrawGlyph(swatch.glyph,
+                                D2D1::RectF(center_x - 11*scale_, tile.top + 5*scale_,
+                                            center_x + 11*scale_, tile.top + 27*scale_), ink);
+                        if (!swatch.label.empty())
+                            painter_.DrawText(swatch.label,
+                                D2D1::RectF(tile.left + 2*scale_, tile.top + 31*scale_,
+                                            tile.right - 2*scale_, tile.bottom - 1*scale_),
+                                compositor_->SmallFormat(), ink, fluent::HorizontalAlignment::Center);
+                    } else if (!swatch.label.empty()) {
                         const auto tile = D2D1::RectF(center_x - 43*scale_, center_y - 32*scale_, center_x + 43*scale_, center_y + 32*scale_);
                         if (hovered) {
                             painter_.FillRoundedRect(tile, 7*scale_, theme.fill_hover);

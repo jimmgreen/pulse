@@ -6627,4 +6627,6 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "移動到「%s」"
     IDS_DOCK_SPRING_COPY_FORMAT "複製到「%s」"
     IDS_DOCK_SPRING_DROPPED "已放入「%s」"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS "右鍵選單大圖示含文字"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC "將右鍵選單頂端的剪切、複製、重新命名、刪除按鈕放大，並在圖示下方顯示名稱"
 END

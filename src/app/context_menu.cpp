@@ -83,7 +83,7 @@ ui::FluentMenuItem UndoItem(bool can_undo, const std::wstring& undo_label) {
 } // namespace
 
 std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
-                                              bool folder, bool native_explorer) {
+                                              bool folder, bool native_explorer, bool large_icons) {
     std::vector<ui::FluentMenuItem> items;
     items.push_back(Item(CmdOpen, l10n::Get(l10n::StringId::Open).c_str(), kGlyphOpen));
 
@@ -99,6 +99,17 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
         { CmdDelete, {}, false, false, kGlyphDelete, BuiltinMenuMnemonic(CmdDelete) },
         { CmdRename, {}, false, false, kGlyphRename, BuiltinMenuMnemonic(CmdRename) },
     };
+    if (large_icons) {
+        // Explorer command-bar style: name each button under its glyph.
+        static constexpr l10n::StringId kLabels[] = {
+            l10n::StringId::Cut, l10n::StringId::Copy,
+            l10n::StringId::Delete, l10n::StringId::Rename,
+        };
+        for (size_t i = 0; i < strip.quick_swatches.size() && i < std::size(kLabels); ++i) {
+            strip.quick_swatches[i].label = l10n::Get(kLabels[i]);
+            strip.quick_swatches[i].large_button = true;
+        }
+    }
     strip.separator_after = true;
     items.push_back(std::move(strip));
 
