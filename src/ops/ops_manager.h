@@ -14,6 +14,7 @@
 //   RealDelete    -> never recorded, not undoable.
 #pragma once
 #include <windows.h>
+#include <shellapi.h>
 #include "file_lock_owner.h"
 #include "operation_item_control.h"
 #include "../common/rename_identity_types.h"

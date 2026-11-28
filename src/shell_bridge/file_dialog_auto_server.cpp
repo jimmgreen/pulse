@@ -25,6 +25,7 @@
 #include "../common/runtime_log.h"
 #include "../common/dialog_admin_trust.h"
 #include <atomic>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <mutex>
 #include <cstdio>

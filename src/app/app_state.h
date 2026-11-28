@@ -72,6 +72,7 @@
 #include "app_core.h"
 #include "app_messages.h"
 #include <windows.h>
+#include <shellapi.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>

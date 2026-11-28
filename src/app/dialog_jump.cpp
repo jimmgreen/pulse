@@ -16,6 +16,7 @@
 #include <dwmapi.h>
 #include <dwrite_2.h>
 #include <objbase.h>
+#include <shellapi.h>
 #include <shlobj.h>
 #include <uxtheme.h>
 #include <windowsx.h>

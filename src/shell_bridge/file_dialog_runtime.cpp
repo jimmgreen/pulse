@@ -1,6 +1,7 @@
 #include "dialog_application_identity.h"
 #if defined(PULSE_DIALOG_HISTORY_GLOBAL)
 #include "../common/runtime_log.h"
+#include <shellapi.h>
 #include <shlobj.h>
 #endif
 #include "../common/dialog_admin_trust.h"

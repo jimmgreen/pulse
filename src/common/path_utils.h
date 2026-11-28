@@ -8,6 +8,7 @@
 #include <string>
 #include <string_view>
 #include <windows.h>
+#include <shellapi.h>
 
 namespace pulse::path {
 

@@ -6,6 +6,7 @@
 // Object with a memory cap and inherits only its three standard handles, so a
 // crash, hang or exit of the caller never leaves an ffmpeg behind.
 #include <windows.h>
+#include <shellapi.h>
 #include <cstdint>
 #include <string>
 #include <string_view>

@@ -56,6 +56,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "update_checker.h"
 #include "update_installer.h"
 #include <windows.h>
+#include <shellapi.h>
 #include <d2d1.h>
 #include <memory>
 #include <mutex>

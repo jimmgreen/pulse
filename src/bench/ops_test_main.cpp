@@ -18,6 +18,7 @@
 #include "../common/shell_id.h"
 #include "../ops/recycle_empty.h"
 #include <windows.h>
+#include <shellapi.h>
 #include <oleidl.h>
 #include <shlobj.h>
 #include <winioctl.h>

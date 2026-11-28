@@ -9,6 +9,7 @@
 #include "../common/dialog_admin_trust.h"
 #include "../common/process_token_restriction.h"
 #include "../common/runtime_log.h"
+#include <shellapi.h>
 #include <shlobj.h>
 #include <tlhelp32.h>
 #include <array>

@@ -12,6 +12,7 @@
 
 #include "preview_properties.h"
 #include <windows.h>
+#include <shellapi.h>
 #include <cstdint>
 #include <string>
 #include <string_view>

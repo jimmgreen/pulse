@@ -1,5 +1,6 @@
 #pragma once
 #include <windows.h>
+#include <oleidl.h>
 namespace pulse::ui {
 inline constexpr UINT kPickerPlacesTestPointMessage = WM_APP + 90;
 inline constexpr UINT kPickerOleTestMessage = WM_APP + 91;
