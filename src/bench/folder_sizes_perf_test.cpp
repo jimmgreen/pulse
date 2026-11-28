@@ -89,8 +89,21 @@ int Real(const wchar_t* input) {
     QueryProcessCycleTime(GetCurrentProcess(), &cycles_start);
     const auto start = Clock::now();
     sizes.Sync({{path}}, {});
+    // Progress trace: walked entries, worker activity and job churn once per second.
+    uint64_t next_trace = GetTickCount64() + 1000;
     const bool finished = Wait([&] {
         const auto value = sizes.Get(path);
+        if (GetTickCount64() >= next_trace) {
+            next_trace += 1000;
+            const auto work = sizes.GetWork(path);
+            const auto stats = sizes.ReadStats();
+            std::printf("[TRACE] t=%.0f activity=%d work_entries=%llu work_bytes=%llu entries=%llu started=%llu cancelled=%llu completed=%llu deferred=%llu\n",
+                Milliseconds(start), static_cast<int>(work.activity), static_cast<unsigned long long>(work.entries),
+                static_cast<unsigned long long>(work.bytes), static_cast<unsigned long long>(stats.entries_scanned),
+                static_cast<unsigned long long>(stats.jobs_started), static_cast<unsigned long long>(stats.jobs_cancelled),
+                static_cast<unsigned long long>(stats.jobs_completed), static_cast<unsigned long long>(stats.deferred_jobs));
+            std::fflush(stdout);
+        }
         return value.state == State::Ready || value.state == State::Partial || value.state == State::Unavailable;
     }, 60000);
     const auto scan_ms = Milliseconds(start);
@@ -178,5 +191,12 @@ int Regression() {
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc == 3 && std::wstring_view(argv[1]) == L"--real-root") return Real(argv[2]);
+    // Several roots in one process: per-process start-up costs (worker thread,
+    // drive-kind probe) are paid once, as in the app.
+    if (argc >= 3 && std::wstring_view(argv[1]) == L"--real-roots") {
+        int result = 0;
+        for (int i = 2; i < argc; ++i) result |= Real(argv[i]);
+        return result;
+    }
     return Regression();
 }

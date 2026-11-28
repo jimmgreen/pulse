@@ -68,6 +68,12 @@ public:
     FolderSizes& operator=(const FolderSizes&) = delete;
     void SetCachePath(std::function<std::wstring()> path);
     void SetIndexEnabled(bool enabled);
+    // How much an automatic walk may do before it waits for a click (tests;
+    // 0 keeps the default of 3,000,000 entries / 60 s of walking).
+    void SetAutomaticBudget(uint64_t entries, uint64_t active_ms);
+    // Work between the worker's short pauses (default 48 ms). Tests that must
+    // observe a walk in flight pass 0: a pause after every slice.
+    void SetScanPacing(uint64_t pause_after_ms);
     void Sync(std::vector<FolderSizeRequest> visible, std::vector<std::wstring> watch_roots);
     void Calculate(const std::wstring& path);
     void Cancel(const std::wstring& path);

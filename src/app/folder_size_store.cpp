@@ -39,15 +39,22 @@ Store::Entry* Store::Ensure(const std::wstring& key, const std::set<std::wstring
     return &entry;
 }
 void Store::Touch(Entry& entry) { lru_.splice(lru_.end(), lru_, entry.position); }
-void Store::MarkStale(Entry& entry, uint64_t now, uint64_t delay) {
-    entry.revision = ++next_revision_; ++entry.request_epoch;
+void Store::MarkStale(Entry& entry, uint64_t now, uint64_t delay, bool restart) {
+    entry.revision = ++next_revision_;
     entry.completed = 0;
     // Keep failure backoff across notifications. Explicit Calculate clears it.
     entry.not_before = (std::max)(entry.not_before, now + delay);
     entry.next_index_at = 0;
-    const bool manual = entry.work.manual && entry.work.Running();
-    entry.work = {};
-    if (manual) { entry.work.activity = FolderSizeActivity::Queued; entry.work.manual = true; }
+    // A walk in progress keeps going: the newer revision makes its result a
+    // snapshot that is refreshed afterwards (restarting it on every change
+    // never finished in busy folders). Anything else is superseded, and so is
+    // a walk that began before a newly armed watch covered it.
+    if (restart || entry.work.activity != FolderSizeActivity::Scanning) {
+        ++entry.request_epoch;
+        const bool manual = entry.work.manual && entry.work.Running();
+        entry.work = {};
+        if (manual) { entry.work.activity = FolderSizeActivity::Queued; entry.work.manual = true; }
+    }
     entry.value.verified = false;
     if (entry.value.has_value && entry.value.source != FolderSizeSource::Index)
         entry.value.state = FolderSizeState::Cached;
@@ -57,12 +64,12 @@ bool Known(const Store::Entry& entry) {
     return entry.value.has_value || entry.completed != 0 || entry.work.Running();
 }
 }
-bool Store::InvalidateAncestors(const std::wstring& path, uint64_t now, uint64_t delay, bool known_only) {
+bool Store::InvalidateAncestors(const std::wstring& path, uint64_t now, uint64_t delay, bool known_only, bool restart) {
     bool changed = false;
     std::wstring ancestor = path;
     for (;;) {
         if (auto found = entries.find(ancestor); found != entries.end() && (!known_only || Known(found->second))) {
-            MarkStale(found->second, now, delay); changed = true;
+            MarkStale(found->second, now, delay, known_only || restart); changed = true;
         }
         if (ancestor.size() <= 7) break;
         const auto slash = ancestor.find_last_of(L'\\');
@@ -76,7 +83,7 @@ bool Store::Invalidate(const std::wstring& path, uint64_t now, uint64_t delay, b
     const auto prefix = path.back() == L'\\' ? path : path + L'\\';
     for (auto found = entries.lower_bound(prefix); found != entries.end() && found->first.starts_with(prefix); ++found) {
         if (found->first == path || (known_only && !Known(found->second))) continue;
-        MarkStale(found->second, now, delay); changed = true;
+        MarkStale(found->second, now, delay, known_only); changed = true;
     }
     return changed;
 }

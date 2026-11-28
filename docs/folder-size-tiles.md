@@ -5,10 +5,27 @@ This is not allocated disk space: sparse/compressed files and hard links follow
 per-entry logical-size semantics. Small icons, List and Details retain their existing labels.
 
 `FolderSizes` owns one low-priority worker. The UI supplies visible source rows;
-the worker round-robins up to 32 resumable scans in 12 ms / 1,024-entry slices with
-a 4 ms pause. Explicit calculations receive every other slice (fair across manual requests),
+the worker runs up to 4 resumable scans in 12 ms / 1,024-entry slices, with a 4 ms
+pause after about 48 ms of work (it runs in background CPU/I/O mode), always giving the next slice to the scan that has done the least work, so
+small folders finish within milliseconds while a large one continues. A long
+automatic scan (over 250 ms of work) is parked, with its progress kept, whenever
+other visible rows are waiting to start, and resumes once a slot is free.
+Explicit calculations receive every other slice (fair across manual requests),
 with up to 8,192 entries per slice under the same 12 ms deadline. These are scheduling budgets, not guarantees on individual filesystem
 calls. Directory I/O and persistent-cache I/O never run on the window thread.
+Directories are listed in 64 KiB batches through one directory handle
+(`FileFullDirectoryInfo`, with a `FindFirstFileEx` fallback); the handle that is
+opened is checked to be the directory itself, never a link target.
+
+Automatic scans finish on their own: only a tree beyond 3,000,000 entries or 60 s of
+walking waits for a click (the old limit of 20,000 entries / 500 ms left most
+real folders at "—"). Rows wait up to 150 ms for the index service before a walk
+starts, and not at all when the index is off or has just failed to answer.
+A change inside a folder while it is walked no longer restarts the walk (busy
+folders such as browser profiles never finished). The walk completes, its total
+is shown as an unverified snapshot, and a refresh follows one second later that
+reuses every watched subtree that did not change.
+
 Removing visible requests cancels their generation and requests cancellation of
 pending synchronous worker I/O. Scans cannot publish into a replacement request.
 
@@ -24,8 +41,12 @@ window when no active watcher covers them. Dropping a watch invalidates its cach
 Cache writes are ignored by the cache's own watcher to prevent a feedback loop.
 
 An empty folder is `0 B`. Unreadable roots never become a false zero. Unreadable,
-offline or skipped reparse subtrees produce a partial result; root reparse points
-are not traversed. Automatic scans do not enumerate offline directories. An explicit
+offline or skipped link subtrees produce a partial result. Name-surrogate reparse
+points (junctions, symbolic links, mount points) are never traversed; other reparse
+directories, such as OneDrive / Cloud Files sync folders, are the folder itself and
+are counted (they were previously skipped, undercounting synced folders). Automatic
+scans do not enumerate offline or recall-on-open directories, whose listing is not
+on this device. An explicit
 click retries offline directory metadata enumeration, which may contact its storage
 provider; file contents are never opened. Links/junctions and unreadable directories
 still remain partial rather than claiming a false exact total. Administrator rights

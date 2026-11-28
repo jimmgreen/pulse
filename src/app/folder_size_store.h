@@ -33,11 +33,16 @@ public:
     };
     Entry* Ensure(const std::wstring& key, const std::set<std::wstring>& protected_paths);
     void Touch(Entry& entry);
-    void MarkStale(Entry& entry, uint64_t now, uint64_t delay);
+    // `restart` also supersedes a walk in progress; otherwise that walk keeps
+    // going and its result is published as a snapshot of the older revision.
+    void MarkStale(Entry& entry, uint64_t now, uint64_t delay, bool restart = false);
     // `known_only` leaves idle entries without any result untouched: a newly
     // armed watch has nothing to reconcile for them, and marking them stale
     // would discard an index answer already on its way.
-    bool InvalidateAncestors(const std::wstring& path, uint64_t now, uint64_t delay, bool known_only = false);
+    // `restart` supersedes ancestor walks in progress (an explicit request for a
+    // folder below them must not wait for them to finish).
+    bool InvalidateAncestors(const std::wstring& path, uint64_t now, uint64_t delay, bool known_only = false,
+                             bool restart = false);
     bool Invalidate(const std::wstring& path, uint64_t now, uint64_t delay, bool known_only = false);
     SavedValues Snapshot() const;
     std::map<std::wstring, Entry> entries;

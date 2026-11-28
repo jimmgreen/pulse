@@ -65,8 +65,39 @@ void Navigation(const fs::path& root) {
     Check(Wait([&] { return Exact(sizes, path, 593); }), "real filesystem modification still updates published total");
     sizes.Stop();
 }
-void AutomaticBudget(const fs::path& path) {
+void AutomaticBudget(const fs::path& path, uint64_t total) {
+    {
+        // A tree beyond the old 20,000-entry / 500 ms limit now finishes on
+        // its own instead of stopping at "—" until clicked.
+        FolderSizes automatic; automatic.SetIndexEnabled(false);
+        const auto start = GetTickCount64();
+        automatic.Sync({{path.wstring()}}, {});
+        const bool finished = Wait([&] { return Exact(automatic, path, total); }, 30000);
+        const auto stats = automatic.ReadStats();
+        std::printf("[BUDGET] automatic_finished=%d ms=%llu entries=%llu deferred_jobs=%llu\n", finished,
+            GetTickCount64() - start, stats.entries_scanned, stats.deferred_jobs);
+        Check(finished && stats.deferred_jobs == 0, "large automatic scan finishes with the exact total without a click");
+        automatic.Stop();
+    }
+    {
+        // Small rows are not held up behind a large automatic walk.
+        const auto small = path.parent_path() / L"small_beside_bulk";
+        fs::create_directories(small); File(small / L"s.bin", 29);
+        FolderSizes sizes; sizes.SetIndexEnabled(false);
+        sizes.SetScanPacing(0); // old cadence, so the large walk is still running
+        sizes.Sync({{path.wstring()}}, {});
+        Check(Wait([&] { return sizes.GetWork(path.wstring()).Running(); }, 5000), "large automatic walk started");
+        const auto start = GetTickCount64();
+        sizes.Sync({{path.wstring()}, {small.wstring()}}, {});
+        const bool small_done = Wait([&] { return Exact(sizes, small, 29); }, 5000);
+        const auto small_ms = GetTickCount64() - start;
+        std::printf("[METRIC] small_beside_large_ms=%llu\n", small_ms);
+        Check(small_done && small_ms < 1000, "a small row finishes while a large automatic walk is still running");
+        Check(Wait([&] { return Exact(sizes, path, total); }, 30000), "the large walk still completes afterwards");
+        sizes.Stop();
+    }
     FolderSizes automatic; automatic.SetIndexEnabled(false);
+    automatic.SetAutomaticBudget(5000, 0);
     automatic.Sync({{path.wstring()}}, {});
     const bool deferred = Wait([&] { return automatic.GetWork(path.wstring()).activity == FolderSizeActivity::Deferred; });
     const auto work = automatic.GetWork(path.wstring());
@@ -74,7 +105,7 @@ void AutomaticBudget(const fs::path& path) {
     std::printf("[BUDGET] deferred=%d activity=%d entries=%llu jobs_started=%llu jobs_completed=%llu jobs_cancelled=%llu deferred_jobs=%llu\n",
         deferred, static_cast<int>(work.activity), stats.entries_scanned, stats.jobs_started,
         stats.jobs_completed, stats.jobs_cancelled, stats.deferred_jobs);
-    Check(deferred, "large automatic scan reaches bounded work budget");
+    Check(deferred, "an automatic scan beyond the configured budget waits for a click");
     Check(!automatic.Get(path.wstring()).has_value, "budget exhaustion does not publish a subtotal as the folder size");
     const auto paused = automatic.ReadStats();
     for (unsigned i = 0; i < 20; ++i) { automatic.Sync({}, {}); automatic.Sync({{path.wstring()}}, {}); }
@@ -82,10 +113,34 @@ void AutomaticBudget(const fs::path& path) {
     Check(automatic.ReadStats().jobs_started == paused.jobs_started, "navigation does not reset the exhausted automatic budget");
     automatic.Stop();
 }
+// A folder written to during its walk used to restart on every change and
+// never finish. The walk now completes, and the total catches up afterwards.
+void BusyFolder(const fs::path& path, uint64_t total) {
+    const auto noisy = path / L"noisy.log";
+    FolderSizes sizes; sizes.SetIndexEnabled(false);
+    sizes.SetScanPacing(0); // a walk long enough to see several change notifications
+    sizes.Sync({{path.wstring()}}, {path.wstring()});
+    Check(Wait([&] { return sizes.GetWork(path.wstring()).Running(); }, 5000), "busy-folder walk started");
+    size_t written = 0;
+    bool got_value = false;
+    const auto end = GetTickCount64() + 15000;
+    while (GetTickCount64() < end) {
+        File(noisy, ++written % 7 + 1);
+        Sleep(20);
+        if (sizes.Get(path.wstring()).has_value) { got_value = true; break; }
+    }
+    std::printf("[METRIC] busy_folder_writes_before_value=%zu\n", written);
+    Check(got_value, "a folder that keeps changing still gets a total while it changes");
+    File(noisy, 5);
+    Check(Wait([&] { return Exact(sizes, path, total + 5); }, 20000), "after the writes stop the total matches the folder exactly");
+    sizes.Stop();
+    fs::remove(noisy);
+}
 void StableManualAndBudget(const fs::path& root) {
     const auto path = root / L"bulk"; fs::create_directories(path);
     File(path / L"seed.bin", 13);
     FolderSizes sizes; sizes.SetIndexEnabled(false);
+    sizes.SetScanPacing(0); // keep the manual walk in flight long enough to observe and cancel
     sizes.Sync({{path.wstring()}}, {});
     Check(Wait([&] { return Exact(sizes, path, 13); }), "seed result for stable refresh");
     for (unsigned d = 0; d < 24; ++d) {
@@ -117,7 +172,8 @@ void StableManualAndBudget(const fs::path& root) {
     sizes.Sync({{path.wstring()}}, {});
     Check(Exact(sizes, path, total), "offscreen completed result is reused on return");
     sizes.Stop();
-    AutomaticBudget(path);
+    AutomaticBudget(path, total);
+    BusyFolder(path, total);
 }
 void FailureAndPersistence(const fs::path& root) {
     const auto path = root / L"partial", offline = path / L"offline";
@@ -379,7 +435,14 @@ void RealMachine() {
 int wmain(int argc,wchar_t** argv) {
     try {
         if (argc==2 && std::wstring(argv[1])==L"--real-readonly") RealMachine();
-        else if (argc == 3 && std::wstring(argv[1]) == L"--budget-only") AutomaticBudget(argv[2]);
+        else if (argc == 3 && std::wstring(argv[1]) == L"--budget-only") {
+            // Any existing tree: its exact total comes from an explicit calculation first.
+            FolderSizes reference; reference.SetIndexEnabled(false);
+            reference.Calculate(argv[2]);
+            Wait([&] { return reference.Get(argv[2]).state == FolderSizeState::Ready; }, 120000);
+            const auto total = reference.Get(argv[2]).bytes; reference.Stop();
+            AutomaticBudget(argv[2], total);
+        }
         else {
             const auto root=fs::current_path()/L"bench_data"/(L"folder_experience_"+std::to_wstring(GetCurrentProcessId())+L"_"+std::to_wstring(GetTickCount64()));
             fs::create_directories(root);

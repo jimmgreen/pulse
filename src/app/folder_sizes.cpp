@@ -13,6 +13,7 @@
 #include <deque>
 #include <map>
 #include <iterator>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <string_view>
@@ -26,7 +27,21 @@ using folder_size::Within;
 constexpr uint64_t kFreshMs = 300000;
 constexpr uint64_t kFailureBackoffMs = 600000;
 constexpr uint64_t kWatchLeaseMs = 60000;
-constexpr size_t kScanConcurrency = 2;
+// Walks run round-robin, least work done first, so small folders finish at
+// once while a large one keeps going in the background.
+constexpr size_t kScanConcurrency = 4;
+// A long automatic walk yields its slot to rows still waiting to start and
+// resumes later from where it stopped (its progress is kept, not discarded).
+constexpr uint64_t kParkAfterMs = 250;
+// Only trees beyond this much automatic work wait for a click.
+constexpr uint64_t kAutoBudgetEntries = 3000000;
+constexpr uint64_t kAutoBudgetMs = 60000;
+// New rows give the index service this long to answer before a walk starts,
+// unless the service is known not to answer.
+constexpr uint64_t kIndexWaitMs = 150;
+// A walk that saw its folder change is published, then refreshed after this.
+constexpr uint64_t kRestaleDelayMs = 1000;
+constexpr size_t kChangeLogLimit = 4096;
 // Volume overview rows use the index/explicit calculation, not N full-tree scans.
 bool OverviewPath(const std::wstring& key) {
     const auto p = pulse::path::StripExtendedPathPrefix(key);
@@ -149,7 +164,32 @@ struct FolderSizes::Impl {
     // Set under mutex with every notify: work arrived since Run's last pass,
     // which may have been outside the lock when the notify fired.
     bool kick = false;
+    // Worker-only: a wanted row could not start because every slot was busy.
+    bool waiting_starts = false;
     FolderSizeStats stats;
+    std::atomic<uint64_t> auto_budget_entries{kAutoBudgetEntries}, auto_budget_ms{kAutoBudgetMs};
+    std::atomic<uint64_t> pause_after_ms{48};
+    // False after the index service failed to answer; new rows then start
+    // walking at once instead of waiting for it.
+    std::atomic<bool> index_reachable{true};
+    // Paths invalidated since a walk started. A finished subtree of a walk
+    // whose folder changed is published only if nothing changed inside it.
+    struct Change { uint64_t seq = 0; std::wstring path; bool whole = false; };
+    std::deque<Change> change_log;
+    uint64_t change_seq = 0, change_floor = 0;
+    void LogChangeLocked(const std::wstring& key, bool whole) {
+        change_log.push_back({++change_seq, key, whole});
+        if (change_log.size() > kChangeLogLimit) { change_floor = change_log.front().seq; change_log.pop_front(); }
+    }
+    bool ChangedSince(const std::wstring& subtree, uint64_t mark) const {
+        if (change_floor > mark) return true;  // the log no longer reaches back that far
+        for (auto it = change_log.rbegin(); it != change_log.rend() && it->seq > mark; ++it)
+            if (Within(it->path, subtree) || (it->whole && Within(subtree, it->path))) return true;
+        return false;
+    }
+    bool IndexMayAnswer(const std::wstring& key) const {
+        return index_enabled && index_reachable.load() && !NetworkPath(key);
+    }
     HANDLE index_cancel = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     ~Impl() { if (index_cancel) CloseHandle(index_cancel); }
 
@@ -249,14 +289,15 @@ struct FolderSizes::Impl {
         }
         return true;
     }
-    void InvalidateLocked(const std::wstring& key, uint64_t delay = 200, bool known_only = false) {
+    void InvalidateLocked(const std::wstring& key, uint64_t delay = 200, bool known_only = false, bool whole = false) {
         if (key.empty()) return;
+        LogChangeLocked(key, whole);
         // Staleness is not saved: a restored value is unverified until checked.
         if (store.Invalidate(key, GetTickCount64(), delay, known_only)) changed = true;
     }
     void Invalidate(const std::wstring& path) {
         const auto key = Key(path);
-        { std::lock_guard lock(mutex); InvalidateLocked(key); kick = true; }
+        { std::lock_guard lock(mutex); InvalidateLocked(key, 200, false, true); kick = true; }
         wake.notify_all();
     }
     bool IsSpinning(const std::wstring& path) {
@@ -349,7 +390,7 @@ struct FolderSizes::Impl {
                         // it is not a write burst that needs a debounce delay.
                         // Rows still waiting for their first result have nothing
                         // to reconcile: keep their in-flight index answer.
-                        InvalidateLocked(root, initial ? 0 : 200, initial);
+                        InvalidateLocked(root, initial ? 0 : 200, initial, true);
                         for (auto& [path, probe] : probes) if (Within(path, root)) probe.stale = true;
                         ++probe_events;
                     } else {
@@ -418,6 +459,7 @@ struct FolderSizes::Impl {
             }
             std::vector<index::IndexedFolderSize> values;
             const bool received = connection.FolderSizes(paths, values);
+            index_reachable = received;
             {
                 std::lock_guard lock(mutex);
                 const auto answered = GetTickCount64();
@@ -433,7 +475,12 @@ struct FolderSizes::Impl {
                     auto& entry = found->second;
                     // Any answer other than an available total revokes index authority,
                     // even when the request itself has since been superseded.
-                    if (!received || i >= values.size() || !values[i].available) entry.index_current = false;
+                    if (!received || i >= values.size() || !values[i].available) {
+                        entry.index_current = false;
+                        // No total coming: a row only waiting for this answer walks now.
+                        if (!entry.value.has_value && entry.not_before > answered &&
+                            entry.not_before <= answered + kIndexWaitMs) entry.not_before = 0;
+                    }
                     if (entry.revision != versions[i].first || entry.request_epoch != versions[i].second ||
                         (entry.value.source == FolderSizeSource::Scan && entry.value.has_value &&
                          entry.value.state != FolderSizeState::Calculating)) continue;
@@ -463,14 +510,19 @@ struct FolderSizes::Impl {
         const auto root = store.entries.find(job.path);
         const auto demand = wanted.find(job.path);
         if (root == store.entries.end() || demand == wanted.end() || !demand->second ||
-            root->second.revision != job.revision || root->second.request_epoch != job.request_epoch) {
+            root->second.request_epoch != job.request_epoch) {
             ++stats.jobs_cancelled; return;
         }
+        // The folder changed while it was walked: its total is a fresh snapshot
+        // but not current, and subtrees with changes inside are dropped.
+        const bool restaled = root->second.revision != job.revision;
         const auto now = GetTickCount64();
         const auto utc = folder_size::NowUtcMs();
         bool saved_change = false;
         for (auto& subtree : job.completed) {
             const auto key = Key(subtree.path);
+            const bool is_root = key == job.path;
+            if (restaled && !is_root && ChangedSince(key, job.change_mark)) continue;
             auto* entry = store.Ensure(key, protected_paths);
             if (!entry) continue;
             if (!subtree.value.has_value && entry->value.has_value) {
@@ -483,7 +535,8 @@ struct FolderSizes::Impl {
                 entry->value.verified_at = subtree.value.has_value ? utc : 0;
                 entry->watch_generation = subtree.watch_generation;
                 entry->value.verified = subtree.value.has_value && !subtree.value.partial &&
-                    subtree.watch_generation != 0 && Coverage(key) == subtree.watch_generation;
+                    subtree.watch_generation != 0 && Coverage(key) == subtree.watch_generation &&
+                    !(restaled && is_root);
             }
             entry->completed = now;
             entry->work = {};
@@ -494,6 +547,13 @@ struct FolderSizes::Impl {
             // not back off an explicit child request still waiting for its turn.
             entry->not_before = incomplete && !(key != job.path && manual.contains(key))
                 ? now + kFailureBackoffMs : 0;
+            if (restaled && is_root) {
+                // Refresh soon (walks reuse the unchanged subtrees just published);
+                // errors from entries removed mid-walk are not a reason to back off.
+                entry->completed = 0;
+                entry->not_before = now + kRestaleDelayMs;
+                entry->work.activity = FolderSizeActivity::Idle;
+            }
             if (key == job.path) {
                 manual.erase(key);
                 if (std::none_of(last_visible.begin(), last_visible.end(), [&](const auto& r) { return r.path == key; })) {
@@ -565,8 +625,8 @@ struct FolderSizes::Impl {
             }
             if (!restored.empty()) changed = true;
         }
-        std::deque<std::unique_ptr<folder_size::Scan>> jobs;
-        uint64_t last_save = GetTickCount64(), schedule_scope = 0;
+        std::deque<std::unique_ptr<folder_size::Scan>> jobs, parked;
+        uint64_t last_save = GetTickCount64(), schedule_scope = 0, busy_ms = 0;
         bool manual_turn = true;
         while (!stopping) {
             std::vector<std::pair<std::shared_ptr<Suspension>, std::shared_ptr<fs::DirWatch>>> retiring;
@@ -577,6 +637,7 @@ struct FolderSizes::Impl {
                         for (const auto& [path, future] : retiring_watches)
                             if (Within(path, root)) request->watches.push_back(future);
                         std::erase_if(jobs, [&](const auto& job) { return Within(job->path, root); });
+                        std::erase_if(parked, [&](const auto& job) { return Within(job->path, root); });
                         for (auto it = watches.begin(); it != watches.end();) {
                             if (!Within(it->first, root)) { ++it; continue; }
                             retiring.emplace_back(request, std::move(it->second.handle));
@@ -630,24 +691,35 @@ struct FolderSizes::Impl {
             }
             {
                 std::unique_lock lock(mutex);
-                std::erase_if(jobs, [&](const auto& job) {
+                // A change inside the folder does not cancel its walk (that never
+                // finished in busy folders); Publish handles it. Hidden rows,
+                // explicit cancellation and suspension do.
+                const auto obsolete = [&](const auto& job) {
                     const auto demand = wanted.find(job->path);
                     const auto entry = store.entries.find(job->path);
                     const bool cancelled = demand == wanted.end() || !demand->second || entry == store.entries.end() ||
-                        entry->second.revision != job->revision || entry->second.request_epoch != job->request_epoch;
+                        entry->second.request_epoch != job->request_epoch;
                     if (cancelled) {
                         ++stats.jobs_cancelled;
                         if (entry != store.entries.end() && entry->second.request_epoch == job->request_epoch)
                             entry->second.work = {};
                     }
                     return cancelled;
-                });
+                };
+                std::erase_if(jobs, obsolete);
+                std::erase_if(parked, obsolete);
                 const auto now = GetTickCount64();
                 const bool reprioritize = schedule_scope != scope;
                 std::map<std::wstring, size_t> priority;
-                if (reprioritize) for (size_t i = 0; i < order.size(); ++i) priority.emplace(order[i], manual.contains(order[i]) ? i : order.size() + i);
+                if (reprioritize || !parked.empty())
+                    for (size_t i = 0; i < order.size(); ++i) priority.emplace(order[i], manual.contains(order[i]) ? i : order.size() + i);
+                const auto rank = [&](const std::wstring& path) {
+                    const auto found = priority.find(path);
+                    return found == priority.end() ? (std::numeric_limits<size_t>::max)() : found->second;
+                };
+                waiting_starts = false;
                 for (const auto& path : order) {
-                    if (jobs.size() == kScanConcurrency && !reprioritize) break;
+                    if (jobs.size() == kScanConcurrency && !reprioritize && waiting_starts) break;
                     if (!wanted.at(path) || Suspended(path)) continue;
                     auto& entry = store.entries.at(path);
                     const bool explicit_request = manual.contains(path);
@@ -661,32 +733,34 @@ struct FolderSizes::Impl {
                     if (std::any_of(jobs.begin(), jobs.end(), [&](const auto& job) {
                         return Within(path, job->path) || Within(job->path, path);
                     })) continue;
+                    // A parked walk of this row resumes rather than starting over.
+                    if (std::any_of(parked.begin(), parked.end(), [&](const auto& job) { return job->path == path; })) continue;
+                    if (std::any_of(parked.begin(), parked.end(), [&](const auto& job) {
+                        return Within(path, job->path) || Within(job->path, path);
+                    })) continue;
                     if (jobs.size() == kScanConcurrency) {
+                        if (!reprioritize) { waiting_starts = true; continue; }
                         const auto lowest = std::max_element(jobs.begin(), jobs.end(), [&](const auto& a, const auto& b) {
-                            return priority.at(a->path) < priority.at(b->path);
+                            return rank(a->path) < rank(b->path);
                         });
-                        if (priority.at((*lowest)->path) <= priority.at(path)) continue;
-                        jobs.erase(lowest); ++stats.jobs_cancelled;
+                        if (rank((*lowest)->path) <= rank(path)) { waiting_starts = true; continue; }
+                        // Make room without losing the displaced walk's progress.
+                        parked.push_back(std::move(*lowest)); jobs.erase(lowest);
                     }
                     entry.work = {};
                     entry.work.activity = FolderSizeActivity::Scanning;
                     entry.work.manual = explicit_request;
                     jobs.push_back(std::make_unique<folder_size::Scan>(path, entry.revision, entry.request_epoch, manual.contains(path)));
+                    jobs.back()->change_mark = change_seq;
                     ++stats.jobs_started; changed = true;
                 }
-                if (reprioritize) {
-                    schedule_scope = scope;
-                    std::stable_sort(jobs.begin(), jobs.end(), [&](const auto& a, const auto& b) {
-                        return priority.at(a->path) < priority.at(b->path);
+                if (reprioritize) schedule_scope = scope;
+                // Free slots resume parked walks, most visible row first.
+                while (jobs.size() < kScanConcurrency && !parked.empty()) {
+                    const auto best = std::min_element(parked.begin(), parked.end(), [&](const auto& a, const auto& b) {
+                        return rank(a->path) < rank(b->path);
                     });
-                }
-                // Give explicit clicks every other slice, without starving other
-                // visible folders. Round-robin still applies among manual jobs.
-                if (manual_turn) {
-                    const auto urgent = std::find_if(jobs.begin(), jobs.end(), [&](const auto& job) {
-                        return manual.contains(job->path);
-                    });
-                    if (urgent != jobs.end()) std::rotate(jobs.begin(), urgent, std::next(urgent));
+                    jobs.push_back(std::move(*best)); parked.erase(best);
                 }
                 if (jobs.empty() && !probing) {
                     const auto due = IdleDeadline(now, last_save, !file.empty());
@@ -697,8 +771,21 @@ struct FolderSizes::Impl {
                 }
             }
             if (!jobs.empty() && !stopping) {
+                // Give explicit clicks every other slice, without starving other
+                // visible folders; otherwise the walk with the least work done goes
+                // next, so small folders finish first.
+                auto pick = jobs.end();
+                {
+                    std::lock_guard lock(mutex);
+                    const auto less_work = [](const auto& a, const auto& b) { return a->active_ms < b->active_ms; };
+                    if (manual_turn) {
+                        for (auto it = jobs.begin(); it != jobs.end(); ++it)
+                            if (manual.contains((*it)->path) && (pick == jobs.end() || less_work(*it, *pick))) pick = it;
+                    }
+                    if (pick == jobs.end()) pick = std::min_element(jobs.begin(), jobs.end(), less_work);
+                }
                 manual_turn = !manual_turn;
-                auto job = std::move(jobs.front()); jobs.pop_front();
+                auto job = std::move(*pick); jobs.erase(pick);
                 const auto before_entries = job->entries_scanned, before_hits = job->subtree_hits;
                 { std::lock_guard lock(mutex); active_scan_path = job->path; }
                 const auto step_start = GetTickCount64();
@@ -724,7 +811,7 @@ struct FolderSizes::Impl {
                     stats.entries_scanned += job->entries_scanned - before_entries;
                     stats.subtree_hits += job->subtree_hits - before_hits;
                     if (!completed && !manual.contains(job->path) &&
-                        (job->active_ms >= 500 || job->entries_scanned >= 20000)) {
+                        (job->active_ms >= auto_budget_ms.load() || job->entries_scanned >= auto_budget_entries.load())) {
                         const auto found = store.entries.find(job->path);
                         if (found != store.entries.end() && found->second.request_epoch == job->request_epoch) {
                             found->second.auto_deferred = true;
@@ -741,7 +828,6 @@ struct FolderSizes::Impl {
                         const auto found = store.entries.find(job->path);
                         const auto demand = wanted.find(job->path);
                         if (found != store.entries.end() && demand != wanted.end() && demand->second &&
-                            found->second.revision == job->revision &&
                             found->second.request_epoch == job->request_epoch &&
                             found->second.work.Running()) {
                             found->second.work.bytes = job->Progress().bytes;
@@ -752,14 +838,27 @@ struct FolderSizes::Impl {
                     }
                 }
                 if (!completed && !deferred) {
-                    jobs.push_back(std::move(job));
+                    bool park = false;
+                    {
+                        std::lock_guard lock(mutex);
+                        park = waiting_starts && !manual.contains(job->path) && job->active_ms >= kParkAfterMs;
+                    }
+                    (park ? parked : jobs).push_back(std::move(job));
+                }
+                // The worker runs in background CPU/I/O mode, which already keeps
+                // the window responsive. A short pause after every 12 ms slice
+                // (really ~15 ms at the default timer resolution) left walks idle
+                // more than half the time; pause after ~48 ms of work instead.
+                busy_ms += GetTickCount64() - step_start;
+                if (!completed && busy_ms >= pause_after_ms.load()) {
+                    busy_ms = 0;
                     std::unique_lock lock(mutex);
                     wake.wait_for(lock, std::chrono::milliseconds(4), [&] { return stopping.load(); });
                 }
             }
             if (GetTickCount64() - last_save >= 3000) { Save(file); last_save = GetTickCount64(); }
         }
-        jobs.clear();
+        jobs.clear(); parked.clear();
         std::vector<std::shared_ptr<fs::DirWatch>> retired;
         {
             std::lock_guard lock(mutex);
@@ -814,6 +913,11 @@ void FolderSizes::SetCachePath(std::function<std::wstring()> path) {
     std::lock_guard lock(impl_->mutex);
     if (!impl_->worker.joinable()) impl_->cache_path = std::move(path);
 }
+void FolderSizes::SetAutomaticBudget(uint64_t entries, uint64_t active_ms) {
+    impl_->auto_budget_entries = entries ? entries : kAutoBudgetEntries;
+    impl_->auto_budget_ms = active_ms ? active_ms : kAutoBudgetMs;
+}
+void FolderSizes::SetScanPacing(uint64_t pause_after_ms) { impl_->pause_after_ms = pause_after_ms; }
 void FolderSizes::SetIndexEnabled(bool enabled) {
     std::lock_guard lock(impl_->mutex);
     if (!impl_->worker.joinable()) impl_->index_enabled = enabled;
@@ -876,8 +980,9 @@ void FolderSizes::Sync(std::vector<FolderSizeRequest> visible, std::vector<std::
         auto* entry = state.store.Ensure(request.path, protected_paths);
         if (!entry) continue;
         // Visibility is not a data revision. Preserve published bytes and completion age.
-        if (!entry->value.has_value && entry->completed == 0 && !entry->work.Running())
-            entry->not_before = (std::max)(entry->not_before, now + 150);
+        if (!entry->value.has_value && entry->completed == 0 && !entry->work.Running() &&
+            state.IndexMayAnswer(request.path))
+            entry->not_before = (std::max)(entry->not_before, now + kIndexWaitMs);
         if (!state.manual.contains(request.path) && ::pulse::fs::IsKnownSpinningDrive(request.path)) {
             entry->auto_deferred = true;
             if (!entry->work.Running()) entry->work.activity = FolderSizeActivity::Deferred;
@@ -909,9 +1014,12 @@ void FolderSizes::Calculate(const std::wstring& path) {
     const auto demand = state.wanted.find(key);
     if (demand == state.wanted.end() || state.Suspended(key)) return;
     demand->second = true; state.manual.insert(key);
-    state.store.InvalidateAncestors(key, GetTickCount64(), 0);
+    state.store.InvalidateAncestors(key, GetTickCount64(), 0, false, true);
     if (auto found = state.store.entries.find(key); found != state.store.entries.end()) {
         found->second.not_before = 0; found->second.auto_deferred = false;
+        // An automatic walk of this folder gives way to the explicit one
+        // (larger slices, reads offline listings).
+        ++found->second.request_epoch;
         found->second.work = {};
         found->second.work.activity = FolderSizeActivity::Queued;
         found->second.work.manual = true;

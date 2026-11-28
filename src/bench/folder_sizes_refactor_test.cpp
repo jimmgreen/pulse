@@ -264,6 +264,7 @@ void Cancellation(const fs::path& fixture) {
         for (unsigned file = 32; file < 128; ++file)
             File(large / std::to_wstring(folder) / (std::to_wstring(file) + L".bin"), 13);
     FolderSizes sizes; sizes.SetIndexEnabled(false);
+    sizes.SetScanPacing(0); // keep the walk in flight long enough to cancel it
     sizes.Sync({{large.wstring()}}, {});
     Check(Wait([&] { return sizes.ReadStats().entries_scanned > 0; }), "cancellation reaches a real in-progress scan");
     sizes.Sync({{empty.wstring()}}, {});
@@ -304,6 +305,7 @@ void ChildCalculationCancelsAncestor(const fs::path& fixture) {
     fs::create_directories(child);
     File(child / L"value.bin", 7);
     FolderSizes sizes; sizes.SetIndexEnabled(false);
+    sizes.SetScanPacing(0); // keep the ancestor walk in flight
     sizes.Sync({{parent.wstring()}, {child.wstring()}}, {});
     bool in_flight = false;
     const auto deadline = GetTickCount64() + 6000;
