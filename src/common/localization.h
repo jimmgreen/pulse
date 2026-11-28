@@ -6639,6 +6639,11 @@ enum class StringId : UINT {
     DockSpringMoveFormat = IDS_DOCK_SPRING_MOVE_FORMAT,
     DockSpringCopyFormat = IDS_DOCK_SPRING_COPY_FORMAT,
     DockSpringDropped = IDS_DOCK_SPRING_DROPPED,
+    SettingsContextLargeIcons = IDS_SETTINGS_CONTEXT_LARGE_ICONS,
+    SettingsContextLargeIconsDesc = IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC,
+    SettingsContextIconOriginal = IDS_SETTINGS_CONTEXT_ICON_ORIGINAL,
+    SettingsContextIconWide = IDS_SETTINGS_CONTEXT_ICON_WIDE,
+    SettingsContextIconNarrow = IDS_SETTINGS_CONTEXT_ICON_NARROW,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

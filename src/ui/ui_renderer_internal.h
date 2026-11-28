@@ -2897,6 +2897,8 @@ struct SettingsLayout {
     // The left card's last row, under pulse_group[1]: where the entries of
     // Windows and other software went (opens page 6).
     D2D1_RECT_F context_system_hint{};
+    // Toggle under the left card's Windows hint: label the menu's icon strip.
+    D2D1_RECT_F context_icon_style_row{};
     D2D1_RECT_F duplicate_options{};
     D2D1_RECT_F section[8]{}, group[8]{}, footer{};
     // General pages (IsGeneralSettingsPage): the title of each section[i], the

@@ -6629,6 +6629,11 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "移动到「%s」"
     IDS_DOCK_SPRING_COPY_FORMAT "复制到「%s」"
     IDS_DOCK_SPRING_DROPPED "已放入「%s」"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS "图标样式"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC "右键菜单顶部剪切、复制、删除、重命名按钮：原本、宽版或窄版"
+    IDS_SETTINGS_CONTEXT_ICON_ORIGINAL "原本"
+    IDS_SETTINGS_CONTEXT_ICON_WIDE "宽版"
+    IDS_SETTINGS_CONTEXT_ICON_NARROW "窄版"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13257,6 +13262,11 @@ BEGIN
     IDS_DOCK_SPRING_MOVE_FORMAT "Move to %s"
     IDS_DOCK_SPRING_COPY_FORMAT "Copy to %s"
     IDS_DOCK_SPRING_DROPPED "Moved to %s"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS "Icon style"
+    IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC "Cut, Copy, Delete and Rename buttons in the context menu: original, wide or narrow"
+    IDS_SETTINGS_CONTEXT_ICON_ORIGINAL "Original"
+    IDS_SETTINGS_CONTEXT_ICON_WIDE "Wide"
+    IDS_SETTINGS_CONTEXT_ICON_NARROW "Narrow"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

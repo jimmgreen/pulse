@@ -1,6 +1,7 @@
 #include "../app/context_menu.h"
 #include "../app/git_ui.h"
 #include "../app/app_model.h"
+#include "../common/localization.h"
 #include "../index/index_query.h"
 #include <cstdlib>
 #include <algorithm>
@@ -67,6 +68,7 @@ ui::FluentMenuItem GitFlyoutBranchGlyph() {
 }
 }
 int main(int argc, char** argv) {
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
     int failures = 0, checks = 0;
     const auto check = [&](bool value, const char* label) {
         ++checks; failures += !value; std::printf("[%s] %s\n", value ? "PASS" : "FAIL", label);
@@ -255,6 +257,27 @@ int main(int argc, char** argv) {
     check(rows.size() == 2 && Has(rows, CmdOpen) && Has(rows, CmdCut) && Has(rows, CmdCopy) &&
         Has(rows, CmdDelete) && Has(rows, CmdRename) && rows[1].quick_swatches.size() == 4 && WellFormed(rows),
         "all optional rows can be hidden while Open and four fixed edit buttons remain");
+    {
+        const auto compact = BuildItemMenu(false, L"", true);
+        const auto wide = BuildItemMenu(false, L"", true, false, ui::SwatchButtonStyle::Wide);
+        const auto narrow = BuildItemMenu(false, L"", true, false, ui::SwatchButtonStyle::Narrow);
+        const auto& plain_strip = compact[1].quick_swatches;
+        const auto& wide_strip = wide[1].quick_swatches;
+        const auto& narrow_strip = narrow[1].quick_swatches;
+        const bool labelled = !wide_strip.empty() && !narrow_strip.empty() &&
+            !wide_strip[0].label.empty() && !wide_strip[1].label.empty() &&
+            !wide_strip[2].label.empty() && !wide_strip[3].label.empty() &&
+            !narrow_strip[0].label.empty() && !narrow_strip[1].label.empty() &&
+            !narrow_strip[2].label.empty() && !narrow_strip[3].label.empty();
+        check(!plain_strip.empty() && plain_strip[0].label.empty() &&
+              plain_strip[0].button_style == ui::SwatchButtonStyle::None &&
+              wide_strip.size() == 4 && wide_strip[0].button_style == ui::SwatchButtonStyle::Wide &&
+              narrow_strip.size() == 4 && narrow_strip[0].button_style == ui::SwatchButtonStyle::Narrow &&
+              labelled && wide_strip[0].command == CmdCut && wide_strip[3].command == CmdRename &&
+              narrow_strip[0].command == CmdCut && narrow_strip[3].command == CmdRename &&
+              WellFormed(wide) && WellFormed(narrow),
+              "both labelled icon styles name all four buttons without changing their commands");
+    }
     rows = {Row(CmdOpen), Row(CmdCut), Row(CmdCopy), Row(CmdDelete), Row(CmdRename)};
     ApplyBuiltinMenuPrefs(rows, prefs); check(rows.size() == 5, "fixed commands also survive as standalone rows");
     prefs.builtin_hidden = 0;

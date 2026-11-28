@@ -121,6 +121,22 @@ void MainRenderer::DrawSettingsPulseMenu(const WindowViewModel& vm,const D2D1_RE
             painter_.DrawText(l10n::Get(l10n::StringId::WindowsAppCommands).c_str(),D2D1::RectF(r.left+36*s,r.top,r.right-28*s,r.bottom),
                               compositor_->TextFormat(),theme.text);
         }
+        // Three-way icon style: click the value to cycle 原本 -> 宽版 -> 窄版.
+        if(const auto r=l.context_icon_style_row;r.bottom>r.top) {
+            const bool hot=hot_hit(69);
+            if(hot) painter_.FillRoundedRect(r,6*s,theme.fill_hover);
+            const float mid=(r.top+r.bottom)*0.5f;
+            DrawIconText(r.left+10*s,mid-8*s,16*s,16*s,L"\xE8C8",L"",theme.text_secondary,0.75f);
+            static constexpr I kStyles[]={I::SettingsContextIconOriginal,I::SettingsContextIconWide,I::SettingsContextIconNarrow};
+            const int style=std::clamp(vm.settings_context_icon_style,0,2);
+            const auto value=D2D1::RectF(r.right-12*s-56*s,mid-11*s,r.right-12*s,mid+11*s);
+            painter_.FillRoundedRect(value,5*s,hot ? theme.fill_hover : theme.fill_input);
+            painter_.StrokeRoundedRect(value,5*s,theme.stroke_card,1);
+            painter_.DrawText(l10n::Get(kStyles[style]),value,compositor_->SmallFormat(),theme.text,
+                              fluent::HorizontalAlignment::Center);
+            painter_.DrawText(l10n::Get(I::SettingsContextLargeIcons),D2D1::RectF(r.left+36*s,r.top,value.left-8*s,r.bottom),
+                              compositor_->SmallFormat(),theme.text);
+        }
     }
 
     // ---- middle card: head, presets, rows ----

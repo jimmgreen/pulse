@@ -6656,3 +6656,8 @@ DockPreviewSetting	IDS_DOCK_PREVIEW_SETTING	8029	悬停显示窗口预览	Show w
 DockSpringMoveFormat	IDS_DOCK_SPRING_MOVE_FORMAT	8030	移动到「%s」	Move to %s	移動到「%s」
 DockSpringCopyFormat	IDS_DOCK_SPRING_COPY_FORMAT	8031	复制到「%s」	Copy to %s	複製到「%s」
 DockSpringDropped	IDS_DOCK_SPRING_DROPPED	8032	已放入「%s」	Moved to %s	已放入「%s」
+SettingsContextLargeIcons	IDS_SETTINGS_CONTEXT_LARGE_ICONS	8033	图标样式	Icon style	圖示樣式
+SettingsContextLargeIconsDesc	IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC	8034	右键菜单顶部剪切、复制、删除、重命名按钮：原本、宽版或窄版	Cut, Copy, Delete and Rename buttons in the context menu: original, wide or narrow	右鍵選單頂端剪切、複製、刪除、重新命名按鈕：原本、寬版或窄版
+SettingsContextIconOriginal	IDS_SETTINGS_CONTEXT_ICON_ORIGINAL	8035	原本	Original	原本
+SettingsContextIconWide	IDS_SETTINGS_CONTEXT_ICON_WIDE	8036	宽版	Wide	寬版
+SettingsContextIconNarrow	IDS_SETTINGS_CONTEXT_ICON_NARROW	8037	窄版	Narrow	窄版
