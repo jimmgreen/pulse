@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
           "one file: cut, copy, delete, rename, tags");
     tab.ToggleSelect(1);
     caps = ComputeSelectionCaps(tab, &places);
-    Check(caps.cut && caps.copy && caps.del && !caps.rename, "two files: no single rename");
+    Check(caps.cut && caps.copy && caps.del && caps.rename, "two files: rename becomes a batch rename");
 
     // Search may contain an original-path replacement alongside a recycled item.
     auto recycled = Entry(L"a", L"C:\\work\\a");
