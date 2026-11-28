@@ -1,5 +1,6 @@
 #include "../glass_control_labels.h"
 #include "plugin/settings_page.h"
+#include "plugin/settings_icons.h"
 #include "host/model/world_cities.h"
 
 #include "ipc/desktop_ipc.h"
@@ -349,6 +350,44 @@ std::string SchemePreviewCanvas(int scheme, uint32_t tint_rgb) {
                   left.veil, kWeek[now.wDayOfWeek % 7], left.red, now.wDay, left.ink,
                   right.veil, right.sub, right.ink, right.sub, right.ink);
     s += buf;
+    return s;
+}
+
+// 桌面模式 cards: the same wallpaper, with groups and widgets (0) or Windows' own icons and widgets (1).
+std::string ModePreviewCanvas(int mode) {
+    std::string s = "viewbox 160 64\nclear #3B6FA0\nellipse 24 74 84 36 fill=#5E8FC2\nellipse 144 76 72 32 fill=#2A4F7A\n";
+    // Widgets on the right in both modes: a clock, a calendar and a wide weather card.
+    s += "rect 112 6 20 20 r=5 fill=#E6F5F5F3\ncircle 122 16 6 stroke=#1D1D1F width=1.2\nline 122 16 122 12.4 stroke=#1D1D1F width=1.2\n"
+         "line 122 16 124.6 17.4 stroke=#FF9500 width=1.2\n"
+         "rect 136 6 20 20 r=5 fill=#E6F5F5F3\nrect 140 10 12 2.4 r=1.2 fill=#FF3B30\nrect 140 15 12 1.6 r=0.8 fill=#991D1D1F\n"
+         "rect 140 19 8 1.6 r=0.8 fill=#991D1D1F\n"
+         "rect 112 30 44 20 r=5 fill=#59FFFFFF\ncircle 121 40 4 fill=#FFD60A\nrect 129 36 20 2.4 r=1.2 fill=#FFFFFF\n"
+         "rect 129 41 13 1.8 r=0.9 fill=#CCFFFFFF\n";
+    if (mode == 0) {
+        // Two group cards: a header strip, then rows of icons.
+        for (int g = 0; g < 2; ++g) {
+            const int x = 6 + g * 52;
+            char buf[512]{};
+            std::snprintf(buf, sizeof(buf),
+                          "rect %d 6 46 44 r=6 fill=#B8FFFFFF\nrect %d 10 18 3 r=1.5 fill=#991D1D1F\n"
+                          "rect %d 18 9 9 r=2.4 fill=#%s\nrect %d 18 9 9 r=2.4 fill=#%s\nrect %d 18 9 9 r=2.4 fill=#%s\n"
+                          "rect %d 32 9 9 r=2.4 fill=#%s\nrect %d 32 9 9 r=2.4 fill=#%s\n",
+                          x, x + 5, x + 5, g ? "34C759" : "0A84FF", x + 18, g ? "30B0C7" : "FF9500",
+                          x + 31, g ? "FF2D55" : "AF52DE", x + 5, g ? "FFCC00" : "5856D6", x + 18, g ? "8E8E93" : "FF3B30");
+            s += buf;
+        }
+    } else {
+        // Loose desktop icons in Windows' columns, labels under them.
+        static constexpr const char* kColors[] = {"0A84FF", "FFCC00", "34C759", "FF9500", "AF52DE", "8E8E93"};
+        for (int i = 0; i < 6; ++i) {
+            const int col = i / 3, row = i % 3;
+            const int x = 9 + col * 22, y = 5 + row * 19;
+            char buf[192]{};
+            std::snprintf(buf, sizeof(buf), "rect %d %d 10 10 r=2.6 fill=#%s\nrect %d %d 14 2 r=1 fill=#D9FFFFFF\n",
+                          x + 2, y, kColors[i], x, y + 12);
+            s += buf;
+        }
+    }
     return s;
 }
 
@@ -748,7 +787,16 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
         n.role = a.OptStr("caption");
         return n;
     };
-    auto make_row = [&](std::string id, std::string_view title, std::string_view desc, PulseUiModelNode ctrl) {
+    // Every row starts with its icon: a coloured rounded tile with a white line glyph (settings_icons.h).
+    constexpr int kRowIcon = 30;
+    auto make_icon = [&](const std::string& id, std::string_view key) {
+        auto ic = a.MakeNode(PULSE_UI_MODEL_CANVAS, id + "-ic");
+        ic.options = a.OptOptionsV({SettingsRowIconCanvas(key)});
+        for (auto* f : {&ic.min_width, &ic.max_width, &ic.min_height, &ic.max_height}) *f = a.OptInt(kRowIcon);
+        return ic;
+    };
+    auto make_row = [&](std::string id, std::string_view icon, std::string_view title, std::string_view desc,
+                        PulseUiModelNode ctrl) {
         auto t_node = a.MakeNode(PULSE_UI_MODEL_TEXT, id + "-title");
         t_node.text = a.OptStr(title);
         auto d_node = a.MakeNode(PULSE_UI_MODEL_TEXT, id + "-desc");
@@ -763,8 +811,8 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
         auto row = a.MakeNode(PULSE_UI_MODEL_STACK, id + "-row");
         row.orientation = a.OptStr("horizontal");
         row.alignment = a.OptStr("center");
-        row.gap = a.OptInt(16);
-        row.children = a.MakeChildren({left, ctrl});
+        row.gap = a.OptInt(12);
+        row.children = a.MakeChildren({make_icon(id, icon), left, ctrl});
         return row;
     };
     auto make_switch = [&](std::string_view id, std::string_view state_key) {
@@ -837,38 +885,69 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     master_left.gap = a.OptInt(2);
     master_left.flex = a.OptInt(1);
     master_left.children = a.MakeChildren({master_title, master_desc, status_node});
+    // 桌面模式: 整理 + 小组件, or 只显示小组件 for people who keep their own icon layout. The 查看 menu on the
+    // desktop shows the same choice; either side changes the other.
+    static constexpr const char* kModeNames[] = {"整理 + 小组件", "只显示小组件"};
+    static constexpr const char* kModeDetails[] = {"文件按规则收进分组，小组件放在旁边",
+                                                   "图标保持 Windows 原来的样子，只多出小组件"};
+    std::vector<PulseUiModelNode> mode_cards;
+    for (int i = 0; i < 2; ++i) {
+        const std::string mid = "mode-" + std::to_string(i);
+        auto art = a.MakeNode(PULSE_UI_MODEL_CANVAS, mid + "-art");
+        art.options = a.OptOptionsV({ModePreviewCanvas(i)});
+        art.min_height = a.OptInt(140);   // a half-width card is about 2.5 : 1, the art's own shape
+        art.max_height = a.OptInt(140);
+        auto card = a.MakeNode(PULSE_UI_MODEL_OPTION_CARD, mid);
+        card.kind = a.OptStr("radio");
+        card.state = a.OptStr("view_mode_" + std::to_string(i));
+        card.text = a.OptStr(kModeNames[i]);
+        card.detail = a.OptStr(kModeDetails[i]);
+        card.bordered = a.OptBool(true);
+        card.children = a.MakeChildren({art});
+        mode_cards.push_back(card);
+    }
+    auto mode_grid = a.MakeNode(PULSE_UI_MODEL_GRID, "mode-grid");
+    mode_grid.columns = a.OptInt(2);
+    mode_grid.gap = a.OptInt(10);
+    mode_grid.children = a.MakeChildrenV(mode_cards);
+    mode_grid.visible_binding = a.OptStr("state.enabled");
     auto master_card = make_card("master-card", {
-        make_hstack("master-row", 16, {master_left, make_switch("master-sw", "enabled")}),
+        make_hstack("master-row", 12, {make_icon("master", "desktop"), master_left, make_switch("master-sw", "enabled")}),
+        mode_grid,
     });
 
-    auto ai_row = make_row("ai", "AI 桌面收纳", "按项目和内容把桌面文件归档到文件夹，先给方案，确认后才移动",
+    auto ai_row = make_row("ai", "ai", "AI 桌面收纳", "按项目和内容把桌面文件归档到文件夹，先给方案，确认后才移动",
                            make_action("btn-ai-organize", "开始收纳", "cmd.ai_organize", "icon:sparkle", true));
     ai_row.visible_binding = a.OptStr("state.ai_organize_enabled");
     auto actions_card = make_card("actions-card", {
         ai_row,
-        make_row("checkup", "桌面体检", "找出已装好的安装包、空文件夹和很久没碰的文件；只给建议，不自动删除",
+        make_row("checkup", "checkup", "桌面体检", "找出已装好的安装包、空文件夹和很久没碰的文件；只给建议，不自动删除",
                  make_action("btn-health", "开始体检", "run-health", "icon:shield", false)),
-        make_row("reorganize", "按规则重新整理", "把散落的文件重新收进分组；手动拖进分组的不会被移走",
+        make_row("reorganize", "reorganize", "按规则重新整理", "把散落的文件重新收进分组；手动拖进分组的不会被移走",
                  make_action("btn-reorganize", "重新整理", "reorganize-desktop", "icon:refresh", false)),
     });
 
-    auto make_appearance_row = [&](std::string id, std::string_view title, std::string_view desc, PulseUiModelNode ctrl) {
+    auto make_appearance_row = [&](std::string id, std::string_view icon, std::string_view title, std::string_view desc,
+                                   PulseUiModelNode ctrl) {
         ctrl.min_width = {}; ctrl.max_width = {};
         auto label = a.MakeNode(PULSE_UI_MODEL_TEXT, id + "-title");
         label.text = a.OptStr(title);
         auto hint = make_caption(id + "-desc", desc);
+        auto texts = a.MakeNode(PULSE_UI_MODEL_STACK, id + "-left");
+        texts.gap = a.OptInt(0);
+        texts.flex = a.OptInt(1);
+        texts.children = a.MakeChildren({label, hint});
+        auto head = make_hstack(id + "-head", 12, {make_icon(id, icon), texts});
         auto row = a.MakeNode(PULSE_UI_MODEL_STACK, id + "-row");
         row.gap = a.OptInt(8);
-        row.children = a.MakeChildren({label, hint, ctrl});
+        row.children = a.MakeChildren({head, ctrl});
         return row;
     };
-    auto glass_mode_row = make_appearance_row(
-        "glass-mode", "液态玻璃风格",
+    auto glass_mode_row = make_appearance_row("glass-mode", "glass-mode", "液态玻璃风格",
         "清透水滴通透明亮，标准液态兼顾文字可读，柔雾凝脂适合多彩壁纸，流光棱镜折射更浓烈",
         make_segmented("glass-mode-seg", "glass_mode", {"清透水滴", "标准液态", "柔雾凝脂", "流光棱镜"}, 360));
     glass_mode_row.visible_binding = a.OptStr("state.is_liquid_glass");
-    auto glass_rate_row = make_appearance_row(
-        "glass-rate", "动态折射帧率",
+    auto glass_rate_row = make_appearance_row("glass-rate", "glass-rate", "动态折射帧率",
         "动态壁纸下液态玻璃实时折射刷新率；静态最省电",
         make_segmented("glass-rate-seg", "glass_rate", {"静态", "30Hz", "60Hz"}, 240));
     glass_rate_row.visible_binding = a.OptStr("state.is_liquid_glass");
@@ -885,32 +964,31 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     video_file_left.gap = a.OptInt(2);
     video_file_left.flex = a.OptInt(1);
     video_file_left.children = a.MakeChildren({video_file_title, video_file_status});
-    auto video_file_row = make_hstack("video-file-row", 16, {video_file_left, video_pick_btn});
+    auto video_file_row = make_hstack("video-file-row", 12, {make_icon("video-file", "video"), video_file_left, video_pick_btn});
     video_file_row.visible_binding = a.OptStr("state.is_video_wallpaper");
 
-    auto video_fill_row = make_appearance_row(
-        "video-fill", "填充方式",
+    auto video_fill_row = make_appearance_row("video-fill", "video-fill", "填充方式",
         "铺满裁掉黑边，适应保留完整画面；高于屏幕分辨率的视频会在后台自动优化",
         make_segmented("video-fill-seg", "video_fill", {"铺满", "适应"}, 180));
     video_fill_row.visible_binding = a.OptStr("state.is_video_wallpaper");
 
     auto appearance_card = make_card("appearance-card", {
-        make_appearance_row("wallpaper", "壁纸", "支持系统壁纸，或选一个本地视频作为桌面动态壁纸（始终静音）",
+        make_appearance_row("wallpaper", "wallpaper", "壁纸", "支持系统壁纸，或选一个本地视频作为桌面动态壁纸（始终静音）",
                  make_segmented("wp-kind-seg", "wp_kind", {"系统", "视频"}, 180)),
         video_file_row,
         video_fill_row,
-        make_appearance_row("scene", "场景", "专注只展开「进行中」，其余淡下去；演示隐藏桌面图标和私人磁贴",
+        make_appearance_row("scene", "scene", "场景", "专注只展开「进行中」，其余淡下去；演示隐藏桌面图标和私人磁贴",
                  make_segmented("scene-seg", "scene", {"工作", "专注", "演示"}, 240)),
-        make_appearance_row("material", "窗口效果", "分组、磁贴和菜单一起变；系统关闭透明效果时用纯色",
+        make_appearance_row("material", "material", "窗口效果", "分组、磁贴和菜单一起变；系统关闭透明效果时用纯色",
                  make_segmented("material-seg", "material",
                                 {"跟随 Pulse", "亚克力", "Mica", "Mica Alt", "无", "液态玻璃"}, 460)),
         glass_mode_row,
         glass_rate_row,
-        make_appearance_row("opacity", "不透明度", "0% 时分组和磁贴只剩内容，壁纸完全露出来；菜单始终保留足够的对比度",
+        make_appearance_row("opacity", "opacity", "不透明度", "0% 时分组和磁贴只剩内容，壁纸完全露出来；菜单始终保留足够的对比度",
                  make_slider("opacity-slider", "opacity", {"0%", "20%", "40%", "60%", "80%", "100%"}, 300)),
-        make_appearance_row("iconsize", "图标大小", "分组里和桌面上的图标一起变",
+        make_appearance_row("iconsize", "size", "图标大小", "分组里和桌面上的图标一起变",
                  make_segmented("iconsize-seg", "icon_size", {"小", "中", "大"}, 180)),
-        make_appearance_row("label", "图标文字", "壁纸很亮或很花时，底板更清楚",
+        make_appearance_row("label", "label", "图标文字", "壁纸很亮或很花时，底板更清楚",
                  make_segmented("label-seg", "label_style",
                                 {"阴影", "底板", "悬停显示", ipc::WideToUtf8(l10n::Get(l10n::StringId::DesktopIconLabelNormal))}, 280)),
     });
@@ -929,35 +1007,51 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
         c.state = a.OptStr(state_key);
         return c;
     };
-    auto srow = [&](std::string_view id, std::string_view title, std::string_view desc, std::vector<PulseUiModelNode> controls) {
-        auto r = a.MakeNode(PULSE_UI_MODEL_SETTINGS_ROW, id);
-        r.text = a.OptStr(title);
-        if (!desc.empty()) r.detail = a.OptStr(desc);
-        r.gap = a.OptInt(8);
-        r.children = a.MakeChildrenV(controls);
+    // icon | title over its description | the controls, like make_row.
+    auto srow = [&](std::string_view id, std::string_view icon, std::string_view title, std::string_view desc,
+                    std::vector<PulseUiModelNode> controls) {
+        const std::string sid(id);
+        auto t_node = a.MakeNode(PULSE_UI_MODEL_TEXT, sid + "-title");
+        t_node.text = a.OptStr(title);
+        auto left = a.MakeNode(PULSE_UI_MODEL_STACK, sid + "-left");
+        left.gap = a.OptInt(0);
+        left.flex = a.OptInt(1);
+        if (desc.empty()) {
+            left.children = a.MakeChildren({t_node});
+        } else {
+            auto d_node = make_caption(sid + "-desc", desc);
+            left.children = a.MakeChildren({t_node, d_node});
+        }
+        std::vector<PulseUiModelNode> kids{make_icon(sid, icon), left};
+        kids.insert(kids.end(), controls.begin(), controls.end());
+        auto r = a.MakeNode(PULSE_UI_MODEL_STACK, id);
+        r.orientation = a.OptStr("horizontal");
+        r.alignment = a.OptStr("center");
+        r.gap = a.OptInt(12);
+        r.children = a.MakeChildrenV(kids);
         return r;
     };
 
-    auto dock_pos_row = srow("dock-pos", "停靠位置", "支持底部横排或左侧、右侧竖排停靠",
+    auto dock_pos_row = srow("dock-pos", "dock-pos", "停靠位置", "支持底部横排或左侧、右侧竖排停靠",
                              {make_segmented("dock-pos-seg", "dock_pos", {"底部", "左侧", "右侧"}, 210)});
     dock_pos_row.visible_binding = a.OptStr("state.dock_enabled");
-    auto dock_hide_row = srow("dock-hide", "隐藏方式", "智能隐藏仅在有窗口遮挡程序坞时收回；自动隐藏需鼠标贴边唤出",
+    auto dock_hide_row = srow("dock-hide", "dock-hide", "隐藏方式", "智能隐藏仅在有窗口遮挡程序坞时收回；自动隐藏需鼠标贴边唤出",
                               {make_segmented("dock-hide-seg", "dock_hide", {"常驻", "智能隐藏", "自动隐藏"}, 240)});
     dock_hide_row.visible_binding = a.OptStr("state.dock_enabled");
-    auto dock_minfx_row = srow("dock-minfx", "窗口收回效果", "最小化或还原窗口时的液态玻璃动画",
+    auto dock_minfx_row = srow("dock-minfx", "dock-minfx", "窗口收回效果", "最小化或还原窗口时的液态玻璃动画",
                                {make_segmented("dock-minfx-seg", "dock_minfx", {"神奇", "缩放", "关闭"}, 210)});
     dock_minfx_row.visible_binding = a.OptStr("state.dock_enabled");
-    auto dock_size_row = srow("dock-size", "图标大小", "也可直接拖动程序坞分隔线连续调整尺寸",
+    auto dock_size_row = srow("dock-size", "size", "图标大小", "也可直接拖动程序坞分隔线连续调整尺寸",
                               {make_segmented("dock-size-seg", "dock_size", {"小", "标准", "大"}, 210)});
     dock_size_row.visible_binding = a.OptStr("state.dock_enabled");
-    auto dock_mag_row = srow("dock-mag", "鼠标悬停放大", "鼠标滑过图标时呈流线波形放大",
+    auto dock_mag_row = srow("dock-mag", "dock-mag", "鼠标悬停放大", "鼠标滑过图标时呈流线波形放大",
                              {make_switch("dock-mag-sw", "dock_mag")});
     dock_mag_row.visible_binding = a.OptStr("state.dock_enabled");
-    auto dock_sys_row = srow("dock-sys", "系统状态与托盘区", "右侧统一显示托盘图标、输入法、Wi-Fi、音量、蓝牙、电池与时间面板",
+    auto dock_sys_row = srow("dock-sys", "dock-sys", "系统状态与托盘区", "右侧统一显示托盘图标、输入法、Wi-Fi、音量、蓝牙、电池与时间面板",
                              {make_switch("dock-sys-sw", "dock_sys")});
     dock_sys_row.visible_binding = a.OptStr("state.dock_enabled");
     auto dock_card = make_card("dock-card", {
-        srow("dock-en", "显示液态玻璃程序坞", "在桌面边缘停靠常用应用、运行窗口、回收站与系统状态区",
+        srow("dock-en", "dock", "显示液态玻璃程序坞", "在桌面边缘停靠常用应用、运行窗口、回收站与系统状态区",
              {make_switch("dock-en-sw", "dock_enabled")}),
         dock_pos_row,
         dock_hide_row,
@@ -968,26 +1062,24 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     });
 
     auto organize_card = make_card("organize-card", {
-        srow("organize", "按规则收进分组", "进行中、安装包、截图与图片、未归类；手动拖进去的不受规则影响",
-             {make_switch("organize-sw", "organize")}),
-        srow("tiles", "磁贴", "照片、下载、最近使用、回收站、磁盘和 Pulse",
+        srow("tiles", "tiles", "显示小组件", "天气、时钟、日历、照片等；程序坞上的小组件按钮也能一键显示或隐藏",
              {make_switch("tiles-sw", "tiles")}),
-        srow("live", "动态磁贴", "照片轮播，下载和最近使用实时更新",
+        srow("live", "live", "动态小组件", "照片轮播，下载和最近使用实时更新",
              {make_switch("live-sw", "live_tiles")}),
-        srow("sleep", "全屏或节能时暂停", "玩游戏、看视频或电池节能时，动态磁贴与动态折射自动暂停",
+        srow("sleep", "sleep", "全屏或节能时暂停", "玩游戏、看视频或电池节能时，动态小组件与动态折射自动暂停",
              {make_switch("sleep-sw", "auto_sleep")}),
-        srow("dblhide", "双击空白处隐藏图标", "只留壁纸和磁贴，再双击恢复",
+        srow("dblhide", "dblhide", "双击空白处隐藏图标", "只留壁纸和磁贴，再双击恢复",
              {make_switch("dblhide-sw", "dbl_hide")}),
-        srow("health", "桌面体检提示", "发现可以清理的文件时在桌面上提示一次",
+        srow("health", "health", "桌面体检提示", "发现可以清理的文件时在桌面上提示一次",
              {make_switch("health-sw", "health_check")}),
     });
 
     auto pulse_card = make_card("pulse-card", {
-        srow("menu", "右键使用 Pulse 菜单", "系统和其他软件的菜单项照常出现，标「系统」；关掉后是 Windows 原生菜单",
+        srow("menu", "menu", "右键使用 Pulse 菜单", "系统和其他软件的菜单项照常出现，标「系统」；关掉后是 Windows 原生菜单",
              {make_switch("menu-sw", "hybrid_menu")}),
-        srow("search", "在桌面上打字直接搜索", "打开 Pulse 快速搜索并带上已输入的文字；Ctrl+F 也可以",
+        srow("search", "search", "在桌面上打字直接搜索", "打开 Pulse 快速搜索并带上已输入的文字；Ctrl+F 也可以",
              {make_switch("search-sw", "type_search")}),
-        srow("tray", "桌面上的暂存区", "和 Pulse 的暂存区是同一份，桌面和 Pulse 窗口之间拖进拖出",
+        srow("tray", "tray", "桌面上的暂存区", "和 Pulse 的暂存区是同一份，桌面和 Pulse 窗口之间拖进拖出",
              {make_switch("tray-sw", "sync_tray")}),
     });
 
@@ -1053,14 +1145,14 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     swatch_row.alignment = a.OptStr("center");
     swatch_row.gap = a.OptInt(8);
     swatch_row.children = a.MakeChildrenV(swatches);
-    auto tint_row = make_appearance_row("w-tint", "着色颜色", "“取自壁纸”会在换壁纸后跟着变", swatch_row);
+    auto tint_row = make_appearance_row("w-tint", "w-tint", "着色颜色", "“取自壁纸”会在换壁纸后跟着变", swatch_row);
     tint_row.visible_binding = a.OptStr("state.w_is_tint");
     auto widget_look_card = make_card("widget-look-card", {
-        make_appearance_row("w-scheme", "小组件配色",
+        make_appearance_row("w-scheme", "w-scheme", "小组件配色",
                             "所有小组件一起变；材质跟着上面的“窗口效果”。自动：按背后壁纸的明暗选深色或浅色字", scheme_grid),
         tint_row,
-        srow("w-sky", "天气用天空的颜色", "晴天蓝、阴天灰、夜里深蓝；关掉后和其他小组件同色", {make_switch("w-sky-sw", "w_sky")}),
-        srow("w-rotate", "叠放自动轮换", "把小组件叠在一起后，没在看时自动轮流切换", {make_switch("w-rotate-sw", "w_rotate")}),
+        srow("w-sky", "w-sky", "天气用天空的颜色", "晴天蓝、阴天灰、夜里深蓝；关掉后和其他小组件同色", {make_switch("w-sky-sw", "w_sky")}),
+        srow("w-rotate", "w-rotate", "叠放自动轮换", "把小组件叠在一起后，没在看时自动轮流切换", {make_switch("w-rotate-sw", "w_rotate")}),
     });
 
     std::vector<PulseUiModelNode> per_widget{
@@ -1074,9 +1166,9 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
         city.placeholder = a.OptStr("例如 北京、上海、Hangzhou");
         city.min_width = a.OptInt(220);
         city.max_width = a.OptInt(220);
-        per_widget.push_back(srow("weather", "城市", "天气小组件显示这个城市；数据来自 Open-Meteo，不需要账号", {city}));
-        per_widget.push_back(srow("w-unit", "温度单位", "", {make_segmented("w-unit-seg", "w_unit", {"摄氏 °C", "华氏 °F"}, 180)}));
-        per_widget.push_back(srow("w-refresh", "更新间隔", "全屏或节能时暂停更新",
+        per_widget.push_back(srow("weather", "place", "城市", "天气小组件显示这个城市；数据来自 Open-Meteo，不需要账号", {city}));
+        per_widget.push_back(srow("w-unit", "temp", "温度单位", "", {make_segmented("w-unit-seg", "w_unit", {"摄氏 °C", "华氏 °F"}, 180)}));
+        per_widget.push_back(srow("w-refresh", "refresh", "更新间隔", "全屏或节能时暂停更新",
                                   {make_segmented("w-refresh-seg", "w_refresh", {"15 分钟", "30 分钟", "1 小时"}, 240)}));
         break;
     }
@@ -1126,19 +1218,19 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
         chip_row.alignment = a.OptStr("center");
         chip_row.gap = a.OptInt(8);
         chip_row.children = a.MakeChildrenV(chips);
-        per_widget.push_back(srow("w-h24", "24 小时制", "关掉后显示“下午 3:05”", {make_switch("w-h24-sw", "w_h24")}));
-        per_widget.push_back(srow("w-seconds", "显示秒针", "表盘上的橙色秒针；关掉后表盘每分钟才重画一次，更省电",
+        per_widget.push_back(srow("w-h24", "clock", "24 小时制", "关掉后显示“下午 3:05”", {make_switch("w-h24-sw", "w_h24")}));
+        per_widget.push_back(srow("w-seconds", "stopwatch", "显示秒针", "表盘上的橙色秒针；关掉后表盘每分钟才重画一次，更省电",
                                   {make_switch("w-seconds-sw", "w_seconds")}));
-        per_widget.push_back(srow("w-night", "夜里表盘变深", "当地 18:00 到 6:00 表盘换成深色，看世界时钟时一眼知道那边是晚上",
+        per_widget.push_back(srow("w-night", "moon", "夜里表盘变深", "当地 18:00 到 6:00 表盘换成深色，看世界时钟时一眼知道那边是晚上",
                                   {make_switch("w-night-sw", "w_night")}));
-        per_widget.push_back(make_appearance_row("w-cities", "世界时钟城市",
+        per_widget.push_back(make_appearance_row("w-cities", "globe", "世界时钟城市",
                                                  "4×1 和 4×2 的时钟显示这几个城市，最多 4 个，按这个顺序排", chip_row));
         break;
     }
     case 2:
-        per_widget.push_back(srow("w-lunar", "显示农历", "日期下面显示农历和节日", {make_switch("w-lunar-sw", "w_lunar")}));
-        per_widget.push_back(srow("w-weekstart", "每周第一天", "", {make_segmented("w-weekstart-seg", "w_weekstart", {"周一", "周日"}, 160)}));
-        per_widget.push_back(srow("w-weekno", "显示周数", "在日期旁边显示“第 48 周”", {make_switch("w-weekno-sw", "w_weekno")}));
+        per_widget.push_back(srow("w-lunar", "calendar", "显示农历", "日期下面显示农历和节日", {make_switch("w-lunar-sw", "w_lunar")}));
+        per_widget.push_back(srow("w-weekstart", "weekstart", "每周第一天", "", {make_segmented("w-weekstart-seg", "w_weekstart", {"周一", "周日"}, 160)}));
+        per_widget.push_back(srow("w-weekno", "weekno", "显示周数", "在日期旁边显示“第 48 周”", {make_switch("w-weekno-sw", "w_weekno")}));
         break;
     case 3: {
         // One line of checks at their label width (the host gives unsized children 160 DIP columns).
@@ -1149,14 +1241,14 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
             return c;
         };
         // Five checks: a settingsRow takes at most 4 inline controls, so they sit on their own line.
-        per_widget.push_back(make_appearance_row("w-sys", "显示哪些项目", "2×2 最多放 4 项，按这个顺序取",
+        per_widget.push_back(make_appearance_row("w-sys", "chip", "显示哪些项目", "2×2 最多放 4 项，按这个顺序取",
                                   make_hstack("w-sys-checks", 12,
                                   {sized_check("w-sys-cpu", "CPU", "w_sys_cpu"), sized_check("w-sys-mem", "内存", "w_sys_mem"),
                                    sized_check("w-sys-vram", "显存", "w_sys_vram"), sized_check("w-sys-disk", "C 盘", "w_sys_disk"),
                                    sized_check("w-sys-net", "网络", "w_sys_net")})));
-        per_widget.push_back(srow("w-sysrate", "刷新间隔", "间隔越长越省电",
+        per_widget.push_back(srow("w-sysrate", "refresh", "刷新间隔", "间隔越长越省电",
                                   {make_segmented("w-sysrate-seg", "w_sysrate", {"1 秒", "2 秒", "5 秒"}, 180)}));
-        per_widget.push_back(srow("w-syswarn", "占用高时变色", "超过 80% 变橙，超过 90% 变红；关掉后一直是单色",
+        per_widget.push_back(srow("w-syswarn", "warn", "占用高时变色", "超过 80% 变橙，超过 90% 变红；关掉后一直是单色",
                                   {make_switch("w-syswarn-sw", "w_syswarn")}));
         break;
     }
@@ -1164,30 +1256,30 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
         auto pick_btn = make_button("w-photo-pick", "更改文件夹…", "pick-photo-folder");
         pick_btn.min_width = a.OptInt(118);
         pick_btn.max_width = a.OptInt(118);
-        per_widget.push_back(srow("w-photo-dir", "照片文件夹", "不指定时默认读取系统「图片」文件夹", {pick_btn}));
-        per_widget.push_back(srow("w-photo-int", "换图间隔", "选「手动」时只在点击翻页后切换",
+        per_widget.push_back(srow("w-photo-dir", "folder", "照片文件夹", "不指定时默认读取系统「图片」文件夹", {pick_btn}));
+        per_widget.push_back(srow("w-photo-int", "hourglass", "换图间隔", "选「手动」时只在点击翻页后切换",
                                   {make_slider("w-photo-int-slider", "w_photo_int", {"手动", "10秒", "30秒", "1分", "5分", "30分"}, 320)}));
-        per_widget.push_back(srow("w-photo-shuf", "随机顺序", "关掉后按文件顺序依次轮播", {make_switch("w-photo-shuf-sw", "w_photo_shuf")}));
-        per_widget.push_back(srow("w-photo-cap", "显示地点和日期", "在照片底部显示日期和柔和渐变底", {make_switch("w-photo-cap-sw", "w_photo_cap")}));
+        per_widget.push_back(srow("w-photo-shuf", "shuffle", "随机顺序", "关掉后按文件顺序依次轮播", {make_switch("w-photo-shuf-sw", "w_photo_shuf")}));
+        per_widget.push_back(srow("w-photo-cap", "caption", "显示地点和日期", "在照片底部显示日期和柔和渐变底", {make_switch("w-photo-cap-sw", "w_photo_cap")}));
         break;
     }
     case 5:
-        per_widget.push_back(srow("w-focus", "专注时长", "下一轮开始时生效",
+        per_widget.push_back(srow("w-focus", "focus", "专注时长", "下一轮开始时生效",
                                   {make_slider("w-focus-slider", "w_focus", {"15", "20", "25", "30", "45", "60 分钟"}, 300)}));
-        per_widget.push_back(srow("w-short", "短休息", "", {make_segmented("w-short-seg", "w_short", {"5 分钟", "10 分钟"}, 180)}));
-        per_widget.push_back(srow("w-long", "长休息", "每完成 4 个专注后",
+        per_widget.push_back(srow("w-short", "cup", "短休息", "", {make_segmented("w-short-seg", "w_short", {"5 分钟", "10 分钟"}, 180)}));
+        per_widget.push_back(srow("w-long", "sofa", "长休息", "每完成 4 个专注后",
                                   {make_segmented("w-long-seg", "w_long", {"15 分钟", "20 分钟", "30 分钟"}, 240)}));
-        per_widget.push_back(srow("w-chime", "结束时提示音", "用系统的提示声音", {make_switch("w-chime-sw", "w_chime")}));
+        per_widget.push_back(srow("w-chime", "sound", "结束时提示音", "用系统的提示声音", {make_switch("w-chime-sw", "w_chime")}));
         break;
     case 6:
-        per_widget.push_back(srow("w-bt", "显示蓝牙设备", "耳机、鼠标、键盘等会报告电量的设备", {make_switch("w-bt-sw", "w_bt")}));
-        per_widget.push_back(srow("w-low", "低电量提醒线", "低于这个电量时圆环变红",
+        per_widget.push_back(srow("w-bt", "bluetooth", "显示蓝牙设备", "耳机、鼠标、键盘等会报告电量的设备", {make_switch("w-bt-sw", "w_bt")}));
+        per_widget.push_back(srow("w-low", "battery", "低电量提醒线", "低于这个电量时圆环变红",
                                   {make_slider("w-low-slider", "w_low", {"10%", "15%", "20%", "30%"}, 240)}));
         break;
     default:
-        per_widget.push_back(srow("w-cover", "用封面颜色做背景", "把专辑封面模糊后铺在底下；关掉后和其他小组件同色",
+        per_widget.push_back(srow("w-cover", "album", "用封面颜色做背景", "把专辑封面模糊后铺在底下；关掉后和其他小组件同色",
                                   {make_switch("w-cover-sw", "w_cover")}));
-        per_widget.push_back(srow("w-source", "显示播放来源", "例如“网易云音乐”“Edge”", {make_switch("w-source-sw", "w_source")}));
+        per_widget.push_back(srow("w-source", "music", "显示播放来源", "例如“网易云音乐”“Edge”", {make_switch("w-source-sw", "w_source")}));
         break;
     }
     auto widgets_card = a.MakeNode(PULSE_UI_MODEL_GROUP, "widgets-card");
@@ -1195,17 +1287,21 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     widgets_card.gap = a.OptInt(14);
     widgets_card.children = a.MakeChildrenV(per_widget);
 
+    // 只显示小组件 has no groups to tidy: the 整理 actions go with it.
+    auto sec_actions = make_section("sec-actions", "整理");
+    sec_actions.visible_binding = a.OptStr("state.organize");
+    actions_card.visible_binding = a.OptStr("state.organize");
     auto content = a.MakeNode(PULSE_UI_MODEL_STACK, "settings-content");
     content.gap = a.OptInt(8);
     content.children = a.MakeChildren({
         master_card,
-        make_section("sec-actions", "整理"),
+        sec_actions,
         actions_card,
         make_section("sec-dock", "程序坞"),
         dock_card,
         make_section("sec-appearance", "外观与场景"),
         appearance_card,
-        make_section("sec-organize", "分组与磁贴"),
+        make_section("sec-organize", "桌面与小组件"),
         organize_card,
         make_section("sec-widgets", "小组件"),
         widget_look_card,
@@ -1221,6 +1317,8 @@ void DesktopSettingsPage::BuildTree(ModelArena& a, PulseUiModelTree& tree) {
     a.AddState("ai_organize_enabled", ai_organize_enabled_ ? "true" : "false");
     a.AddState("hybrid_menu", "true");
     a.AddState("organize", "true");
+    a.AddState("view_mode_0", "true");
+    a.AddState("view_mode_1", "false");
     a.AddState("tiles", "true");
     a.AddState("live_tiles", "true");
     a.AddState("type_search", "true");
@@ -1491,6 +1589,8 @@ void DesktopSettingsPage::PushStatesToUi() {
         {Sv("enabled"), Sv(prefs_.enabled ? "true" : "false")},
         {Sv("hybrid_menu"), Sv(prefs_.hybrid_menu ? "true" : "false")},
         {Sv("organize"), Sv(prefs_.organize ? "true" : "false")},
+        {Sv("view_mode_0"), Sv(prefs_.organize ? "true" : "false")},
+        {Sv("view_mode_1"), Sv(prefs_.organize ? "false" : "true")},
         {Sv("tiles"), Sv(prefs_.tiles ? "true" : "false")},
         {Sv("live_tiles"), Sv(prefs_.live_tiles ? "true" : "false")},
         {Sv("type_search"), Sv(prefs_.type_to_search ? "true" : "false")},
@@ -1638,6 +1738,7 @@ void PULSE_CALL DesktopSettingsPage::OnUiStateChanged(
 void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
     DesktopPrefs next = prefs_;
     bool changed = false;
+    std::string host_command;   // 整理 / 小组件 live on the desktop: the host is told, then reports back
 
     bool sync_sliders = false;
     bool rebuild = false;
@@ -1675,9 +1776,22 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
             changed = true;
         } else if (k == "organize" && (v == "true" || v == "false")) {
             next.organize = (v == "true");
+            host_command = next.organize ? "desktop-organize-on" : "desktop-organize-off";
+            sync_sliders = true;
+            changed = true;
+        } else if ((k == "view_mode_0" || k == "view_mode_1") && (v == "true" || v == "false")) {
+            // A radio pair: choosing one card (true) picks its mode; the host echo of the other is ignored.
+            const bool organize = (k == "view_mode_0") == (v == "true");
+            if (v == "true") {
+                next.organize = organize;
+                next.tiles = true;
+                host_command = organize ? "desktop-view-organize" : "desktop-view-widgets";
+            }
+            sync_sliders = true;   // the other card and the 整理 sections follow
             changed = true;
         } else if (k == "tiles" && (v == "true" || v == "false")) {
             next.tiles = (v == "true");
+            host_command = next.tiles ? "desktop-tiles-on" : "desktop-tiles-off";
             changed = true;
         } else if (k == "live_tiles" && (v == "true" || v == "false")) {
             next.live_tiles = (v == "true");
@@ -1806,7 +1920,10 @@ void DesktopSettingsPage::HandleStateBatch(const PulseUiStateBatch& batch) {
         if (on_changed_ && (!prefs_.glass_preview || now-last_glass_preview_ms_>=16)) {
             last_glass_preview_ms_=now;on_changed_(prefs_, enabled_toggled);
         }
+    } else if (sync_sliders && !host_command.empty()) {
+        PushStatesToUi();   // a re-click on the chosen mode card: keep the pair consistent
     }
+    if (!host_command.empty() && on_command_) on_command_(host_command);
 }
 
 void PULSE_CALL DesktopSettingsPage::OnUiCommandClicked(

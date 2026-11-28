@@ -5588,6 +5588,16 @@ DesktopGroupDetachNoSpace	IDS_DESKTOP_GROUP_DETACH_NO_SPACE	6911	没有足够空
 DesktopGroupTabsFull	IDS_DESKTOP_GROUP_TABS_FULL	6912	标签组最多支持 8 个规则组	A tab group supports up to 8 groups	分頁群組最多支援 8 個規則群組
 DesktopGroupMove	IDS_DESKTOP_GROUP_MOVE	6913	移动分组	Move group	移動群組
 DesktopGroupResize	IDS_DESKTOP_GROUP_RESIZE	6914	调整分组大小	Resize group	調整群組大小
+DesktopGroupNew	IDS_DESKTOP_GROUP_NEW	7998	新建分组	New group	新增群組
+DesktopGroupNewWithItems	IDS_DESKTOP_GROUP_NEW_WITH_ITEMS	7999	新建分组并移入	New group with selection	新增群組並移入
+DesktopGroupRename	IDS_DESKTOP_GROUP_RENAME	8000	重命名分组	Rename group	重新命名群組
+DesktopGroupAddItems	IDS_DESKTOP_GROUP_ADD_ITEMS	8001	移入分组	Move into group	移入群組
+DesktopGroupReorderItems	IDS_DESKTOP_GROUP_REORDER_ITEMS	8002	移动分组内文件	Reorder files in group	移動群組內檔案
+DesktopGroupSwitchedManual	IDS_DESKTOP_GROUP_SWITCHED_MANUAL	8003	已改为手动排列	Switched to manual order	已改為手動排列
+DesktopViewSwitchedOrganize	IDS_DESKTOP_VIEW_SWITCHED_ORGANIZE	8004	已切换到整理 + 小组件	Switched to Organize + widgets	
+DesktopViewSwitchedWidgets	IDS_DESKTOP_VIEW_SWITCHED_WIDGETS	8005	已切换到只显示小组件	Switched to Widgets only	
+DesktopWidgetsShown	IDS_DESKTOP_WIDGETS_SHOWN	8006	已显示桌面小组件	Desktop widgets shown	
+DesktopWidgetsHidden	IDS_DESKTOP_WIDGETS_HIDDEN	8007	已隐藏桌面小组件	Desktop widgets hidden	
 DesktopIconLabelNormal	IDS_DESKTOP_ICON_LABEL_NORMAL	6915	正常	Normal	正常
 TreeTransferCopyAllTitle	IDS_TREE_TRANSFER_COPY_ALL_TITLE	6916	确认复制到所有选中的文件夹	Confirm copying to all selected folders	確認複製到所有選取的資料夾
 TreeTransferCopyAllMessage	IDS_TREE_TRANSFER_COPY_ALL_MESSAGE	6917	将所选内容分别复制到以下 {n} 个文件夹。	Copy the selected contents into each of these {n} folders.	將所選內容分別複製到以下 {n} 個資料夾。

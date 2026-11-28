@@ -1,6 +1,7 @@
 #include "host/model/group_tabs.h"
 #include "host/model/drag_damage.h"
 #include <cstdio>
+#include <unordered_map>
 using namespace pulse::desktop::model;
 int main() {
     int failures=0;
@@ -79,5 +80,71 @@ int main() {
     state.groups[0].x+=16;state.groups[0].y+=24;
     check(UpdateMovedGroupViewOrigins(state.groups,cached)&&GroupItemRect(cached[0],0).x==cell_before.x+16&&GroupItemRect(cached[0],0).y==cell_before.y+24,
         "origin-only drag cache translates shared content geometry");
+
+    // Files dragged onto a card land between icons (任意拖动): slot, caret, and the card's order after.
+    {
+        DesktopModelState drop;
+        drop.settings.organize_enabled=true;
+        DesktopGroup a;a.id="a";a.x=24;a.y=32;a.cols=3;a.visible_rows=2;a.sort_by=GroupSortBy::Name;a.sort_ascending=true;
+        DesktopGroup b=a;b.id="b";b.x=424;
+        drop.groups={a,b};
+        for(int i=0;i<8;++i){DesktopItem it;it.name=L"F"+std::to_wstring(i);it.path=L"C:\\d\\"+it.name;it.extension=L".txt";
+            it.pinned_group_id=i<7?"a":"b";drop.items.push_back(it);}
+        auto dv=ComputeGroupViews(drop,0);
+        const auto& va=dv[0];
+        check(va.visible_item_indices.size()==6&&va.page_count==2,"drop fixture pages a seven-file card");
+        const auto c0=GroupItemRect(va,0),c1=GroupItemRect(va,1),c4=GroupItemRect(va,4);
+        auto s0=ComputeGroupDropSlot(va,c0.x+4,c0.y+10);
+        check(s0&&s0->insert_index==0&&s0->caret.x==c0.x-1&&s0->caret.w==3,"left half of the first icon inserts before it");
+        auto s1=ComputeGroupDropSlot(va,c0.x+c0.w-4,c0.y+10);
+        check(s1&&s1->insert_index==1&&s1->caret.x==c1.x-1,"right half of an icon inserts after it");
+        auto s4=ComputeGroupDropSlot(va,c4.x+c4.w/2+2,c4.y+c4.h/2);
+        check(s4&&s4->insert_index==5&&s4->caret.y>=c4.y&&s4->caret.bottom()<=c4.bottom(),"second row caret stays in its row");
+        auto end_row=ComputeGroupDropSlot(va,va.content_rect.right()-1,c0.y+10);
+        check(end_row&&end_row->insert_index==3&&end_row->caret.x==c0.x+3*va.cell_width-1&&end_row->caret.y<c4.y,
+              "right edge of a full row lands at its end with the caret on that row");
+        check(!ComputeGroupDropSlot(va,va.frame.x+4,va.frame.y+8),"the header has no slot (the card takes the files at its end)");
+        auto pages=std::unordered_map<std::string,int>{{"a",1}};
+        auto dv2=ComputeGroupViews(drop,0,&pages);
+        const auto p0=GroupItemRect(dv2[0],0);
+        auto sp=ComputeGroupDropSlot(dv2[0],p0.x+p0.w-2,p0.y+4);
+        check(sp&&sp->insert_index==7,"a slot on page two counts the files on page one");
+        auto below=ComputeGroupDropSlot(dv2[0],dv2[0].content_rect.right()-2,dv2[0].content_rect.bottom()-2);
+        check(below&&below->insert_index==7&&below->caret.x==p0.right()-1,"below the last icon lands right after it");
+        DesktopModelState empty_state=drop;for(auto& it:empty_state.items)it.pinned_group_id="a";
+        auto ev=ComputeGroupViews(empty_state,0);
+        auto se=ComputeGroupDropSlot(ev[1],ev[1].content_rect.x+8,ev[1].content_rect.y+8);
+        check(se&&se->insert_index==0&&se->caret.empty(),"an empty card takes files without a caret");
+        drop.groups[0].view_mode=GroupViewMode::Details;
+        auto dd=ComputeGroupViews(drop,0);
+        const auto r1=GroupItemRect(dd[0],1);
+        auto sd=ComputeGroupDropSlot(dd[0],r1.x+20,r1.y+r1.h-3);
+        check(sd&&sd->insert_index==2&&sd->caret.h==3&&sd->caret.y==r1.bottom()-1,"details view inserts between rows");
+
+        const std::vector<std::wstring> order{L"A",L"B",L"C",L"D",L"E"};
+        check(ComposeManualOrder(order,std::vector<std::wstring>{L"X"},2)==std::vector<std::wstring>{L"A",L"B",L"X",L"C",L"D",L"E"},
+              "a file from another card joins at the slot");
+        check(ComposeManualOrder(order,std::vector<std::wstring>{L"a"},4)==std::vector<std::wstring>{L"B",L"C",L"D",L"A",L"E"},
+              "moving a member later accounts for its old place (paths compare case-insensitively)");
+        check(ComposeManualOrder(order,std::vector<std::wstring>{L"E",L"B"},0)==std::vector<std::wstring>{L"B",L"E",L"A",L"C",L"D"},
+              "several members keep the card's relative order");
+        check(ComposeManualOrder(order,std::vector<std::wstring>{L"C",L"Y"},99)==std::vector<std::wstring>{L"A",L"B",L"D",L"E",L"C",L"Y"},
+              "an index past the end appends");
+        std::vector<DesktopGroup> gs=drop.groups;gs[1].sort_by=GroupSortBy::Manual;gs[1].manual_order={L"C:\\d\\F7",L"C:\\d\\F1"};
+        check(ApplyGroupManualOrder(gs,"a",{L"C:\\d\\F1",L"C:\\d\\F0"})&&gs[0].sort_by==GroupSortBy::Manual&&
+              gs[0].manual_order.size()==2&&gs[1].manual_order==std::vector<std::wstring>{L"C:\\d\\F7"},
+              "the card switches to manual order and the path leaves the other card's order");
+        check(!ApplyGroupManualOrder(gs,"a",{L"C:\\d\\F0"}),"an already manual card reports no switch");
+        drop.groups[0].view_mode=GroupViewMode::Icons;
+        drop.groups[0].sort_by=GroupSortBy::Manual;
+        drop.groups[0].manual_order=ComposeManualOrder({},std::vector<std::wstring>{L"C:\\d\\F5",L"C:\\d\\F2"},0);
+        auto mv=ComputeGroupViews(drop,0);
+        check(drop.items[mv[0].visible_item_indices[0]].name==L"F5"&&drop.items[mv[0].visible_item_indices[1]].name==L"F2",
+              "the composed order is what the card shows");
+
+        std::vector<DesktopGroup> named(2);named[0].title=L"新建分组";named[1].title=L"新建分组 2";
+        check(NextNewGroupTitle({},L"新建分组")==L"新建分组"&&NextNewGroupTitle(named,L"新建分组")==L"新建分组 3",
+              "new groups get the first free title");
+    }
     return failures?1:0;
 }

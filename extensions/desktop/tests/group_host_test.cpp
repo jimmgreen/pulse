@@ -353,6 +353,114 @@ struct DesktopGroupHostTestPeer {
         check(host.group_springs_.Empty() && host.interaction_.group_anim_positions.empty(),
               "group spring snap-back settles cleanly to committed slot");
 
+        // 查看: 整理 + 小组件 / 只显示小组件, and 显示小组件 on its own.
+        Prepare(host);
+        host.ExecuteContextMenuCommand("view-mode-widgets", {});
+        check(!host.state_.settings.organize_enabled && host.state_.settings.tiles_enabled && !host.test_saved_model_.empty(),
+              "只显示小组件 turns organizing off, shows widgets and persists");
+        host.ExecuteContextMenuCommand("view-mode-organize", {});
+        check(host.state_.settings.organize_enabled && host.state_.settings.tiles_enabled, "整理 + 小组件 brings groups back");
+        host.ExecuteContextMenuCommand("toggle-tiles", {});
+        check(host.state_.settings.organize_enabled && !host.state_.settings.tiles_enabled,
+              "显示小组件 toggles widgets without touching organizing");
+
+        // 新建分组: a free spot, the next free name, one undo; selected files move in; beside a group's 「+」.
+        Prepare(host);
+        const std::wstring new_title = l10n::Get(l10n::StringId::DesktopGroupNew);
+        const std::string g1 = host.CreateNewGroupNear(1000, 600);
+        const auto new_group = [&](const std::string& id) -> const model::DesktopGroup* {
+            for (const auto& g : host.state_.groups) if (g.id == id) return &g;
+            return nullptr;
+        };
+        const auto overlaps_other = [&](const std::string& id) {
+            const auto* g = new_group(id);
+            if (!g) return true;
+            const auto f = model::ComputeGroupFrame(*g);
+            for (const auto& o : host.state_.groups)
+                if (o.id != id && model::ComputeGroupFrame(o).intersects(f)) return true;
+            return false;
+        };
+        check(host.state_.groups.size() == 4 && new_group(g1) && new_group(g1)->title == new_title &&
+              !overlaps_other(g1) && host.undo_.UndoDepth() == 1 && !host.test_saved_model_.empty(),
+              "新建分组 adds one titled, non-overlapping group with one undo");
+        const std::string g2 = host.CreateNewGroupNear(1000, 600);
+        check(new_group(g2) && new_group(g2)->title == new_title + L" 2" && g2 != g1 && !overlaps_other(g2),
+              "a second new group takes the next free name and its own spot");
+        const std::wstring moved = host.state_.items[0].path;
+        const std::string g3 = host.CreateNewGroupNear(1000, 600, {moved});
+        check(host.state_.items[0].pinned_group_id == g3 && !host.state_.items[0].force_loose,
+              "新建分组并移入 moves the selected file into the new group");
+        {
+            const auto keep = host.state_;
+            // A fresh desktop with room right of the middle card (the test work area is 1280 wide).
+            Prepare(host);
+            host.state_.groups[2].y = 460; host.RefreshGroupViews();
+            const auto f1 = model::ComputeGroupFrame(host.state_.groups[1]);
+            const std::string g4 = host.CreateNewGroupNear(0, 0, {}, "group-1");
+            const auto* n4 = new_group(g4);
+            if (n4) std::printf("beside: card right=%d y=%d, new x=%d y=%d\n", f1.right(), f1.y, n4->x, n4->y);
+            check(n4 && n4->x >= f1.right() && n4->x <= f1.right() + 2 * model::kSnapGridPx &&
+                  n4->y == host.state_.groups[1].y && !overlaps_other(g4),
+                  "the header 「+」 places the new group right beside its card");
+            host.state_ = keep; host.RefreshGroupViews();
+        }
+        host.state_.settings.organize_enabled = false;
+        const std::string g5 = host.CreateNewGroupNear(1000, 600);
+        check(new_group(g5) && host.state_.settings.organize_enabled, "a new group switches 整理 back on so it is seen");
+        check(host.undo_.Undo(host.state_) && !new_group(g5), "undo removes the new group");
+
+        // 任意拖动: the slot under the pointer, an indexed drop, and reordering inside a group.
+        Prepare(host);
+        {
+            const auto& view = host.group_views_[0];
+            const auto r4 = model::GroupItemRect(view, 4);
+            host.drop_insert_index_.reset(); host.interaction_.drop_insert_caret = {};
+            host.UpdateItemDropSlot(0, r4.x + 2, r4.y + r4.h / 2);
+            check(host.drop_insert_index_ && *host.drop_insert_index_ == 4 && !host.interaction_.drop_insert_caret.empty(),
+                  "pointer at an icon's left edge targets the slot before it, with a caret");
+        }
+        const auto member_paths = [&](size_t gi) {
+            std::vector<std::wstring> out;
+            for (const size_t idx : host.group_views_[gi].member_item_indices) out.push_back(host.state_.items[idx].path);
+            return out;
+        };
+        const auto before_drop = model::SerializeModelStateJson(host.state_);
+        const std::wstring foreign = L"C:\\fixture\\1-0.txt";
+        host.DropItemsIntoGroup("group-0", {foreign}, size_t{2});
+        auto order = member_paths(0);
+        check(order.size() == 8 && order[2] == foreign && host.state_.groups[0].sort_by == model::GroupSortBy::Manual &&
+              host.undo_.UndoDepth() == 1, "a file dropped between icons lands exactly there and the group turns manual");
+        host.DropItemsIntoGroup("group-0", {L"C:\\fixture\\0-6.txt"}, size_t{0});
+        order = member_paths(0);
+        check(order.size() == 8 && order[0] == L"C:\\fixture\\0-6.txt" && order[3] == foreign,
+              "dragging inside the group reorders it");
+        host.DropItemsIntoGroup("group-0", {L"C:\\fixture\\2-0.txt"}, std::nullopt);
+        order = member_paths(0);
+        check(order.size() == 9 && order.back() == L"C:\\fixture\\2-0.txt", "a plain drop on a manual group appends");
+        check(host.undo_.Undo(host.state_) && host.undo_.Undo(host.state_) && host.undo_.Undo(host.state_) &&
+              model::SerializeModelStateJson(host.state_) == before_drop, "each drop undoes on its own back to the start");
+
+        // Holding a dragged file on 下一页 turns the page; leaving or ending the drag disarms it.
+        Prepare(host);
+        host.state_.groups[0].visible_rows = 1; host.RefreshGroupViews();
+        const int pages = host.group_views_[0].page_count;
+        host.interaction_.dragging_items = true;
+        host.drag_flip_group_ = "group-0"; host.drag_flip_step_ = 1;
+        host.FlipDragPage();
+        const int p1 = host.group_views_[0].page_index;
+        host.FlipDragPage(); host.FlipDragPage(); host.FlipDragPage();
+        check(pages >= 3 && p1 == 1 && host.group_views_[0].page_index == pages - 1, "page flips forward and stops at the last page");
+        host.drag_flip_step_ = -1; host.FlipDragPage();
+        check(host.group_views_[0].page_index == pages - 2, "下一页 / 上一页 both flip");
+        host.interaction_.dragging_items = false; host.FlipDragPage();
+        check(host.drag_flip_group_.empty(), "flipping stops when the drag ends");
+        host.drag_flip_group_ = "group-0"; host.drag_flip_step_ = 1;
+        host.drop_insert_index_ = 3; host.interaction_.drop_insert_caret = {10, 10, 3, 40};
+        host.pending_item_drag_ = true;
+        send(WM_CAPTURECHANGED);
+        check(host.drag_flip_group_.empty() && !host.drop_insert_index_ && host.interaction_.drop_insert_caret.empty(),
+              "capture loss clears the caret, the slot and the page flip");
+
         std::printf("Group host interaction: %d cases, %d failures\n", count, failed);
         return failed ? 1 : 0;
     }

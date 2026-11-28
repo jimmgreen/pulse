@@ -1358,7 +1358,7 @@ GroupTabLayout ComputeGroupTabLayout(const model::GroupComputedView& view) {
     const int count = static_cast<int>(view.tab_group_ids.size());
     const int active = std::clamp(view.active_tab_index, 0, count - 1);
     int left = view.frame.x + 8;
-    const int right = view.frame.right() - 68;
+    const int right = view.frame.right() - GroupHeaderActionsWidth(view.frame.w);   // 「+」, 折叠 and 更多
     int available = right - left;
     if (available <= 0) return result;
     const bool overflow = count > available / 58;
@@ -1445,6 +1445,10 @@ GroupHeaderHitZone DesktopRenderer::HitTestGroupCard(const model::DesktopGroup& 
         if (px >= frame.right() - 62 && px < frame.right() - 36) {
             return GroupHeaderHitZone::CollapseChevron;
         }
+        if (GroupHeaderHasNewButton(frame.w) && px >= frame.right() - 90 && px < frame.right() - 64 &&
+            py >= frame.y + 6 && py < frame.y + 32) {
+            return GroupHeaderHitZone::NewGroup;
+        }
     }
 
     if (view.tab_group_ids.size() > 1) {
@@ -1455,7 +1459,8 @@ GroupHeaderHitZone DesktopRenderer::HitTestGroupCard(const model::DesktopGroup& 
         return GroupHeaderHitZone::None;
     }
 
-    const float chip_right = static_cast<float>(frame.right() - (frame.w >= 260 ? 68 : (show_right_btns ? 68 : 12)));
+    const float chip_right = static_cast<float>(
+        frame.right() - (frame.w >= 260 || show_right_btns ? GroupHeaderActionsWidth(frame.w) : 12));
     if (IsInstallerGroup(group) && !effective_collapsed && cleanable_installer_bytes > 0 && frame.w >= 260) {
         const std::wstring chip_txt = L"可清理 " + FormatBytesCompact(cleanable_installer_bytes);
         const float chip_w = MeasureSingleLineWidth(chip_txt, fmt_pill_.Get(), 200.0f) + 28.0f;
@@ -2564,7 +2569,7 @@ std::vector<RECT> DesktopRenderer::CollectOccupiedRects(const model::DesktopMode
             }
         }
     }
-    if (state.settings.tiles_enabled && state.settings.organize_enabled && !interaction.side_drawer_open) {
+    if (state.settings.tiles_enabled && !interaction.side_drawer_open) {
         const model::RectI wa_fallback = !state.monitors.empty()
             ? state.monitors.front().work_area
             : model::RectI{0, 0, static_cast<int>(width_ / dip_scale_), static_cast<int>(height_ / dip_scale_)};
@@ -2626,6 +2631,9 @@ std::vector<RECT> DesktopRenderer::CollectOccupiedRects(const model::DesktopMode
     }
     if (interaction.drop_hint_visible && !interaction.drop_hint_label.empty()) {
         out.push_back(DipRectToPx(model::RectI{interaction.drop_hint_pos.x + 16, interaction.drop_hint_pos.y + 18, 400, 30}, kShadow));
+    }
+    if (interaction.dragging_items && !interaction.drop_insert_caret.empty()) {
+        out.push_back(DipRectToPx(interaction.drop_insert_caret, 6));
     }
     const bool banner = !interaction.banner_suppressed &&
                         (focus_scene || present_scene || state.settings.icons_hidden);
@@ -3008,7 +3016,7 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
                 pending_glass_cards_.push_back(std::move(pc));
             }
         }
-        if (state.settings.tiles_enabled && state.settings.organize_enabled && !interaction.side_drawer_open) {
+        if (state.settings.tiles_enabled && !interaction.side_drawer_open) {
             for (const auto& tile : state.tiles) {
                 if (ResolveTileMaterial(tile.material, state.settings, interaction) != model::CardMaterial::LiquidGlass) {
                     continue;
@@ -3123,7 +3131,7 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
                     }
                 }
             }
-            if (!dock_occluded && state.settings.tiles_enabled && state.settings.organize_enabled) {
+            if (!dock_occluded && state.settings.tiles_enabled) {
                 for (const auto& tile : state.tiles) {
                     model::RectI tr = ComputeTileRectInline(tile_board_rect, tile);
                     if (auto it = interaction.tile_anim_positions.find(tile.id);
@@ -3260,7 +3268,7 @@ bool DesktopRenderer::TickVirtual(const model::DesktopModelState& state,
                         need_acrylic_full = true;
                     }
                 }
-                if (!need_acrylic_full && state.settings.tiles_enabled && state.settings.organize_enabled) {
+                if (!need_acrylic_full && state.settings.tiles_enabled) {
                     for (const auto& t : state.tiles) {
                         if (ResolveTileMaterial(t.material, state.settings, interaction) == model::CardMaterial::Acrylic) {
                             need_acrylic_full = true;
@@ -3481,7 +3489,6 @@ bool DesktopRenderer::RenderTilePixels(const model::DesktopTile& tile, const mod
     model::DesktopModelState one;
     one.settings = state.settings;
     one.settings.icons_hidden = true;
-    one.settings.organize_enabled = true;   // the scene draws tiles only while 桌面整理 is on
     one.settings.tiles_enabled = true;
     one.todos = state.todos;
     model::DesktopTile t = tile;
@@ -3752,7 +3759,7 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
     }
 
     // 2. Live Tiles (full-desktop free placement + resize; edit mode header anchored top-right)
-    if (state.settings.tiles_enabled && state.settings.organize_enabled && !interaction.side_drawer_open) {
+    if (state.settings.tiles_enabled && !interaction.side_drawer_open) {
         const model::RectI wa = !state.monitors.empty()
             ? state.monitors.front().work_area
             : model::RectI{0, 0, static_cast<int>(width_ / dip_scale_), static_cast<int>(height_ / dip_scale_)};
@@ -3968,6 +3975,27 @@ void DesktopRenderer::DrawScene(const model::DesktopModelState& state,
         const D2D1_RECT_F mr = ToRectF(interaction.marquee_rect);
         d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(mr, 4.0f, 4.0f), Brush(accent, 0.18f));
         d2d_dc_->DrawRoundedRectangle(D2D1::RoundedRect(mr, 4.0f, 4.0f), Brush(accent, 0.85f), 1.4f);
+    }
+
+    // 3b. Insert caret: where the dragged files will land between a group's icons
+    if (interaction.dragging_items && !interaction.drop_insert_caret.empty()) {
+        const uint32_t accent = ResolveAccentArgb(0, state.settings, interaction);
+        const auto& c = interaction.drop_insert_caret;
+        const D2D1_RECT_F cr = ToRectF(c);
+        const float rad = static_cast<float>(std::min(c.w, c.h)) * 0.5f;
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(cr.left - 2.0f, cr.top - 2.0f, cr.right + 2.0f, cr.bottom + 2.0f),
+                                                        rad + 2.0f, rad + 2.0f),
+                                      Brush(state.settings.dark_mode ? 0x66000000u : 0x8CFFFFFFu));
+        d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(cr, rad, rad), Brush(accent));
+        // End dots, like the insertion line in Explorer / Finder lists
+        const bool vertical = c.h > c.w;
+        const float dot = 3.5f;
+        const D2D1_POINT_2F a0 = vertical ? D2D1::Point2F((cr.left + cr.right) * 0.5f, cr.top)
+                                          : D2D1::Point2F(cr.left, (cr.top + cr.bottom) * 0.5f);
+        const D2D1_POINT_2F a1 = vertical ? D2D1::Point2F((cr.left + cr.right) * 0.5f, cr.bottom)
+                                          : D2D1::Point2F(cr.right, (cr.top + cr.bottom) * 0.5f);
+        d2d_dc_->FillEllipse(D2D1::Ellipse(a0, dot, dot), Brush(accent));
+        d2d_dc_->FillEllipse(D2D1::Ellipse(a1, dot, dot), Brush(accent));
     }
 
     // 4. Multi-select item drag ghost (.dghost) with top-right count badge
@@ -4446,6 +4474,17 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
     // 2. Header Right: Action buttons (on hover or collapsed) + CleanChip / RuleChip
     const bool show_right_btns = group_hovered || effective_collapsed;
     if (show_right_btns) {
+        // 新建分组 (+): an empty group right beside this one, its name ready to type
+        if (GroupHeaderHasNewButton(actual_frame.w)) {
+            const D2D1_RECT_F add_rc = D2D1::RectF(rc.right - 90.0f, rc.top + 6.0f, rc.right - 64.0f, rc.top + 32.0f);
+            if (interaction.hovered_group_zone == GroupHeaderHitZone::NewGroup && group_hovered) {
+                d2d_dc_->FillRoundedRectangle(D2D1::RoundedRect(add_rc, 7.0f, 7.0f),
+                                              Brush(dark ? 0x1EFFFFFFu : 0x12000000u));
+            }
+            const wchar_t add_glyph[2] = {L'\xE710', 0};
+            DrawGlyph(d2d_dc_.Get(), add_glyph, 1, fmt_fluent_12_.Get(), add_rc, Brush(text_sec));
+        }
+
         // Collapse / Expand button (.gh .gb)
         const D2D1_RECT_F chev_rc = D2D1::RectF(rc.right - 62.0f, rc.top + 6.0f, rc.right - 36.0f, rc.top + 32.0f);
         if (interaction.hovered_group_zone == GroupHeaderHitZone::CollapseChevron && group_hovered) {
@@ -4466,7 +4505,8 @@ void DesktopRenderer::DrawGroupCard(const model::DesktopGroup& group,
     }
 
     if (!stacked) {
-        const float chip_right = rc.right - (actual_frame.w >= 260 ? 68.0f : (show_right_btns ? 68.0f : 12.0f));
+        const float chip_right = rc.right - static_cast<float>(
+            actual_frame.w >= 260 || show_right_btns ? GroupHeaderActionsWidth(actual_frame.w) : 12);
         if (installer_cleanable && actual_frame.w >= 260) {
             const std::wstring chip_txt = L"可清理 " + FormatBytesCompact(interaction.cleanable_installer_bytes);
             const float txt_w = MeasureSingleLineWidth(chip_txt, fmt_pill_.Get(), 200.0f);

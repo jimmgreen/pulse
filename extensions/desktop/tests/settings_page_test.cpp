@@ -414,6 +414,43 @@ int main(int argc, char** argv) {
         page.Close();
     }
     {
+        // 桌面模式: the two cards are a radio pair, the desktop is told through a host command, and every row has its icon.
+        Host m; PulseHostV1 m_host{sizeof(PulseHostV1), 1, &m, Host::Query};
+        std::vector<std::string> sent;
+        size_t icons = 0;
+        std::string actions_binding;
+        model_capture = [&](const PulseUiModelTree* tree) {
+            icons = 0;
+            const auto walk = [&](auto&& visit, const PulseUiModelNode& node) -> void {
+                const std::string id = Str(node.id);
+                if (node.type == PULSE_UI_MODEL_CANVAS && id.size() > 3 && id.ends_with("-ic")) ++icons;
+                if (id == "actions-card" && node.visible_binding.present) actions_binding = Str(node.visible_binding.value);
+                if (node.children.present)
+                    for (uint32_t i = 0; i < node.children.count; ++i) visit(visit, node.children.data[i]);
+            };
+            walk(walk, *tree->root);
+        };
+        check(page.Open(&m_host, {}, [&](std::string_view cmd) { sent.emplace_back(cmd); }) == PULSE_OK,
+              "open desktop mode fixture");
+        m.Load("{}", 40);
+        model_capture = nullptr;
+        std::printf("[INFO] settings row icons: %zu\n", icons);
+        check(icons >= 20 && actions_binding == "state.organize", "rows carry icons; 整理 actions follow the organize state");
+        check(m.all_states["view_mode_0"] == "true" && m.all_states["view_mode_1"] == "false", "default mode is 整理 + 小组件");
+        m.SelectKey("view_mode_1", "true");
+        check(!page.Prefs().organize && page.Prefs().tiles && m.all_states["view_mode_0"] == "false" &&
+              m.all_states["organize"] == "false" && !sent.empty() && sent.back() == "desktop-view-widgets",
+              "只显示小组件 turns organize off, keeps widgets, and asks the desktop through desktop-view-widgets");
+        m.SelectKey("view_mode_0", "false");   // the radio's echo for the card that was turned off
+        check(!page.Prefs().organize && sent.back() == "desktop-view-widgets", "the deselect echo does not flip the mode back");
+        m.SelectKey("view_mode_0", "true");
+        check(page.Prefs().organize && m.all_states["view_mode_1"] == "false" && sent.back() == "desktop-view-organize",
+              "整理 + 小组件 switches back through desktop-view-organize");
+        m.SelectKey("tiles", "false");
+        check(!page.Prefs().tiles && sent.back() == "desktop-tiles-off", "显示小组件 is forwarded to the desktop");
+        page.Close();
+    }
+    {
         // 小组件: every widget's options fit the SDK's page limits, and the options survive save and reload.
         Host w; PulseHostV1 w_host{sizeof(PulseHostV1), 1, &w, Host::Query};
         w.enforce_value_limit = true;

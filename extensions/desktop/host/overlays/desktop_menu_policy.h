@@ -47,9 +47,10 @@ struct DesktopMenuPolicy {
         return std::find(hidden.begin(), hidden.end(), id) == hidden.end();
     }
 
+    // 新建分组 is not here: it stays a top-level row whatever the fold setting (folded, flat or hidden).
     static bool Managed(std::string_view id) {
         return id == "ai-organize" || id == "auto-organize" || id == "health-check" ||
-            id == "new-group" || id == "new-mapped-group" || id == "sub:add-tile" ||
+            id == "new-mapped-group" || id == "sub:add-tile" ||
             id == "tiles-edit" || id == "sub:scene" || id == "beautify";
     }
 

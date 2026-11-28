@@ -525,6 +525,10 @@ private:
             DispatchHostAction("pick-video-wallpaper");
         } else if (cmd == "cancel-video-optimize") {
             DispatchHostAction("cancel-video-optimize");
+        } else if (cmd.starts_with("desktop-view-") || cmd.starts_with("desktop-tiles-") ||
+                   cmd.starts_with("desktop-organize-")) {
+            // 桌面模式 and 显示小组件: the desktop applies them and reports the new state back (SettingsSync).
+            DispatchHostAction(cmd);
         }
     }
 

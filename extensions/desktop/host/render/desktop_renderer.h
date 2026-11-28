@@ -118,6 +118,12 @@ struct LiveTileRuntimeData {
     LiquidDockBarState dock;
 };
 
+// The header's right-hand buttons: 更多 and 折叠 always; 新建分组 (+) too once the card is wide enough to keep
+// at least one readable tab beside them (a two-column card keeps its old 68 DIP).
+constexpr int kGroupNewButtonMinWidth = 240;
+constexpr bool GroupHeaderHasNewButton(int frame_w) noexcept { return frame_w >= kGroupNewButtonMinWidth; }
+constexpr int GroupHeaderActionsWidth(int frame_w) noexcept { return GroupHeaderHasNewButton(frame_w) ? 96 : 68; }
+
 enum class GroupHeaderHitZone : uint8_t {
     None = 0,
     CollapseChevron = 1,
@@ -134,6 +140,7 @@ enum class GroupHeaderHitZone : uint8_t {
     Tab = 12,
     TabPrev = 13,
     TabNext = 14,
+    NewGroup = 15,       // 「+」 beside 折叠: a new empty group next to this one
 };
 
 struct GroupTabItem { std::string group_id; model::RectI rect; bool active = false; };
@@ -194,6 +201,9 @@ struct DesktopInteractionState {
     int dock_sys_open_tray_idx = -1;
 
     std::string drop_target_group_id;
+    // Where dragged files land inside drop_target_group_id (任意拖动): the caret drawn between icons, empty
+    // when they join at the end (header, collapsed card, empty card, a folder-backed group).
+    model::RectI drop_insert_caret;
     std::string drop_target_tile_id;
     std::string stack_drop_target_tile_id;   // a same-size tile under a dragged tile (edit mode): 叠放
     bool tile_edit_mode = false;             // 编辑磁贴区: tiles jiggle, remove badges, + cells

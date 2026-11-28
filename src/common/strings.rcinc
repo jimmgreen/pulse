@@ -6594,6 +6594,16 @@ BEGIN
     IDS_QUICK_LOOK_FILTER_PHOTOS "图片"
     IDS_QUICK_LOOK_FILTER_VIDEOS "视频"
     IDS_QUICK_LOOK_IMMERSIVE "沉浸式看图"
+    IDS_DESKTOP_GROUP_NEW "新建分组"
+    IDS_DESKTOP_GROUP_NEW_WITH_ITEMS "新建分组并移入"
+    IDS_DESKTOP_GROUP_RENAME "重命名分组"
+    IDS_DESKTOP_GROUP_ADD_ITEMS "移入分组"
+    IDS_DESKTOP_GROUP_REORDER_ITEMS "移动分组内文件"
+    IDS_DESKTOP_GROUP_SWITCHED_MANUAL "已改为手动排列"
+    IDS_DESKTOP_VIEW_SWITCHED_ORGANIZE "已切换到整理 + 小组件"
+    IDS_DESKTOP_VIEW_SWITCHED_WIDGETS "已切换到只显示小组件"
+    IDS_DESKTOP_WIDGETS_SHOWN "已显示桌面小组件"
+    IDS_DESKTOP_WIDGETS_HIDDEN "已隐藏桌面小组件"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13187,6 +13197,16 @@ BEGIN
     IDS_QUICK_LOOK_FILTER_PHOTOS "Photos"
     IDS_QUICK_LOOK_FILTER_VIDEOS "Videos"
     IDS_QUICK_LOOK_IMMERSIVE "Photo viewer layout"
+    IDS_DESKTOP_GROUP_NEW "New group"
+    IDS_DESKTOP_GROUP_NEW_WITH_ITEMS "New group with selection"
+    IDS_DESKTOP_GROUP_RENAME "Rename group"
+    IDS_DESKTOP_GROUP_ADD_ITEMS "Move into group"
+    IDS_DESKTOP_GROUP_REORDER_ITEMS "Reorder files in group"
+    IDS_DESKTOP_GROUP_SWITCHED_MANUAL "Switched to manual order"
+    IDS_DESKTOP_VIEW_SWITCHED_ORGANIZE "Switched to Organize + widgets"
+    IDS_DESKTOP_VIEW_SWITCHED_WIDGETS "Switched to Widgets only"
+    IDS_DESKTOP_WIDGETS_SHOWN "Desktop widgets shown"
+    IDS_DESKTOP_WIDGETS_HIDDEN "Desktop widgets hidden"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

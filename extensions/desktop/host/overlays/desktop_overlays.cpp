@@ -1188,9 +1188,12 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
                                              settings.icon_size == model::DesktopIconSize::Medium));
             vw.submenu_rows.push_back(mk_row("view-size:0", 0, L"小图标", {}, true,
                                              settings.icon_size == model::DesktopIconSize::Small));
-            vw.submenu_rows.push_back(mk_row("toggle-organize", 0, L"显示桌面分组", {}, false,
+            // The same choice as the top of the settings page: 整理 + 小组件, or only the 小组件.
+            vw.submenu_rows.push_back(mk_row("view-mode-organize", 0, L"整理 + 小组件", {}, false,
                                              settings.organize_enabled));
-            vw.submenu_rows.push_back(mk_row("toggle-tiles", 0, L"显示磁贴面板", {}, false,
+            vw.submenu_rows.push_back(mk_row("view-mode-widgets", 0, L"只显示小组件", {}, true,
+                                             !settings.organize_enabled));
+            vw.submenu_rows.push_back(mk_row("toggle-tiles", 0, L"显示小组件", {}, false,
                                              settings.tiles_enabled));
             vw.submenu_rows.push_back(mk_row("toggle-dock", 0, L"显示液态玻璃程序坞", {}, false,
                                              settings.dock_enabled));
@@ -1214,7 +1217,9 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
                                              settings.loose_sort_by == model::GroupSortBy::Manual));
             menu_rows_.push_back(std::move(sr));
         }
-        menu_rows_.push_back(mk_row("refresh", L'\xE72C', L"刷新", L"F5", true));
+        menu_rows_.push_back(mk_row("refresh", L'\xE72C', L"刷新", L"F5"));
+        // Always here, top level: the fold setting leaves 新建分组 alone (DesktopMenuPolicy::Managed).
+        menu_rows_.push_back(mk_row("new-group", L'\xE8F4', L"新建分组", L"Ctrl+Shift+G", true));
 
         if (menu_spec_.ai_organize_enabled) {
             MenuRow ai_row = mk_row("ai-organize", L'\xF5C2', L"AI 智能收纳…", L"Ctrl+Shift+A");
@@ -1229,7 +1234,6 @@ void DesktopOverlayController::BuildMenuRows(const model::BeautifySettings& sett
             }
             menu_rows_.push_back(mk_row("health-check", L'\xE7EF', L"桌面体检", std::move(h_badge)));
         }
-        menu_rows_.push_back(mk_row("new-group", L'\xE8F4', L"新建分组"));
         menu_rows_.push_back(mk_row("new-mapped-group", L'\xE8B7', L"从文件夹创建分组…"));
         {
             MenuRow at = mk_row("sub:add-tile", L'\xE710', L"添加小组件");

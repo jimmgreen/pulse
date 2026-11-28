@@ -22,6 +22,7 @@ target_link_libraries(pulse_desktop_ipc PUBLIC advapi32 bcrypt)
 add_library(pulse_desktop_model STATIC
     host/model/layout_groups.cpp
     host/model/group_tabs.cpp
+    host/model/group_drop.cpp
     host/model/loose_icons.cpp
     host/model/tile_board.cpp
     host/model/tile_reorder.cpp

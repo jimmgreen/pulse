@@ -585,6 +585,24 @@ std::vector<GroupComputedView> ComputeGroupViews(
     std::string_view hover_expanded_group_id = {});
 RectI GroupItemRect(const GroupComputedView& view, size_t visible_index) noexcept;
 
+// Files dragged onto a group card (group_drop.cpp). The slot is where they land: an index into the card's
+// member order across pages, and the caret drawn between icons (empty for an empty card). Outside the
+// content area of an expanded card there is no slot: the card takes the files at its end.
+struct GroupDropSlot {
+    size_t insert_index = 0;
+    RectI caret;
+};
+std::optional<GroupDropSlot> ComputeGroupDropSlot(const GroupComputedView& view, int x, int y) noexcept;
+// `display_order` with `dragged` (those already in it move, the rest join) placed at `insert_index`.
+std::vector<std::wstring> ComposeManualOrder(std::span<const std::wstring> display_order,
+                                             std::span<const std::wstring> dragged, size_t insert_index);
+// Gives the card that order (手动排列) and drops the paths from other cards' orders. True when the card
+// switched to 手动排列 just now.
+bool ApplyGroupManualOrder(std::vector<DesktopGroup>& groups, std::string_view group_id,
+                           std::vector<std::wstring> order);
+// "新建分组", then "新建分组 2", "新建分组 3"... the first title no group has.
+std::wstring NextNewGroupTitle(const std::vector<DesktopGroup>& groups, std::wstring_view base);
+
 // Loose Icon Settlement Engine (loose_icons.cpp)
 void SettleLooseIcons(std::vector<DesktopItem>& items,
                       std::span<const GroupComputedView> group_views,

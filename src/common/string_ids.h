@@ -5581,6 +5581,16 @@
 #define IDS_DESKTOP_GROUP_TABS_FULL                                                      6912
 #define IDS_DESKTOP_GROUP_MOVE                                                           6913
 #define IDS_DESKTOP_GROUP_RESIZE                                                         6914
+#define IDS_DESKTOP_GROUP_NEW                                                            7998
+#define IDS_DESKTOP_GROUP_NEW_WITH_ITEMS                                                 7999
+#define IDS_DESKTOP_GROUP_RENAME                                                         8000
+#define IDS_DESKTOP_GROUP_ADD_ITEMS                                                      8001
+#define IDS_DESKTOP_GROUP_REORDER_ITEMS                                                  8002
+#define IDS_DESKTOP_GROUP_SWITCHED_MANUAL                                                8003
+#define IDS_DESKTOP_VIEW_SWITCHED_ORGANIZE                                               8004
+#define IDS_DESKTOP_VIEW_SWITCHED_WIDGETS                                                8005
+#define IDS_DESKTOP_WIDGETS_SHOWN                                                        8006
+#define IDS_DESKTOP_WIDGETS_HIDDEN                                                       8007
 #define IDS_DESKTOP_ICON_LABEL_NORMAL                                                    6915
 #define IDS_TREE_TRANSFER_COPY_ALL_TITLE                                                 6916
 #define IDS_TREE_TRANSFER_COPY_ALL_MESSAGE                                               6917

@@ -46,6 +46,28 @@ struct DesktopMenuPolicyTestPeer {
         overlay.BuildMenuRows(settings);
         check(!contains(contains, overlay.menu_rows_, "health-check"), "disabled health command absent from actual menu");
         check(root("sub:desktop-organize") && !root("ai-organize"), "actual menu groups desktop commands");
+        check(root("new-group"), "submenu mode keeps 新建分组 at the top level");
+        {
+            const auto view = std::find_if(overlay.menu_rows_.begin(), overlay.menu_rows_.end(),
+                                           [](const auto& r) { return r.command_id == "sub:view"; });
+            const auto has = [&](std::string_view id, bool checked) {
+                return view != overlay.menu_rows_.end() &&
+                    std::any_of(view->submenu_rows.begin(), view->submenu_rows.end(),
+                                [&](const auto& r) { return r.command_id == id && r.checked == checked; });
+            };
+            check(has("view-mode-organize", true) && has("view-mode-widgets", false) && has("toggle-tiles", true),
+                  "查看 shows 整理 + 小组件 as the chosen mode");
+            model::BeautifySettings widgets_only;
+            widgets_only.organize_enabled = false;
+            overlay.BuildMenuRows(widgets_only);
+            const auto view2 = std::find_if(overlay.menu_rows_.begin(), overlay.menu_rows_.end(),
+                                            [](const auto& r) { return r.command_id == "sub:view"; });
+            check(view2 != overlay.menu_rows_.end() &&
+                  std::any_of(view2->submenu_rows.begin(), view2->submenu_rows.end(),
+                              [](const auto& r) { return r.command_id == "view-mode-widgets" && r.checked; }),
+                  "查看 follows 只显示小组件");
+            overlay.BuildMenuRows(settings);
+        }
         check(std::all_of(overlay.menu_rows_.begin(), overlay.menu_rows_.end(),
             [](const auto& row) { return !row.label.empty(); }), "all menu rows have localized labels");
         check(contains(contains, overlay.menu_rows_, "toggle-icons"), "grouping preserves toggle icons command");
@@ -60,12 +82,14 @@ struct DesktopMenuPolicyTestPeer {
         overlay.BuildMenuRows(settings);
         check(root("health-check") && root("ai-organize") && root("toggle-icons") && !root("sub:desktop-organize"),
             "flat mode restores all registered rows including toggle icons");
+        check(root("new-group"), "flat mode keeps 新建分组 at the top level");
         check(WriteUtf8FileAtomic(file, json_for(L"hidden", false)) &&
             wait_for(DesktopMenuPolicy::Placement::Hidden, false), "hidden settings hot reload");
         overlay.BuildMenuRows(settings);
         check(!contains(contains, overlay.menu_rows_, "ai-organize") &&
             !contains(contains, overlay.menu_rows_, "toggle-icons") && root("open-pack-settings"),
             "hidden mode removes extension commands and retains settings recovery");
+        check(root("new-group"), "hidden mode still shows 新建分组");
         check(WriteUtf8FileAtomic(file, L"{incomplete"), "write malformed isolated fixture");
         Sleep(250);
         check(overlay.menu_policy_.Snapshot().placement == DesktopMenuPolicy::Placement::Hidden,
@@ -122,6 +146,7 @@ struct DesktopMenuPolicyTestPeer {
 
 int wmain(int argc, wchar_t** argv) {
     if (argc != 2) return 2;
+    setvbuf(stdout, nullptr, _IONBF, 0);   // a crash must not swallow the cases that already ran
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const int result = pulse::desktop::overlays::DesktopMenuPolicyTestPeer::Run(argv[1]);
     CoUninitialize();

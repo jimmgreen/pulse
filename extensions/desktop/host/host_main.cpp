@@ -127,7 +127,8 @@ constexpr UINT_PTR kTimerTileReorder = 108; // only while considering a stack dr
 constexpr UINT_PTR kTimerTilePress = 107;  // a pressed card sinking in or springing back
 constexpr UINT_PTR kTimerLongPress = 103;    // a held tile enters 编辑磁贴区
 constexpr UINT_PTR kTimerEditJiggle = 104;   // the jiggle while editing (stops with edit mode)
-constexpr UINT_PTR kTimerWeatherCity = 105;  // the city is still being typed in settings: fetch when it settles
+constexpr UINT_PTR kTimerWeatherCity = 105;
+constexpr UINT_PTR kTimerDragPageFlip = 113;  // a dragged file held on a group's 上一页/下一页 turns the page  // the city is still being typed in settings: fetch when it settles
 
 int64_t NowUnixMs() noexcept {
     using namespace std::chrono;
@@ -845,7 +846,7 @@ int RunRenderSnapshotsMode(const std::wstring& out_dir_str) {
     auto compute_views_and_settle = [&](model::DesktopModelState& st, bool drawer_open)
         -> std::pair<model::RectI, std::vector<model::GroupComputedView>> {
         const model::RectI br = model::ComputeTileBoardRect(
-            work_area, st.settings.tiles_enabled && st.settings.organize_enabled && !drawer_open);
+            work_area, st.settings.tiles_enabled && !drawer_open);
         model::UpdateAppsTileMembership(st);
         model::ResolveGroupCollisions(st.groups, std::nullopt, work_area, br, st.settings.icon_size);
         auto gvs = model::ComputeGroupViews(st, now_ms);
@@ -2933,12 +2934,7 @@ private:
 #endif
 
         if (kind == render::DockBarItemKind::WidgetsToggle) {
-            state_.settings.tiles_enabled = !state_.settings.tiles_enabled;
-            if (state_.settings.tiles_enabled) RefreshLiveTileData();
-            RecomputeLayout();
-            SaveModel();
-            renderer_.InvalidateAll();
-            ShowUndoToast(state_.settings.tiles_enabled ? L"已显示桌面小组件" : L"已隐藏桌面小组件");
+            SetDesktopViewMode(state_.settings.organize_enabled, !state_.settings.tiles_enabled, true);
             return;
         }
         if (kind == render::DockBarItemKind::Trash) {
@@ -3746,7 +3742,9 @@ private:
         return ok ? dst : std::wstring{};
     }
 
-    std::unordered_set<std::wstring> EvacuateMappedItemsToDesktop(const std::vector<std::wstring>& paths) {
+    // `landed` (optional) gets each path where it is afterwards, in the order of `paths`.
+    std::unordered_set<std::wstring> EvacuateMappedItemsToDesktop(const std::vector<std::wstring>& paths,
+                                                                  std::vector<std::wstring>* landed = nullptr) {
         const std::wstring desk = mount::ResolveKnownFolder(FOLDERID_Desktop);
         std::unordered_set<std::wstring> dest_keys;
         bool physical_moved = false;
@@ -3763,11 +3761,13 @@ private:
                 const std::wstring moved = MoveOrCopyToDirectoryCollisionSafe(tp, desk, false);
                 if (!moved.empty()) {
                     dest_keys.insert(NormalizeFolderKey(moved));
+                    if (landed) landed->push_back(moved);
                     physical_moved = true;
                     continue;
                 }
             }
             dest_keys.insert(tp_key);
+            if (landed) landed->push_back(tp);
         }
         if (physical_moved) {
             RefreshDesktopItems();
@@ -4088,9 +4088,7 @@ private:
     }
 
     std::vector<model::RectI> CurrentTileObstacles() const {
-        const bool show_board = state_.settings.tiles_enabled &&
-                                state_.settings.organize_enabled &&
-                                !interaction_.side_drawer_open;
+        const bool show_board = state_.settings.tiles_enabled && !interaction_.side_drawer_open;
         auto rects = model::CollectTileObstacleRects(state_.tiles, tile_board_rect_, show_board);
         if (state_.settings.dock_enabled && !interaction_.side_drawer_open) {
             const model::RectI dock_rc = live_data_.dock.RestingObstacleRect();
@@ -4115,7 +4113,7 @@ private:
             }
             snapshot.frames.push_back(f);
         }
-        if (state_.settings.tiles_enabled && state_.settings.organize_enabled && !interaction_.side_drawer_open) {
+        if (state_.settings.tiles_enabled && !interaction_.side_drawer_open) {
             for (const auto& t : state_.tiles) {
                 model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
                 if (auto it = interaction_.tile_anim_positions.find(t.id);
@@ -4347,9 +4345,7 @@ private:
         model::NormalizeGroupTabs(state_.groups);
         SyncOverlayInteractionFlags();
         const model::RectI wa = PrimaryWorkAreaClient();
-        const bool show_board = state_.settings.tiles_enabled &&
-                                state_.settings.organize_enabled &&
-                                !interaction_.side_drawer_open;
+        const bool show_board = state_.settings.tiles_enabled && !interaction_.side_drawer_open;
         tile_board_rect_ = model::ComputeTileBoardRect(wa, show_board);
         if (state_.settings.dock_enabled) {
             if (!live_data_.dock.HasItems()) {
@@ -4388,6 +4384,210 @@ private:
     void PushUndo(std::wstring label) {
         undo_.Push(state_, std::move(label));
         last_undo_is_ai_archive_ = false;
+    }
+
+    // 整理 + 小组件 / 只显示小组件, and the 小组件 switch: one place for the right-click 查看 menu, the dock,
+    // the settings page and the shortcuts, so every one of them shows the same state afterwards.
+    void SetDesktopViewMode(bool organize, bool tiles, bool toast) {
+        const bool organize_changed = organize != state_.settings.organize_enabled;
+        const bool tiles_changed = tiles != state_.settings.tiles_enabled;
+        if (!organize_changed && !tiles_changed) {
+            SyncSettingsToPlugin();
+            return;
+        }
+        state_.settings.organize_enabled = organize;
+        state_.settings.tiles_enabled = tiles;
+        if (tiles && tiles_changed) RefreshLiveTileData();
+        if (!organize) CancelHoverPreview();
+        RecomputeLayout();
+        SaveModel();
+        SyncSettingsToPlugin();
+        renderer_.InvalidateAll();
+        if (!toast) return;
+        if (organize_changed) ShowUndoToast(organize ? l10n::Get(l10n::StringId::DesktopViewSwitchedOrganize) : l10n::Get(l10n::StringId::DesktopViewSwitchedWidgets));
+        else ShowUndoToast(tiles ? l10n::Get(l10n::StringId::DesktopWidgetsShown) : l10n::Get(l10n::StringId::DesktopWidgetsHidden));
+    }
+
+    // The group title becomes an edit box (the group menu's 重命名, and a group just made).
+    void BeginGroupTitleRename(const std::string& gid) {
+        for (size_t i = 0; i < state_.groups.size() && i < group_views_.size(); ++i) {
+            const auto& g = state_.groups[i];
+            if (g.id != gid) continue;
+            const model::RectI r{g.x + 34, g.y + 6, std::max(120, group_views_[i].frame.w - 96), 28};
+            overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
+            overlays_.BeginInlineRename(mount_.Hwnd(), r, g.title, false,
+                                        [this, gid](const std::wstring& txt) {
+                                            PushUndo(l10n::Get(l10n::StringId::DesktopGroupRename));
+                                            for (auto& gg : state_.groups) {
+                                                if (gg.id == gid) gg.title = txt;
+                                            }
+                                            SaveModel();
+                                            renderer_.InvalidateAll();
+                                        });
+            return;
+        }
+    }
+
+    // 新建分组: an empty group at the free spot nearest (x, y) — or right of `beside_id` — that never covers
+    // another group, a widget or the dock; `paths` move into it. Its name is then ready to type.
+    std::string CreateNewGroupNear(int x, int y, const std::vector<std::wstring>& paths = {},
+                                   const std::string& beside_id = {}) {
+        PushUndo(paths.empty() ? l10n::Get(l10n::StringId::DesktopGroupNew) : l10n::Get(l10n::StringId::DesktopGroupNewWithItems));
+        model::DesktopGroup g{};
+        g.id = "grp_" + std::to_string(NowUnixMs());
+        while (std::any_of(state_.groups.begin(), state_.groups.end(),
+                           [&](const model::DesktopGroup& o) { return o.id == g.id; })) g.id += "x";
+        g.title = model::NextNewGroupTitle(state_.groups, l10n::Get(l10n::StringId::DesktopGroupNew));
+        for (size_t i = 0; i < state_.groups.size() && i < group_views_.size(); ++i) {
+            if (beside_id.empty() || state_.groups[i].id != beside_id) continue;
+            const model::RectI f = group_views_[i].frame.empty()
+                ? model::ComputeGroupFrame(state_.groups[i], state_.settings.icon_size) : group_views_[i].frame;
+            g.cols = state_.groups[i].cols;
+            g.visible_rows = state_.groups[i].visible_rows;
+            x = f.right() + model::kSnapGridPx;
+            y = f.y;
+            break;
+        }
+        g.x = x;
+        g.y = y;
+        const std::string gid = g.id;
+        state_.groups.push_back(std::move(g));
+        const size_t gi = state_.groups.size() - 1;
+        const auto obstacles = CurrentTileObstacles();
+        if (const auto spot = model::FindNearestFreeGroupSpot(state_.groups, gi, x, y, PrimaryWorkAreaClient(),
+                                                              model::RectI{}, state_.settings.icon_size, obstacles)) {
+            state_.groups[gi].x = spot->x;
+            state_.groups[gi].y = spot->y;
+        }
+        if (!paths.empty()) {
+            const auto dest_keys = EvacuateMappedItemsToDesktop(paths);
+            for (auto& it : state_.items) {
+                if (dest_keys.contains(NormalizeFolderKey(it.path))) {
+                    it.pinned_group_id = gid;
+                    it.force_loose = false;
+                }
+            }
+        }
+        const bool turned_on = !state_.settings.organize_enabled;  // a group is only seen with 整理 on
+        state_.settings.organize_enabled = true;
+        RecomputeLayout();
+        SaveModel();
+        if (turned_on) SyncSettingsToPlugin();
+        renderer_.InvalidateAll();
+        BeginGroupTitleRename(gid);
+        return gid;
+    }
+
+    // 新建分组 from the keyboard (Ctrl+Shift+G): near the pointer when it is on this desktop, else top-left.
+    void CreateNewGroupFromKeyboard() {
+        POINT screen{};
+        const model::RectI wa = PrimaryWorkAreaClient();
+        int x = wa.x + 24, y = wa.y + 24;
+        if (GetCursorPos(&screen) && mount_.Hwnd()) {
+            const POINT client = mount_.ScreenPxToClientDip(screen);
+            if (wa.contains(client.x, client.y)) { x = client.x; y = client.y; }
+        }
+        std::vector<std::wstring> paths;
+        CreateNewGroupNear(x, y, paths);
+    }
+
+    // 任意拖动 — while files are dragged over group `gi`: where they would land (caret + index), and whether
+    // the pointer rests on the card's 上一页 / 下一页 (held there, the page turns: cross-page drops).
+    bool UpdateItemDropSlot(size_t gi, int x, int y) {
+        if (gi >= state_.groups.size() || gi >= group_views_.size()) return false;
+        const auto& gv = group_views_[gi];
+        if (gv.page_count > 1) {
+            const bool focus_scene = state_.settings.active_scene == model::DesktopScene::Focus;
+            const auto zone = renderer_.HitTestGroupCard(state_.groups[gi], gv, focus_scene,
+                                                         interaction_.cleanable_installer_bytes, true, x, y);
+            if (zone == render::GroupHeaderHitZone::FooterPrevPage || zone == render::GroupHeaderHitZone::FooterNextPage) {
+                const int step = zone == render::GroupHeaderHitZone::FooterNextPage ? 1 : -1;
+                if (drag_flip_group_ != state_.groups[gi].id || drag_flip_step_ != step) {
+                    drag_flip_group_ = state_.groups[gi].id;
+                    drag_flip_step_ = step;
+                    if (mount_.Hwnd()) SetTimer(mount_.Hwnd(), kTimerDragPageFlip, 450, nullptr);
+                }
+                return true;
+            }
+        }
+        if (!state_.groups[gi].mapped_folder_path.empty()) return false;  // a folder-backed group sorts its folder
+        if (const auto slot = model::ComputeGroupDropSlot(gv, x, y)) {
+            drop_insert_index_ = slot->insert_index;
+            interaction_.drop_insert_caret = slot->caret;
+        }
+        return false;
+    }
+
+    void DisarmDragPageFlip() {
+        if (drag_flip_group_.empty()) return;
+        drag_flip_group_.clear();
+        drag_flip_step_ = 0;
+        if (mount_.Hwnd()) KillTimer(mount_.Hwnd(), kTimerDragPageFlip);
+    }
+
+    void FlipDragPage() {
+        if (!interaction_.dragging_items || drag_flip_group_.empty()) {
+            DisarmDragPageFlip();
+            return;
+        }
+        for (const auto& gv : group_views_) {
+            if (gv.group_id != drag_flip_group_ || gv.page_count <= 1) continue;
+            const int next = std::clamp(gv.page_index + drag_flip_step_, 0, gv.page_count - 1);
+            if (next != gv.page_index) {
+                interaction_.group_pages[gv.group_id] = next;
+                RefreshGroupViews();
+                renderer_.InvalidateAll();
+            }
+            if (mount_.Hwnd()) SetTimer(mount_.Hwnd(), kTimerDragPageFlip, 700, nullptr);  // keeps turning while held
+            return;
+        }
+        DisarmDragPageFlip();
+    }
+
+    // Files dropped on an ordinary group: they join it (from the desktop, another group or a folder-backed
+    // group, whose files come back to the desktop first). Dropped between icons, they land exactly there and
+    // the group switches to 手动排列 — also how a group is reordered.
+    void DropItemsIntoGroup(const std::string& gid, const std::vector<std::wstring>& paths,
+                            std::optional<size_t> insert_index) {
+        size_t gi = state_.groups.size();
+        for (size_t i = 0; i < state_.groups.size(); ++i)
+            if (state_.groups[i].id == gid) gi = i;
+        if (gi == state_.groups.size() || paths.empty()) return;
+        // The group's order as shown, before anything moves (an insert index counts in it).
+        std::vector<std::wstring> shown;
+        if (gi < group_views_.size())
+            for (const size_t idx : group_views_[gi].member_item_indices)
+                if (idx < state_.items.size()) shown.push_back(state_.items[idx].path);
+        // Dragged files in the order the user sees them: the group's order first, then the rest.
+        std::vector<std::wstring> dragged;
+        for (const auto& p : shown)
+            if (interaction_.selected_paths.contains(p) || std::find(paths.begin(), paths.end(), p) != paths.end())
+                dragged.push_back(p);
+        for (const auto& p : paths)
+            if (std::find(dragged.begin(), dragged.end(), p) == dragged.end()) dragged.push_back(p);
+
+        PushUndo(insert_index ? l10n::Get(l10n::StringId::DesktopGroupReorderItems) : l10n::Get(l10n::StringId::DesktopGroupAddItems));
+        std::vector<std::wstring> landed;    // the same files at their paths now (a folder group's moved out)
+        const auto dest_keys = EvacuateMappedItemsToDesktop(dragged, &landed);
+        for (auto& it : state_.items) {
+            if (dest_keys.contains(NormalizeFolderKey(it.path))) {
+                it.pinned_group_id = gid;
+                it.force_loose = false;
+            }
+        }
+        bool switched = false;
+        if (insert_index) {
+            // Translate the index from `shown` (with the dragged files still in it) to the composed order.
+            switched = model::ApplyGroupManualOrder(state_.groups, gid,
+                                                    model::ComposeManualOrder(shown, landed, *insert_index));
+        } else if (state_.groups[gi].sort_by == model::GroupSortBy::Manual) {
+            // Joined at the end of a hand-ordered group: keep the order, append them.
+            model::ApplyGroupManualOrder(state_.groups, gid,
+                                         model::ComposeManualOrder(shown, landed, shown.size()));
+        }
+        RecomputeLayout();
+        SaveModel();
+        if (switched) ShowUndoToast(l10n::Get(l10n::StringId::DesktopGroupSwitchedManual));
     }
 
     void PerformUndo() {
@@ -4698,7 +4898,6 @@ private:
             }
             PushUndo(L"添加小组件");
             state_.settings.tiles_enabled = true;
-            state_.settings.organize_enabled = true;
             if (wk == model::TileKind::StagingTray) state_.settings.sync_staging_tray = true;
             model::DesktopTile nt = MakeWidgetTileForKind(wk, sz);
 
@@ -5342,10 +5541,8 @@ private:
 
     void OpenWidgetGallery(std::optional<model::TileKind> initial_kind = std::nullopt,
                            std::optional<model::PointI> target_cell = std::nullopt) {
-        if (!state_.settings.tiles_enabled || !state_.settings.organize_enabled) {
-            state_.settings.tiles_enabled = true;
-            state_.settings.organize_enabled = true;
-        }
+        // 小组件 show with or without 桌面分组 (只显示小组件): opening the library only turns them on.
+        state_.settings.tiles_enabled = true;
         if (overlays_.IsSideDrawerOpen()) {
             overlays_.Dismiss();
         }
@@ -5612,18 +5809,9 @@ private:
         }
 
         if (cmd == "new-group") {
-            PushUndo(L"新建分组");
-            model::DesktopGroup g{};
-            g.id = "grp_" + std::to_string(NowUnixMs());
-            g.title = L"新建分组";
             POINT cpt = spec.screen_anchor;
             mount_.ScreenDipToClient(&cpt);
-            g.x = cpt.x;
-            g.y = cpt.y;
-            state_.groups.push_back(std::move(g));
-            RecomputeLayout();
-            SaveModel();
-            renderer_.InvalidateAll();
+            CreateNewGroupNear(cpt.x, cpt.y);
         } else if (cmd == "new-mapped-group") {
             const std::wstring dir = PickFolderDialog(L"选择要作为分组显示的文件夹");
             if (!dir.empty()) {
@@ -5659,26 +5847,9 @@ private:
             state_.groups.push_back(std::move(g));
             BindGroupToFolder(state_.groups.size() - 1, spec.target_path, /*push_undo=*/false);
         } else if (cmd == "new-group-with-sel" && !target_paths.empty()) {
-            PushUndo(L"新建分组并移入");
-            model::DesktopGroup g{};
-            g.id = "grp_" + std::to_string(NowUnixMs());
-            g.title = L"新建分组";
             POINT cpt = spec.screen_anchor;
             mount_.ScreenDipToClient(&cpt);
-            g.x = cpt.x;
-            g.y = cpt.y;
-            const std::string gid = g.id;
-            state_.groups.push_back(std::move(g));
-            const auto dest_keys = EvacuateMappedItemsToDesktop(target_paths);
-            for (auto& it : state_.items) {
-                if (dest_keys.contains(NormalizeFolderKey(it.path))) {
-                    it.pinned_group_id = gid;
-                    it.force_loose = false;
-                }
-            }
-            RecomputeLayout();
-            SaveModel();
-            renderer_.InvalidateAll();
+            CreateNewGroupNear(cpt.x, cpt.y, target_paths);
         } else if (cmd.starts_with("move-to-group:") && !target_paths.empty()) {
             const std::string gid = cmd.substr(14);
             std::wstring mapped_dst_dir;
@@ -5798,16 +5969,13 @@ private:
             SyncSettingsToPlugin();
             renderer_.InvalidateAll();
         } else if (cmd == "toggle-organize") {
-            state_.settings.organize_enabled = !state_.settings.organize_enabled;
-            RecomputeLayout();
-            SaveModel();
-            renderer_.InvalidateAll();
+            SetDesktopViewMode(!state_.settings.organize_enabled, state_.settings.tiles_enabled, false);
         } else if (cmd == "toggle-tiles") {
-            state_.settings.tiles_enabled = !state_.settings.tiles_enabled;
-            if (state_.settings.tiles_enabled) RefreshLiveTileData();
-            RecomputeLayout();
-            SaveModel();
-            renderer_.InvalidateAll();
+            SetDesktopViewMode(state_.settings.organize_enabled, !state_.settings.tiles_enabled, false);
+        } else if (cmd == "view-mode-organize") {
+            SetDesktopViewMode(true, true, true);
+        } else if (cmd == "view-mode-widgets") {
+            SetDesktopViewMode(false, true, true);
         } else if (cmd == "toggle-dock") {
             state_.settings.dock_enabled = !state_.settings.dock_enabled;
             if (state_.settings.dock_enabled) {
@@ -5941,13 +6109,7 @@ private:
         } else if (cmd == "dock-empty-trash") {
             EmptyRecycleBinAsync();
         } else if (cmd == "dock-toggle-widgets") {
-            state_.settings.tiles_enabled = !state_.settings.tiles_enabled;
-            if (state_.settings.tiles_enabled) RefreshLiveTileData();
-            RecomputeLayout();
-            SaveModel();
-            SyncSettingsToPlugin();
-            renderer_.InvalidateAll();
-            ShowUndoToast(state_.settings.tiles_enabled ? L"已显示桌面小组件" : L"已隐藏桌面小组件");
+            SetDesktopViewMode(state_.settings.organize_enabled, !state_.settings.tiles_enabled, true);
         } else if (cmd == "dock-mag-toggle") {
             const model::RectI old_dmg = live_data_.dock.DamageRect(PrimaryWorkAreaClient());
             state_.settings.dock_magnification = !state_.settings.dock_magnification;
@@ -6239,17 +6401,7 @@ private:
                 } else if (cmd == "toggle-collapse") {
                     g.collapsed = !g.collapsed;
                 } else if (cmd == "rename-group") {
-                    const model::RectI r{g.x + 34, g.y + 6, std::max(120, group_views_[i].frame.w - 96), 28};
-                    overlays_.SetAppearance(state_.settings.dark_mode, EffectiveAccentArgb());
-                    overlays_.BeginInlineRename(mount_.Hwnd(), r, g.title, false,
-                                                [this, gid = g.id](const std::wstring& txt) {
-                                                    PushUndo(L"重命名分组");
-                                                    for (auto& gg : state_.groups) {
-                                                        if (gg.id == gid) gg.title = txt;
-                                                    }
-                                                    SaveModel();
-                                                    renderer_.InvalidateAll();
-                                                });
+                    BeginGroupTitleRename(g.id);
                     return;
                 } else if (cmd == "edit-rule") {
                     OpenGroupRulePopoverForIndex(i);
@@ -7689,7 +7841,7 @@ private:
         std::wstring path;
         model::RectI rect{};
         bool tile_hit = false;
-        if (state_.settings.organize_enabled && state_.settings.tiles_enabled) {
+        if (state_.settings.tiles_enabled) {
             for (const auto& tile : state_.tiles) {
                 const auto tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, tile);
                 if (!tr.contains(x, y)) continue;
@@ -7843,6 +7995,9 @@ private:
             state_.settings.pause_on_fullscreen_or_battery ? "true" : "false");
         std::string synced = buf;
         synced.pop_back();
+        // 整理 and 小组件 change on the desktop too (查看 menu, dock, shortcuts): the settings page follows.
+        synced += std::string(",\"organize\":") + (state_.settings.organize_enabled ? "true" : "false") +
+                  ",\"tiles\":" + (state_.settings.tiles_enabled ? "true" : "false");
         synced += GlassOpticalJson(state_.settings.glass_options);
         synced += ",\"glass_reference\":" + std::string(state_.settings.glass_reference ? "true" : "false") +
             ",\"glass_blur_radius\":" + std::to_string(state_.settings.glass_blur_radius) +
@@ -8016,6 +8171,13 @@ private:
                 }
                 if (!glass_preview) { RecomputeLayout(); SaveModel(); }
                 renderer_.InvalidateAll();
+                // 整理 and 小组件 belong to the desktop (changed by the 查看 menu, the dock, the settings page's
+                // commands): a page showing other values — just opened, or from before they synced — is told.
+                if (bool po = false, pt = false;
+                    (ipc::JsonFindBool(json, "organize", po) && po != state_.settings.organize_enabled) ||
+                    (ipc::JsonFindBool(json, "tiles", pt) && pt != state_.settings.tiles_enabled)) {
+                    SyncSettingsToPlugin();
+                }
                 break;
             }
             case ipc::MessageType::TraySnapshotSync: {
@@ -8214,6 +8376,16 @@ private:
             if (state_.settings.icons_hidden) CancelHoverPreview();
                     SaveModel();
                     renderer_.InvalidateAll();
+                } else if (act == "desktop-view-organize") {
+                    SetDesktopViewMode(true, true, false);
+                } else if (act == "desktop-view-widgets") {
+                    SetDesktopViewMode(false, true, false);
+                } else if (act == "desktop-organize-on" || act == "desktop-organize-off") {
+                    SetDesktopViewMode(act == "desktop-organize-on", state_.settings.tiles_enabled, false);
+                } else if (act == "desktop-tiles-on" || act == "desktop-tiles-off") {
+                    SetDesktopViewMode(state_.settings.organize_enabled, act == "desktop-tiles-on", false);
+                } else if (act == "desktop-new-group") {
+                    CreateNewGroupFromKeyboard();
                 } else if (act == "restore-native-icons") {
                     mount::RestoreNativeIconSnapshot(mount_.InitialSnapshot());
                 } else if (act == "set-video-wallpaper") {
@@ -8519,6 +8691,11 @@ private:
                     return 0;
                 }
                 (void)TickMotionAnimations(NowAnimMs());
+                return 0;
+            }
+            if (wp == kTimerDragPageFlip) {
+                handled = true;
+                FlipDragPage();
                 return 0;
             }
             if (wp == kTimerGroupInteraction) {
@@ -8883,6 +9060,10 @@ private:
                         }
                         return 0;
                     }
+                    if (zone == render::GroupHeaderHitZone::NewGroup) {
+                        CreateNewGroupNear(gv.frame.right() + model::kSnapGridPx, gv.frame.y, {}, state_.groups[i].id);
+                        return 0;
+                    }
                     if (zone == render::GroupHeaderHitZone::CleanChip) {
                         OpenHealthCheckDrawer();
                         return 0;
@@ -8996,8 +9177,7 @@ private:
             }
 
             // 3. Check live tiles (edge/corner resize, pending click, drag >= 6px)
-            if (state_.settings.tiles_enabled && state_.settings.organize_enabled &&
-                !interaction_.side_drawer_open) {
+            if (state_.settings.tiles_enabled && !interaction_.side_drawer_open) {
                 const model::RectI hdr_anchor = !tile_board_rect_.empty()
                     ? tile_board_rect_
                     : render::DesktopRenderer::ComputeBoardRectFallback(PrimaryWorkAreaClient(), true);
@@ -9251,6 +9431,9 @@ private:
                     interaction_.dragging_items = false;
                     interaction_.drag_item_count = 0;
                     interaction_.drop_target_group_id.clear();
+                    interaction_.drop_insert_caret = {};
+                    drop_insert_index_.reset();
+                    DisarmDragPageFlip();
                     interaction_.drop_target_tile_id.clear();
                     renderer_.InvalidateAll();
                     // OLE owns capture and the release event from here. Clear the
@@ -9263,6 +9446,8 @@ private:
                 }
                 interaction_.drag_cursor_pos = {x, y};
                 interaction_.drop_target_group_id.clear();
+                interaction_.drop_insert_caret = {};
+                drop_insert_index_.reset();
                 interaction_.drop_target_tile_id.clear();
                 interaction_.drop_target_dock = 0;
                 interaction_.drop_hint_visible = false;
@@ -9285,12 +9470,15 @@ private:
                     renderer_.InvalidateAll();
                     return 0;
                 }
-                for (const size_t gi : GroupHitOrder()) {
+                bool on_pager = false;
+                for (const size_t gi : state_.settings.organize_enabled ? GroupHitOrder() : std::vector<size_t>{}) {
                     if (group_views_[gi].frame.contains(x, y)) {
                         interaction_.drop_target_group_id = state_.groups[gi].id;
+                        on_pager = UpdateItemDropSlot(gi, x, y);
                         break;
                     }
                 }
+                if (!on_pager) DisarmDragPageFlip();
                 if (interaction_.drop_target_group_id.empty() &&
                     state_.settings.tiles_enabled && !interaction_.side_drawer_open) {
                     for (const auto& t : state_.tiles) {
@@ -9510,7 +9698,7 @@ private:
                 dock_target_hover_ = false;
                 dock_target_hovered_idx_ = -1;
             }
-            if (state_.settings.tiles_enabled && state_.settings.organize_enabled && !interaction_.side_drawer_open) {
+            if (state_.settings.tiles_enabled && !interaction_.side_drawer_open) {
                 const model::RectI hdr_anchor = !tile_board_rect_.empty()
                     ? tile_board_rect_
                     : render::DesktopRenderer::ComputeBoardRectFallback(PrimaryWorkAreaClient(), true);
@@ -9763,8 +9951,12 @@ private:
                 const std::string dst_grp = interaction_.drop_target_group_id;
                 const std::string dst_tile = interaction_.drop_target_tile_id;
                 const int dst_dock = interaction_.drop_target_dock;
+                const std::optional<size_t> dst_index = drop_insert_index_;
                 interaction_.dragging_items = false;
                 interaction_.drop_target_group_id.clear();
+                interaction_.drop_insert_caret = {};
+                drop_insert_index_.reset();
+                DisarmDragPageFlip();
                 interaction_.drop_target_tile_id.clear();
                 interaction_.drop_target_dock = 0;
                 interaction_.drop_hint_visible = false;
@@ -9800,16 +9992,7 @@ private:
                         RecomputeLayout();
                         SaveModel();
                     } else {
-                        PushUndo(L"移入分组");
-                        const auto dest_keys = EvacuateMappedItemsToDesktop(paths);
-                        for (auto& it : state_.items) {
-                            if (dest_keys.contains(NormalizeFolderKey(it.path))) {
-                                it.pinned_group_id = dst_grp;
-                                it.force_loose = false;
-                            }
-                        }
-                        RecomputeLayout();
-                        SaveModel();
+                        DropItemsIntoGroup(dst_grp, paths, dst_index);
                     }
                 } else if (!dst_tile.empty()) {
                     for (const auto& t : state_.tiles) {
@@ -10142,6 +10325,10 @@ private:
                 pending_tile_idx_.reset();
                 pending_item_drag_ = false;
                 interaction_.dragging_items = false;
+                interaction_.drop_target_group_id.clear();
+                interaction_.drop_insert_caret = {};
+                drop_insert_index_.reset();
+                DisarmDragPageFlip();
                 interaction_.marquee_active = false;
                 if (need_recompute) {
                     RecomputeLayout();
@@ -10328,8 +10515,7 @@ private:
                 }
             }
 
-            if (state_.settings.tiles_enabled && state_.settings.organize_enabled &&
-                !interaction_.side_drawer_open) {
+            if (state_.settings.tiles_enabled && !interaction_.side_drawer_open) {
                 for (size_t ti = 0; ti < state_.tiles.size(); ++ti) {
                     const auto& t = state_.tiles[ti];
                     const model::RectI tr = render::DesktopRenderer::ComputeTileRectInline(tile_board_rect_, t);
@@ -10397,6 +10583,21 @@ private:
                 StagePathsInTray(paths);
             } else if (ctrl && shift && wp == 'N') {
                 CreateNewDesktopEntry(true, L"新建文件夹");
+            } else if (ctrl && shift && wp == 'G') {
+                // 新建分组 (Ctrl+Shift+N stays 新建文件夹, as on the Windows desktop); selected files move in.
+                std::vector<std::wstring> paths(interaction_.selected_paths.begin(), interaction_.selected_paths.end());
+                if (paths.empty()) {
+                    CreateNewGroupFromKeyboard();
+                } else {
+                    const model::RectI wa = PrimaryWorkAreaClient();
+                    POINT screen{};
+                    int gx = wa.x + 24, gy = wa.y + 24;
+                    if (GetCursorPos(&screen)) {
+                        const POINT client = mount_.ScreenPxToClientDip(screen);
+                        if (wa.contains(client.x, client.y)) { gx = client.x; gy = client.y; }
+                    }
+                    CreateNewGroupNear(gx, gy, paths);
+                }
             } else if (ctrl && shift && wp == 'C' && !interaction_.selected_paths.empty()) {
                 std::wstring joined;
                 for (const auto& p : interaction_.selected_paths) {
@@ -10556,6 +10757,9 @@ private:
     bool releasing_capture_ = false;
     model::PointI drag_start_pt_{0, 0};
     model::PointI drag_offset_{0, 0};
+    std::optional<size_t> drop_insert_index_;   // 任意拖动: the slot under the pointer in drop_target_group_id
+    std::string drag_flip_group_;                // a group whose pager a dragged file is held on
+    int drag_flip_step_ = 0;
     bool pending_item_drag_ = false;
     std::optional<size_t> pending_tile_idx_;
     bool tile_long_pressed_ = false;
