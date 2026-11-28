@@ -6656,5 +6656,8 @@ DockPreviewSetting	IDS_DOCK_PREVIEW_SETTING	8029	悬停显示窗口预览	Show w
 DockSpringMoveFormat	IDS_DOCK_SPRING_MOVE_FORMAT	8030	移动到「%s」	Move to %s	移動到「%s」
 DockSpringCopyFormat	IDS_DOCK_SPRING_COPY_FORMAT	8031	复制到「%s」	Copy to %s	複製到「%s」
 DockSpringDropped	IDS_DOCK_SPRING_DROPPED	8032	已放入「%s」	Moved to %s	已放入「%s」
-SettingsContextLargeIcons	IDS_SETTINGS_CONTEXT_LARGE_ICONS	8033	右键菜单大图标带文字	Large icons with labels in the context menu	右鍵選單大圖示含文字
-SettingsContextLargeIconsDesc	IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC	8034	将右键菜单顶部的剪切、复制、重命名、删除按钮放大，并在图标下方显示名称	Enlarge the Cut, Copy, Rename and Delete buttons at the top of the context menu and show their names underneath	將右鍵選單頂端的剪切、複製、重新命名、刪除按鈕放大，並在圖示下方顯示名稱
+SettingsContextLargeIcons	IDS_SETTINGS_CONTEXT_LARGE_ICONS	8033	图标样式	Icon style	圖示樣式
+SettingsContextLargeIconsDesc	IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC	8034	右键菜单顶部剪切、复制、删除、重命名按钮：原本、宽版或窄版	Cut, Copy, Delete and Rename buttons in the context menu: original, wide or narrow	右鍵選單頂端剪切、複製、刪除、重新命名按鈕：原本、寬版或窄版
+SettingsContextIconOriginal	IDS_SETTINGS_CONTEXT_ICON_ORIGINAL	8035	原本	Original	原本
+SettingsContextIconWide	IDS_SETTINGS_CONTEXT_ICON_WIDE	8036	宽版	Wide	寬版
+SettingsContextIconNarrow	IDS_SETTINGS_CONTEXT_ICON_NARROW	8037	窄版	Narrow	窄版

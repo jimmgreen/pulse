@@ -2684,27 +2684,34 @@ int wmain(int argc, wchar_t** argv) {
     parsed_prefs.ResetToDefaults();
     passed &= Report("reset turns double-click tab close off",
         !parsed_prefs.close_tab_on_double_click);
-    passed &= Report("context menu large icons setting has localized text",
-        pulse::l10n::Get(pulse::l10n::StringId::SettingsContextLargeIcons) ==
-            L"\u53F3\u952E\u83DC\u5355\u5927\u56FE\u6807\u5E26\u6587\u5B57" &&
-        !pulse::l10n::Get(pulse::l10n::StringId::SettingsContextLargeIconsDesc).empty());
-    passed &= Report("context menu icon strip stays compact by default",
-        !prefs.context_menu_large_icons);
+    passed &= Report("context menu icon style has localized text",
+        pulse::l10n::Get(pulse::l10n::StringId::SettingsContextLargeIcons) == L"\u56FE\u6807\u6837\u5F0F" &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsContextIconOriginal).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsContextIconWide).empty() &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsContextIconNarrow).empty());
+    passed &= Report("context menu icon style stays original by default",
+        prefs.context_menu_icon_style == 0);
     settings_ui.ToggleUi(69);
-    passed &= Report("context menu large icons enables and persists",
-        prefs.context_menu_large_icons && parsed_prefs.FromJson(prefs.ToJson()) &&
-        parsed_prefs.context_menu_large_icons);
+    passed &= Report("context menu icon style cycles to wide and persists",
+        prefs.context_menu_icon_style == 1 && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.context_menu_icon_style == 1);
     settings_ui.ToggleUi(69);
-    passed &= Report("context menu large icons disables and persists",
-        !prefs.context_menu_large_icons && parsed_prefs.FromJson(prefs.ToJson()) &&
-        !parsed_prefs.context_menu_large_icons);
-    parsed_prefs.context_menu_large_icons = true;
-    passed &= Report("legacy preferences keep the compact icon strip",
-        parsed_prefs.FromJson(L"{}") && !parsed_prefs.context_menu_large_icons);
-    parsed_prefs.context_menu_large_icons = true;
+    passed &= Report("context menu icon style cycles to narrow and persists",
+        prefs.context_menu_icon_style == 2 && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.context_menu_icon_style == 2);
+    settings_ui.ToggleUi(69);
+    passed &= Report("context menu icon style cycles back to original",
+        prefs.context_menu_icon_style == 0 && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.context_menu_icon_style == 0);
+    passed &= Report("legacy wide-icon preference migrates to the wide style",
+        parsed_prefs.FromJson(L"{\"context_menu_large_icons\":true}") &&
+        parsed_prefs.context_menu_icon_style == 1);
+    passed &= Report("legacy preferences keep the original icon strip",
+        parsed_prefs.FromJson(L"{}") && parsed_prefs.context_menu_icon_style == 0);
+    parsed_prefs.context_menu_icon_style = 2;
     parsed_prefs.ResetToDefaults();
-    passed &= Report("reset turns context menu large icons off",
-        !parsed_prefs.context_menu_large_icons);
+    passed &= Report("reset turns context menu icon style back to original",
+        parsed_prefs.context_menu_icon_style == 0);
     passed &= Report("confirm before deleting setting has localized text",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDelete).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDeleteDesc).empty() &&

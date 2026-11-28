@@ -259,15 +259,24 @@ int main(int argc, char** argv) {
         "all optional rows can be hidden while Open and four fixed edit buttons remain");
     {
         const auto compact = BuildItemMenu(false, L"", true);
-        const auto large = BuildItemMenu(false, L"", true, false, true);
+        const auto wide = BuildItemMenu(false, L"", true, false, ui::SwatchButtonStyle::Wide);
+        const auto narrow = BuildItemMenu(false, L"", true, false, ui::SwatchButtonStyle::Narrow);
         const auto& plain_strip = compact[1].quick_swatches;
-        const auto& big_strip = large[1].quick_swatches;
-        check(!plain_strip.empty() && plain_strip[0].label.empty() && !plain_strip[0].large_button &&
-              big_strip.size() == 4 && big_strip[0].large_button &&
-              !big_strip[0].label.empty() && !big_strip[1].label.empty() &&
-              !big_strip[2].label.empty() && !big_strip[3].label.empty() &&
-              big_strip[0].command == CmdCut && big_strip[3].command == CmdRename && WellFormed(large),
-              "large-icon switch names all four action buttons without changing their commands");
+        const auto& wide_strip = wide[1].quick_swatches;
+        const auto& narrow_strip = narrow[1].quick_swatches;
+        const bool labelled = !wide_strip.empty() && !narrow_strip.empty() &&
+            !wide_strip[0].label.empty() && !wide_strip[1].label.empty() &&
+            !wide_strip[2].label.empty() && !wide_strip[3].label.empty() &&
+            !narrow_strip[0].label.empty() && !narrow_strip[1].label.empty() &&
+            !narrow_strip[2].label.empty() && !narrow_strip[3].label.empty();
+        check(!plain_strip.empty() && plain_strip[0].label.empty() &&
+              plain_strip[0].button_style == ui::SwatchButtonStyle::None &&
+              wide_strip.size() == 4 && wide_strip[0].button_style == ui::SwatchButtonStyle::Wide &&
+              narrow_strip.size() == 4 && narrow_strip[0].button_style == ui::SwatchButtonStyle::Narrow &&
+              labelled && wide_strip[0].command == CmdCut && wide_strip[3].command == CmdRename &&
+              narrow_strip[0].command == CmdCut && narrow_strip[3].command == CmdRename &&
+              WellFormed(wide) && WellFormed(narrow),
+              "both labelled icon styles name all four buttons without changing their commands");
     }
     rows = {Row(CmdOpen), Row(CmdCut), Row(CmdCopy), Row(CmdDelete), Row(CmdRename)};
     ApplyBuiltinMenuPrefs(rows, prefs); check(rows.size() == 5, "fixed commands also survive as standalone rows");

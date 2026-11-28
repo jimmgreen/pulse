@@ -6651,5 +6651,8 @@
 #define IDS_DOCK_SPRING_DROPPED                                                          8032
 #define IDS_SETTINGS_CONTEXT_LARGE_ICONS                                                 8033
 #define IDS_SETTINGS_CONTEXT_LARGE_ICONS_DESC                                            8034
+#define IDS_SETTINGS_CONTEXT_ICON_ORIGINAL                                               8035
+#define IDS_SETTINGS_CONTEXT_ICON_WIDE                                                   8036
+#define IDS_SETTINGS_CONTEXT_ICON_NARROW                                                 8037
 
 #endif  // PULSE_STRING_IDS_H

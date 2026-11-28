@@ -135,9 +135,9 @@ struct AppPrefs {
     bool close_window_with_last_tab = true;
     // Double-clicking a tab closes it, like its close button (app/last_tab_close.h).
     bool close_tab_on_double_click = false;
-    // Settings > 右键菜单: draw the cut/copy/delete/rename strip with larger
-    // icons and their names underneath, like File Explorer's command bar.
-    bool context_menu_large_icons = false;
+    // Settings > 右键菜单: 0 original compact strip, 1 wide labelled buttons,
+    // 2 narrow labelled buttons (three-way segmented choice).
+    int context_menu_icon_style = 0;
     bool confirm_recycle_delete = false; // ask before Delete moves items to the Recycle Bin
     // Sign-in launches (Run value with --startup) stay hidden behind the tray icon.
     bool start_in_tray = false;

@@ -138,18 +138,27 @@ bool HasLayoutTiles(const FluentMenuItem& it) {
     return !it.quick_swatches.empty() && !it.quick_swatches.front().label.empty();
 }
 
+SwatchButtonStyle ButtonStyle(const FluentMenuItem& it) {
+    return it.quick_swatches.empty() ? SwatchButtonStyle::None
+                                     : it.quick_swatches.front().button_style;
+}
+
 bool HasLargeButtons(const FluentMenuItem& it) {
-    return !it.quick_swatches.empty() && it.quick_swatches.front().large_button;
+    return ButtonStyle(it) != SwatchButtonStyle::None;
 }
 
 float SwatchSpacingDip(const FluentMenuItem& it) {
-    if (HasLargeButtons(it)) return 72.0f;
+    // Wide keeps the original comfortable layout (menu reaches its 320 DIP
+    // cap); Narrow fits four labelled buttons inside the normal menu width.
+    if (ButtonStyle(it) == SwatchButtonStyle::Wide) return 72.0f;
+    if (ButtonStyle(it) == SwatchButtonStyle::Narrow) return 52.0f;
     if (HasLayoutTiles(it)) return 94.0f;
     return SwatchStripHasGlyphs(it) ? 44.0f : 28.0f;
 }
 
 float SwatchHitRadiusDip(const FluentMenuItem& it) {
-    if (HasLargeButtons(it)) return 36.0f;
+    if (ButtonStyle(it) == SwatchButtonStyle::Wide) return 36.0f;
+    if (ButtonStyle(it) == SwatchButtonStyle::Narrow) return 26.0f;
     if (HasLayoutTiles(it)) return 44.0f;
     return SwatchStripHasGlyphs(it) ? 20.0f : 13.0f;
 }
@@ -1391,22 +1400,28 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
                     const float center_x = first + spacing * static_cast<float>(swatch_index);
                     const bool hovered = i == hover_row &&
                                          static_cast<int>(swatch_index) == hover_swatch;
-                    if (swatch.large_button) {
+                    if (swatch.button_style != SwatchButtonStyle::None) {
                         // File Explorer style action: big glyph on top, its
                         // name underneath. The whole tile is the hit target.
-                        const auto tile = D2D1::RectF(center_x - 30*scale_, center_y - 28*scale_,
-                                                      center_x + 30*scale_, center_y + 28*scale_);
+                        // Narrow keeps the same glyph size but trims the tile
+                        // and label padding so four buttons fit the menu width.
+                        const bool narrow = swatch.button_style == SwatchButtonStyle::Narrow;
+                        const float half_w = (narrow ? 23.0f : 30.0f) * scale_;
+                        const float glyph_half = (narrow ? 10.0f : 11.0f) * scale_;
+                        const float pad = (narrow ? 1.0f : 2.0f) * scale_;
+                        const auto tile = D2D1::RectF(center_x - half_w, center_y - 28*scale_,
+                                                      center_x + half_w, center_y + 28*scale_);
                         if (hovered && it->enabled)
                             painter_.FillRoundedRect(tile, 6*scale_, theme.fill_hover);
                         const auto ink = it->enabled ? theme.text : theme.text_disabled;
                         if (!swatch.glyph.empty())
                             painter_.DrawGlyph(swatch.glyph,
-                                D2D1::RectF(center_x - 11*scale_, tile.top + 5*scale_,
-                                            center_x + 11*scale_, tile.top + 27*scale_), ink);
+                                D2D1::RectF(center_x - glyph_half, tile.top + 5*scale_,
+                                            center_x + glyph_half, tile.top + 27*scale_), ink);
                         if (!swatch.label.empty())
                             painter_.DrawText(swatch.label,
-                                D2D1::RectF(tile.left + 2*scale_, tile.top + 31*scale_,
-                                            tile.right - 2*scale_, tile.bottom - 1*scale_),
+                                D2D1::RectF(tile.left + pad, tile.top + 31*scale_,
+                                            tile.right - pad, tile.bottom - 1*scale_),
                                 compositor_->SmallFormat(), ink, fluent::HorizontalAlignment::Center);
                     } else if (!swatch.label.empty()) {
                         const auto tile = D2D1::RectF(center_x - 43*scale_, center_y - 32*scale_, center_x + 43*scale_, center_y + 32*scale_);

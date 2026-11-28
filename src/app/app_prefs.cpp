@@ -100,7 +100,7 @@ void AppPrefs::ResetToDefaults() {
     external_open = 0;
     close_window_with_last_tab = true;
     close_tab_on_double_click = false;
-    context_menu_large_icons = false;
+    context_menu_icon_style = 0;
     confirm_recycle_delete = false;
     start_in_tray = false;
     lan_discovery = true;
@@ -344,8 +344,8 @@ std::wstring AppPrefs::ToJson() const {
     out += close_window_with_last_tab ? L"true" : L"false";
     out += L",\n  \"close_tab_on_double_click\":";
     out += close_tab_on_double_click ? L"true" : L"false";
-    out += L",\n  \"context_menu_large_icons\":";
-    out += context_menu_large_icons ? L"true" : L"false";
+    out += L",\n  \"context_menu_icon_style\":";
+    out += std::to_wstring(context_menu_icon_style);
     out += L",\n  \"confirm_recycle_delete\":";
     out += confirm_recycle_delete ? L"true" : L"false";
     out += L",\n  \"start_in_tray\":";
@@ -731,8 +731,12 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     // Missing key = preferences saved before the setting existed: keep their behavior.
     close_window_with_last_tab = pulse::json::ExtractBool(json, L"close_window_with_last_tab", false);
     close_tab_on_double_click = pulse::json::ExtractBool(json, L"close_tab_on_double_click", false);
-    // Preferences saved before the switch keep the compact icon row.
-    context_menu_large_icons = pulse::json::ExtractBool(json, L"context_menu_large_icons", false);
+    // Migrate the earlier boolean switch: it selected the wide layout.
+    const int icon_style = pulse::json::ExtractInt(json, L"context_menu_icon_style", -1);
+    if (icon_style >= 0 && icon_style <= 2)
+        context_menu_icon_style = icon_style;
+    else
+        context_menu_icon_style = pulse::json::ExtractBool(json, L"context_menu_large_icons", false) ? 1 : 0;
     confirm_recycle_delete = pulse::json::ExtractBool(json, L"confirm_recycle_delete", false);
     start_in_tray = pulse::json::ExtractBool(json, L"start_in_tray", false);
     lan_discovery = pulse::json::ExtractBool(json, L"lan_discovery", true);

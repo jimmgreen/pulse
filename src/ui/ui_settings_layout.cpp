@@ -319,7 +319,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             ny+=26*scale;
             l.context_system_hint=D2D1::RectF(left+6*scale,ny,left+nav_w-6*scale,ny+32*scale);
             ny+=32*scale+4*scale;
-            l.context_large_icons_row=D2D1::RectF(left+6*scale,ny,left+nav_w-6*scale,ny+34*scale);
+            l.context_icon_style_row=D2D1::RectF(left+6*scale,ny,left+nav_w-6*scale,ny+34*scale);
             ny+=34*scale+8*scale;
             l.pulse_tabs=D2D1::RectF(left,top,left+nav_w,ny);
             // Middle card: head with 恢复默认, the preset chips, the rows.
