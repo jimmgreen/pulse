@@ -1,4 +1,5 @@
 #include "../app/app_internal.h"
+#include "../ui/ui_renderer.h"
 #include "../common/localization.h"
 #include <functional>
 #include <iostream>
