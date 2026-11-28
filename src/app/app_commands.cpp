@@ -1550,7 +1550,16 @@ bool UnpinSelectedNetworks(AppState& s) {
 void RenameSelected(AppState& s) {
     // A share, a network location, a Recycle Bin item or a locked drive has no
     // name to change here (drives rename their label).
-    if (SelectionCapsOf(s).rename) ShowRenameOverlay(s);
+    const app::SelectionCaps caps = SelectionCapsOf(s);
+    if (!caps.rename) return;
+    // Several files: the same command (F2, the item menu, the strip) opens the
+    // batch rename dialog instead of editing one name in place.
+    const app::Tab* tab = ActiveTab(s);
+    if (caps.kind == app::SelectionKind::Files && tab && tab->SelectedCount() >= 2) {
+        ShowBatchRename(s);
+        return;
+    }
+    ShowRenameOverlay(s);
 }
 
 void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result) {
@@ -2148,7 +2157,19 @@ bool CanPinNetwork(AppState& s) {
 void AdaptItemMenu(AppState& s, std::vector<ui::FluentMenuItem>& items, const app::SelectionCaps& caps) {
     if (TerminalTarget(s).empty()) EraseCommand(items, app::CmdOpenTerminal);
     if (!CanPinNetwork(s)) EraseCommand(items, app::CmdPinNetwork);
-    if (caps.kind == app::SelectionKind::Files || caps.kind == app::SelectionKind::None) return;
+    if (caps.kind == app::SelectionKind::Files) {
+        // Several files: the strip's 重命名 opens the batch rename dialog, so
+        // the button says so instead of promising a single in-place edit.
+        const app::Tab* tab = ActiveTab(s);
+        if (tab && tab->SelectedCount() >= 2) {
+            for (auto& item : items)
+                for (auto& button : item.quick_swatches)
+                    if (button.command == app::CmdRename && !button.label.empty())
+                        button.label = l10n::Get(l10n::StringId::BatchRename);
+        }
+        return;
+    }
+    if (caps.kind == app::SelectionKind::None) return;
     if (caps.kind == app::SelectionKind::Launchers) {
         // Program icons in This PC: opening the program is all they do. A
         // phone keeps 属性; its other rows are the shell's, from the host.

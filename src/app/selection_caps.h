@@ -33,7 +33,7 @@ struct SelectionCaps {
     bool cut = false;
     bool copy = false;
     bool del = false;     // networks view: removes the selected pins
-    bool rename = false;  // one item; a drive's label
+    bool rename = false;  // one item in place, several as a batch; a drive's label
     bool tags = false;    // only real file / folder selections
     // Drives: what the selected drives allow (any of them).
     bool any_removable = false;  // DRIVE_REMOVABLE / DRIVE_CDROM (fixed USB disks: see DriveEjectable)
@@ -187,7 +187,9 @@ inline SelectionCaps ComputeSelectionCaps(const Tab& tab, const PlacesCatalog* p
         }
     }
     caps.cut = caps.copy = caps.del = true;
-    caps.rename = count == 1;
+    // One file renames in place, a multi-selection opens the batch rename
+    // dialog (F2 and the item menu both land there), so the command stays on.
+    caps.rename = true;
     caps.tags = true;
     return caps;
 }
