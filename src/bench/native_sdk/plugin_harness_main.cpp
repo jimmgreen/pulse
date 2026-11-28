@@ -25,6 +25,7 @@
 #include "../../app/extensions/native/ui_model.h"
 #include "../../app/extensions/native/vfs_adapter.h"
 #include "../../app/extensions/native/columns_adapter.h"
+#include "../../app/extensions/native/extcapsules_adapter.h"
 #include "../../app/extensions/column_registry.h"
 #include "../../app/extensions/native/workbench_adapter.h"
 #include "../../app/extensions/ui_tree.h"
@@ -57,6 +58,7 @@
 #include <pulse/ui_mount.h>
 #include <pulse/vfs.h>
 #include <pulse/columns.h>
+#include <pulse/extcapsules.h>
 #include <pulse/workbench.h>
 
 #include <algorithm>
@@ -143,7 +145,7 @@ const char* InterfaceStabilityTier(std::string_view name) noexcept {
         "pulse.settings.pages",
         "pulse.dialogs",
     };
-    static constexpr std::array<std::string_view, 14> kExperimental = {
+    static constexpr std::array<std::string_view, 15> kExperimental = {
         "pulse.ui.model",
         "pulse.ui.events",
         "pulse.ui.data",
@@ -158,6 +160,7 @@ const char* InterfaceStabilityTier(std::string_view name) noexcept {
         "pulse.associations",
         "pulse.vfs",
         "pulse.columns",
+        "pulse.extcapsules",
     };
     if (std::find(kFrozen.begin(), kFrozen.end(), name) != kFrozen.end()) {
         return "frozen";
@@ -333,6 +336,7 @@ public:
         pulse::extensions::native::AssociationsAdapter* associations,
         pulse::extensions::native::VfsAdapter* vfs,
         pulse::extensions::native::ColumnsAdapter* columns,
+        pulse::extensions::native::ExtCapsulesAdapter* extcapsules,
         std::shared_ptr<pulse::extensions::native::DiagnosticsSink> diagnostics_sink) noexcept {
         commands_ = commands;
         icons_ = icons;
@@ -348,6 +352,7 @@ public:
         associations_ = associations;
         vfs_ = vfs;
         columns_ = columns;
+        extcapsules_ = extcapsules;
         diagnostics_sink_ = std::move(diagnostics_sink);
     }
 
@@ -565,6 +570,9 @@ private:
         }
         if (name == PULSE_COLUMNS_INTERFACE_NAME) {
             return columns_ ? columns_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
+        }
+        if (name == PULSE_EXTCAPSULES_INTERFACE_NAME) {
+            return extcapsules_ ? extcapsules_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
         }
         if (name == PULSE_TASKS_INTERFACE_NAME) {
             return tasks_ ? tasks_->Query(version, out_table, out_size) : PULSE_ERROR_UNAVAILABLE;
@@ -1774,6 +1782,7 @@ private:
     pulse::extensions::native::AssociationsAdapter* associations_ = nullptr;
     pulse::extensions::native::VfsAdapter* vfs_ = nullptr;
     pulse::extensions::native::ColumnsAdapter* columns_ = nullptr;
+    pulse::extensions::native::ExtCapsulesAdapter* extcapsules_ = nullptr;
     std::shared_ptr<pulse::extensions::native::DiagnosticsSink> diagnostics_sink_;
 
     std::vector<QueryAuditEntry> queries_;
@@ -2483,6 +2492,13 @@ int wmain(int argc, wchar_t** argv) {
         wake_harness,
         &headless_columns_registry);
 
+    pulse::extensions::extcapsules::Registry headless_capsules_registry(false);
+    pulse::extensions::native::ExtCapsulesAdapter extcapsules(
+        manifest.id,
+        [&env]() { return env.Live(); },
+        diagnostics_sink,
+        &headless_capsules_registry);
+
     pulse::extensions::native::IconsAdapter icons(
         manifest.id,
         [&env]() { return env.Live(); });
@@ -2514,6 +2530,7 @@ int wmain(int argc, wchar_t** argv) {
         &associations,
         &vfs,
         &columns,
+        &extcapsules,
         diagnostics_sink);
 
     // Decide verified vs unverified load.
@@ -2798,6 +2815,8 @@ int wmain(int argc, wchar_t** argv) {
             tasks.Poll();
         }
 
+        const size_t registered_capsule_rules = headless_capsules_registry.RuleCount();
+        (void)registered_capsule_rules;
         // Stop host adapters before final module Close (mirrors host session teardown order).
         pickers.Close();
         dialogs.Close();
@@ -2808,6 +2827,7 @@ int wmain(int argc, wchar_t** argv) {
         associations.Close();
         vfs.Close();
         columns.Close();
+        extcapsules.Close();
         diagnostics.Close();
         commands.Close();
         icons.Close();

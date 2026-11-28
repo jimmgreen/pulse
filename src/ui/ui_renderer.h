@@ -1270,14 +1270,15 @@ private:
                        const D2D1_COLOR_F* foreground = nullptr, bool colorful = false);
     // Returns true when the name had to be shortened with an ellipsis.
     bool DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
-                           const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches, bool dim_extension = false);
+                           const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
+                           bool dim_extension = false, bool allow_capsule = false);
     // Icon-grid name: up to `max_lines` centered lines; a longer name keeps
     // its end ("a…z.ext"). Returns (and sets `truncated`) when it was elided.
     bool DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
                               const D2D1_COLOR_F& color, const Theme& theme,
                               const std::vector<NameMatchRange>& matches, bool* truncated = nullptr,
                               int max_lines = kIconGridNameLines, float* text_height = nullptr,
-                              bool dim_extension = false);
+                              bool dim_extension = false, bool allow_capsule = false);
     void DimNameExtension(IDWriteTextLayout* layout, const std::wstring& name,
                           const std::wstring& shown, const D2D1_COLOR_F& color);
     // The selected item's whole name (up to 6 lines) on an opaque plate that
@@ -1286,7 +1287,8 @@ private:
                               const D2D1_COLOR_F& color, const Theme& theme,
                               const std::vector<NameMatchRange>& matches, bool pane_focused,
                               const D2D1_RECT_F& view, const std::wstring& note = {},
-                              const D2D1_COLOR_F& note_color = {}, bool dim_extension = false);
+                              const D2D1_COLOR_F& note_color = {}, bool dim_extension = false,
+                              bool allow_capsule = false);
     // Title-bar product mark from the app icon resource (nullptr until loaded).
     ID2D1Bitmap* LogoBitmap();
 

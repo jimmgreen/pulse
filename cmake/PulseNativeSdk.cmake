@@ -224,6 +224,22 @@ if(MSVC)
         /NODEFAULTLIB:gdi32.lib
         /NODEFAULTLIB:shell32.lib)
 endif()
+add_executable(pulse_native_extcapsules_test
+    "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/extcapsules_test.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/extcapsule_registry.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/extcapsules_adapter.cpp"
+    "${PULSE_NATIVE_ROOT}/src/app/extensions/native/diagnostics_adapter.cpp")
+target_include_directories(pulse_native_extcapsules_test PRIVATE "${PULSE_NATIVE_ROOT}/sdk/native/include")
+target_compile_features(pulse_native_extcapsules_test PRIVATE cxx_std_20)
+target_compile_definitions(pulse_native_extcapsules_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(pulse_native_extcapsules_test PRIVATE kernel32)
+if(MSVC)
+    target_compile_options(pulse_native_extcapsules_test PRIVATE /W4 /WX /permissive- /utf-8 /EHsc)
+    target_link_options(pulse_native_extcapsules_test PRIVATE
+        /NODEFAULTLIB:user32.lib
+        /NODEFAULTLIB:gdi32.lib
+        /NODEFAULTLIB:shell32.lib)
+endif()
 add_executable(pulse_native_fileevents_test
     "${PULSE_NATIVE_ROOT}/src/bench/native_sdk/fileevents_test.cpp"
     "${PULSE_NATIVE_ROOT}/src/app/extensions/file_event_hub.cpp"

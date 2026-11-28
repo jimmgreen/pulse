@@ -20,6 +20,7 @@
 #include "vfs.h"
 #include "columns.h"
 #include "statusbar.h"
+#include "extcapsules.h"
 #include "fileevents.h"
 #include "preview.h"
 #include "workbench.h"
@@ -3017,6 +3018,88 @@ public:
         if (out_status) *out_status = st;
         if (st == PULSE_OK) return item;
         return std::nullopt;
+    }
+};
+
+// ---- Inline filename extension capsules (pulse.extcapsules) ----
+struct ExtCapsuleRule {
+    std::string extension;  // lowercase ASCII without dot, e.g. "psd"
+    uint32_t light_bg = 0;
+    uint32_t light_text = 0;
+    uint32_t light_border = 0;
+    uint32_t dark_bg = 0;
+    uint32_t dark_text = 0;
+    uint32_t dark_border = 0;
+    uint32_t flags = 0;     // PULSE_EXT_CAPSULE_FLAG_*
+};
+
+struct ExtCapsuleStyle {
+    uint32_t corner_radius_milli = 0;   // 0 = 4000 (4.0 DIP)
+    uint32_t padding_x_milli = 0;       // 0 = 5000 (5.0 DIP)
+    uint32_t padding_y_milli = 0;       // 0 = 1000 (1.0 DIP)
+    uint32_t border_width_milli = 0;    // 0 = 1000 (1.0 DIP)
+    uint32_t gap_milli = 0;             // 0 = 4000 (4.0 DIP)
+    int32_t font_size_delta_milli = 0;  // 0 = -1000 (-1.0 DIP)
+    uint32_t font_weight = 0;           // 0 = 600 (SemiBold)
+};
+
+class ExtCapsulesClient {
+    PulseExtCapsulesV1 api_{};
+
+public:
+    ExtCapsulesClient() = default;
+    explicit ExtCapsulesClient(const PulseExtCapsulesV1& api) noexcept : api_(api) {}
+
+    PulseStatus Attach(const Host& host) noexcept {
+        return host.Query(PULSE_EXTCAPSULES_INTERFACE_NAME, PULSE_EXTCAPSULES_VERSION_1, api_);
+    }
+    static std::optional<ExtCapsulesClient> TryQuery(const Host& host) noexcept {
+        ExtCapsulesClient client;
+        if (client.Attach(host) == PULSE_OK) return client;
+        return std::nullopt;
+    }
+
+    bool Available() const noexcept { return api_.set_rules != nullptr && api_.clear_rules != nullptr; }
+    const PulseExtCapsulesV1& Table() const noexcept { return api_; }
+
+    PulseStatus SetRules(const std::vector<ExtCapsuleRule>& rules,
+                         const std::optional<ExtCapsuleStyle>& style = std::nullopt) const {
+        if (!api_.set_rules) return PULSE_ERROR_UNAVAILABLE;
+        PulseExtCapsuleStyle raw_style{};
+        const PulseExtCapsuleStyle* style_ptr = nullptr;
+        if (style) {
+            raw_style.size = sizeof(raw_style);
+            raw_style.corner_radius_milli = style->corner_radius_milli;
+            raw_style.padding_x_milli = style->padding_x_milli;
+            raw_style.padding_y_milli = style->padding_y_milli;
+            raw_style.border_width_milli = style->border_width_milli;
+            raw_style.gap_milli = style->gap_milli;
+            raw_style.font_size_delta_milli = style->font_size_delta_milli;
+            raw_style.font_weight = style->font_weight;
+            style_ptr = &raw_style;
+        }
+        std::vector<PulseExtCapsuleRule> raw;
+        raw.reserve(rules.size());
+        for (const auto& rule : rules) {
+            PulseExtCapsuleRule item{};
+            item.size = sizeof(item);
+            item.flags = rule.flags;
+            item.extension = View(rule.extension);
+            item.light_bg = rule.light_bg;
+            item.light_text = rule.light_text;
+            item.light_border = rule.light_border;
+            item.dark_bg = rule.dark_bg;
+            item.dark_text = rule.dark_text;
+            item.dark_border = rule.dark_border;
+            raw.push_back(item);
+        }
+        return api_.set_rules(api_.context, style_ptr, raw.empty() ? nullptr : raw.data(),
+                              static_cast<uint32_t>(raw.size()));
+    }
+
+    PulseStatus Clear() const noexcept {
+        if (!api_.clear_rules) return PULSE_ERROR_UNAVAILABLE;
+        return api_.clear_rules(api_.context);
     }
 };
 

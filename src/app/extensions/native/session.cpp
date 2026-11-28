@@ -26,6 +26,7 @@
 #include "vfs_adapter.h"
 #include "columns_adapter.h"
 #include "statusbar_adapter.h"
+#include "extcapsules_adapter.h"
 #include "fileevents_adapter.h"
 #include "vfs_adapter_host.h"
 #include "directories_adapter.h"
@@ -290,6 +291,7 @@ struct Session : std::enable_shared_from_this<Session> {
     std::unique_ptr<VfsAdapter> vfs;
     std::unique_ptr<ColumnsAdapter> columns;
     std::unique_ptr<StatusBarAdapter> statusbar;
+    std::unique_ptr<ExtCapsulesAdapter> extcapsules;
     std::unique_ptr<FileEventsAdapter> fileevents;
     std::unique_ptr<IconsAdapter> icons;
     std::unique_ptr<DirectoriesAdapter> directories;
@@ -438,6 +440,7 @@ struct Session : std::enable_shared_from_this<Session> {
             if (vfs) vfs->Close();
             if (columns) columns->Close();
             if (statusbar) statusbar->Close();
+            if (extcapsules) extcapsules->Close();
             if (fileevents) fileevents->Close();
             if (diagnostics) diagnostics->Close();
             if (settings_pages) settings_pages->Close();
@@ -549,6 +552,7 @@ PulseStatus PULSE_CALL Query(void* context, PulseStringView name, uint32_t versi
     if (Name(name, PULSE_VFS_INTERFACE_NAME)) return session->vfs->Query(version, out, size);
     if (Name(name, PULSE_COLUMNS_INTERFACE_NAME)) return session->columns->Query(version, out, size);
     if (Name(name, PULSE_STATUSBAR_INTERFACE_NAME)) return session->statusbar->Query(version, out, size);
+    if (Name(name, PULSE_EXTCAPSULES_INTERFACE_NAME)) return session->extcapsules->Query(version, out, size);
     if (Name(name, PULSE_FILEEVENTS_INTERFACE_NAME)) return session->fileevents->Query(version, out, size);
     if (Name(name, PULSE_ICONS_INTERFACE_NAME)) return session->icons->Query(version, out, size);
     if (Name(name, PULSE_UI_MODEL_INTERFACE)) return session->ui->QueryModel(version, out, size);
@@ -749,6 +753,7 @@ bool Start(AppState& owner, size_t package, const std::wstring& path, bool activ
         wake);
     session->columns = std::make_unique<ColumnsAdapter>(manifest->id, is_live, session->diagnostics_sink, wake);
     session->statusbar = std::make_unique<StatusBarAdapter>(manifest->id, is_live, session->diagnostics_sink);
+    session->extcapsules = std::make_unique<ExtCapsulesAdapter>(manifest->id, is_live, session->diagnostics_sink);
     session->fileevents = std::make_unique<FileEventsAdapter>(manifest->id, is_live, session->diagnostics_sink);
     session->icons = std::make_unique<IconsAdapter>(manifest->id, is_live);
     session->files = std::make_unique<FilesAdapter>(owner, *binding);

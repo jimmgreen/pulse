@@ -37,6 +37,7 @@
 #include <vector>
 #include <wrl/client.h>
 #include "known_extensions.h"
+#include "ext_capsule_render.h"
 
 namespace pulse::ui {
 
@@ -3673,7 +3674,8 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
                                  Compositor* compositor, IDWriteFactory2* factory,
                                  IDWriteTextFormat* fmt, bool change_badge = false, int action_slots = 0,
                                  const std::vector<NameMatchRange>& matches = {},
-                                 unsigned allowed_actions = 7u) {
+                                 unsigned allowed_actions = 7u,
+                                 bool allow_capsule = false) {
     // allowed_actions: hover buttons the user keeps (bit 0 star, bit 1 new
     // tab, bit 2 more). A turned-off button is neither drawn nor reserved.
     show_star = show_star && (allowed_actions & 1u);
@@ -3694,14 +3696,35 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     const float by = cell_top + (cell_bottom - cell_top - btn) * 0.5f;
     const float diameter = t.tag_r * 2.0f;
 
+    std::optional<ext_capsule::Match> capsule_match;
+    ext_capsule::CapsuleMetrics capsule_metrics{};
+    std::wstring capsule_stem;
+    std::vector<NameMatchRange> capsule_stem_matches;
+    if (allow_capsule && !IsHighContrast() && ext_capsule::HasAnyRules()) {
+        capsule_match = ext_capsule::MatchFileName(name, false);
+        if (capsule_match) {
+            capsule_metrics = ext_capsule::MeasureCapsule(compositor, factory, fmt, *capsule_match, scale);
+            if (capsule_metrics.width > 1.0f) {
+                capsule_stem.assign(capsule_match->stem);
+                capsule_stem_matches = ext_capsule::StemMatchRanges(matches, capsule_stem.size());
+            } else {
+                capsule_match.reset();
+            }
+        }
+    }
+
     // Star / new tab / more dock to the right edge of the name column so
     // every row lines up, independent of filename length.
     float dock = col_right - pad;
     bool reserve_actions = action_slots > 0 || (change_badge && badge_w > 0.0f);
     // Choose the action density from content, never hover state. Keep star and
     // more available; opening in a new tab is also in the more menu.
-    const float full_name_width = MeasureLayoutText(compositor, factory, fmt, name) +
-        HighlightPaddingWidth(name, name, matches, scale);
+    const float full_name_width = capsule_match
+        ? (std::ceil(MeasureLayoutText(compositor, factory, fmt, capsule_stem) +
+                     HighlightPaddingWidth(capsule_stem, capsule_stem, capsule_stem_matches, scale)) +
+           capsule_metrics.gap + capsule_metrics.width)
+        : (MeasureLayoutText(compositor, factory, fmt, name) +
+           HighlightPaddingWidth(name, name, matches, scale));
     const float content_width = full_name_width +
         badge_w + gap + (t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f);
     const bool compact_actions = action_slots == 2 || (reserve_actions &&
@@ -3749,9 +3772,19 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     const float tags_gap = t.tag_n > 0 ? gap : 0.0f;
     const float budget = std::max(0.0f,
         dock - name_x - badge_gap - badge_w - tags_gap - tags_w);
-    const std::wstring fitted = FitHighlightedFileName(compositor, factory, fmt, name, budget, matches, scale);
-    t.name_w = std::min(budget, MeasureLayoutText(compositor, factory, fmt, fitted) +
-        HighlightPaddingWidth(name, fitted, matches, scale));
+    if (capsule_match && budget >= capsule_metrics.width + capsule_metrics.gap + 12.0f * scale) {
+        const float stem_budget = std::max(1.0f, budget - capsule_metrics.width - capsule_metrics.gap);
+        const std::wstring fitted_stem = FitHighlightedFileName(
+            compositor, factory, fmt, capsule_stem, stem_budget, capsule_stem_matches, scale);
+        const float stem_w = std::min(stem_budget,
+            std::ceil(MeasureLayoutText(compositor, factory, fmt, fitted_stem) +
+                      HighlightPaddingWidth(capsule_stem, fitted_stem, capsule_stem_matches, scale)));
+        t.name_w = std::min(budget, stem_w + capsule_metrics.gap + capsule_metrics.width);
+    } else {
+        const std::wstring fitted = FitHighlightedFileName(compositor, factory, fmt, name, budget, matches, scale);
+        t.name_w = std::min(budget, MeasureLayoutText(compositor, factory, fmt, fitted) +
+            HighlightPaddingWidth(name, fitted, matches, scale));
+    }
     float trail_x = name_x + t.name_w;
     if (badge_w > 0.0f && !change_badge) {
         trail_x += badge_gap;

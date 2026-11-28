@@ -622,6 +622,7 @@ struct AppState : AppCoreOwner {
     bool mediaResortWaiting = false;  // a media-column re-sort is waiting (ResortForMediaProps)
     uint64_t extensionColumnsRevision = 0;  // pulse.columns values / providers this window has painted
     uint64_t extensionStatusRevision = 0;   // pulse.statusbar items this window has painted
+    uint64_t extensionCapsuleRevision = 0;  // pulse.extcapsules rules this window has painted
     uint64_t cloudSyncRevision = 0;  // CloudSyncProbe answers this window has painted  // tag catalog revision last published for grouping
     float addressSearchAnimation = 0.0f;
     float addressScopeAnimation = 0.0f;

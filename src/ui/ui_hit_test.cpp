@@ -2169,7 +2169,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             paneVm.view_mode == ViewMode::Details ? (entry.is_dir ? 3 : 2) : 0,
                             NameMatchRanges(entry.name, NameHighlightTerms(paneVm.filter_text,
                                 paneVm.is_search ? paneVm.search_query : L"")),
-                            row_actions_);
+                            row_actions_,
+                            !entry.is_dir && entry.alias.empty() && !entry.hidden_ext);
                         // 放到文件名上: the icon, or the name as drawn (icon grids:
                         // the whole name block under the icon), a little slop around.
                         {

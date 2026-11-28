@@ -676,6 +676,20 @@ public:
     }
     StatusBarClient* StatusBar() noexcept { return statusbar_ ? &*statusbar_ : nullptr; }
 
+    // ---- Inline filename extension capsules (pulse.extcapsules) ----
+    // Replaces this package's extension capsule rules atomically. Cleared on stop.
+    PulseStatus SetExtensionCapsules(const std::vector<ExtCapsuleRule>& rules,
+                                     const std::optional<ExtCapsuleStyle>& style = std::nullopt) {
+        if (!active_) return PULSE_ERROR_STATE;
+        if (!extcapsules_) return PULSE_ERROR_UNAVAILABLE;
+        return extcapsules_->SetRules(rules, style);
+    }
+    PulseStatus ClearExtensionCapsules() noexcept {
+        if (!extcapsules_) return PULSE_ERROR_UNAVAILABLE;
+        return extcapsules_->Clear();
+    }
+    ExtCapsulesClient* ExtCapsules() noexcept { return extcapsules_ ? &*extcapsules_ : nullptr; }
+
     // ---- Folder, selection and file-operation hooks (pulse.context / pulse.fileevents) ----
     // All callbacks run on the UI thread and are read-only; removed on stop. Keep them short
     // (use RunTask / Post for real work).
@@ -748,6 +762,7 @@ public:
         icons_ = IconsClient::TryQuery(host_);
         columns_ = ColumnsClient::TryQuery(host_);
         statusbar_ = StatusBarClient::TryQuery(host_);
+        extcapsules_ = ExtCapsulesClient::TryQuery(host_);
         context_ = ContextClient::TryQuery(host_);
         fileevents_ = FileEventsClient::TryQuery(host_);
         preview_ = PreviewClient::TryQuery(host_);
@@ -778,6 +793,7 @@ public:
         if (was_active) { try { OnStop(); } catch (...) {} }
         column_regs_.clear();   // waits for a running column callback
         status_items_.clear();
+        if (extcapsules_) { try { (void)extcapsules_->Clear(); } catch (...) {} }
         context_subs_.clear();
         file_subs_.clear();
         previews_.clear();      // retries briefly while a provider call drains
@@ -976,6 +992,7 @@ private:
     std::vector<std::pair<std::string, ColumnsClient::Registration>> column_regs_;
     std::optional<StatusBarClient> statusbar_;
     std::vector<std::pair<std::string, StatusBarClient::Item>> status_items_;
+    std::optional<ExtCapsulesClient> extcapsules_;
     std::optional<ContextClient> context_;
     std::vector<ContextClient::Subscription> context_subs_;
     std::optional<FileEventsClient> fileevents_;
