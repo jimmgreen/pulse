@@ -309,6 +309,7 @@ bool TestAiBroker() {
 #include <dbt.h> // WM_DEVICECHANGE / DEV_BROADCAST_HDR
 #include "../ui/device_crumbs.h"
 #include "extensions/statusbar_registry.h"
+#include "extensions/extcapsule_registry.h"
 #include "extensions/file_event_hub.h"
 
 using namespace pulse;
@@ -2999,6 +3000,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, 
             if (const uint64_t ext_status = ::pulse::extensions::statusbar::Registry::Instance().Revision();
                 ext_status != s->extensionStatusRevision) {
                 s->extensionStatusRevision = ext_status;
+                dirty = true;
+            }
+            // Plugin extension capsules (pulse.extcapsules) changed.
+            if (const uint64_t ext_capsules = ::pulse::extensions::extcapsules::Registry::Instance().Revision();
+                ext_capsules != s->extensionCapsuleRevision) {
+                s->extensionCapsuleRevision = ext_capsules;
                 dirty = true;
             }
             // Sync states of on-screen cloud rows came back: repaint once.

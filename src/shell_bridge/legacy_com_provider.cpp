@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <cderr.h>
 #include <algorithm>
+#include <atomic>
 #include <string>
 #include <vector>
 #include <cstring>
@@ -14,6 +15,26 @@
 namespace pulse::shell_bridge {
 namespace {
 using Microsoft::WRL::ComPtr;
+std::atomic<bool> g_mirrored_test_override{false};
+bool IsPhotoshopProcess() noexcept {
+    static const bool is_ps = [] {
+        wchar_t path[32768]{};
+        const DWORD len = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
+        if (!len || len >= ARRAYSIZE(path)) return false;
+        const wchar_t* leaf = path;
+        for (const wchar_t* p = path; *p; ++p) {
+            if (*p == L'\\' || *p == L'/') leaf = p + 1;
+        }
+        return _wcsicmp(leaf, L"Photoshop.exe") == 0;
+    }();
+    return is_ps;
+}
+template<class O> bool IsMirroredHookCandidate(const O* input, bool save) noexcept {
+    if (!input || !save) return false;
+    if (!(input->Flags & OFN_EXPLORER) || !(input->Flags & OFN_ENABLEHOOK) || !input->lpfnHook) return false;
+    if (!(input->Flags & OFN_ENABLETEMPLATEHANDLE) || input->lpTemplateName != nullptr) return false;
+    return IsPhotoshopProcess() || g_mirrored_test_override.load(std::memory_order_relaxed);
+}
 constexpr DWORD supported = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_DONTADDTORECENT |
     OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_ALLOWMULTISELECT | OFN_ENABLESIZING |
     OFN_EXTENSIONDIFFERENT | OFN_OVERWRITEPROMPT | OFN_NOREADONLYRETURN | OFN_NODEREFERENCELINKS | OFN_FORCESHOWHIDDEN |
@@ -110,13 +131,38 @@ public:
     HRESULT STDMETHODCALLTYPE OnTypeChange(IFileDialog*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE OnOverwrite(IFileDialog*, IShellItem*, FDE_OVERWRITE_RESPONSE* result) override { *result = FDEOR_DEFAULT; return S_OK; }
 };
-template<class O> class LegacyHookEvents final : public IFileDialogEvents {
+template<class O> class LegacyHookEvents final : public IFileDialogEvents, public IFileDialogControlEvents {
+    static constexpr DWORD kMirrorFormatTextId = 0x505300F0u;
+    static constexpr DWORD kMirrorFormatComboId = 0x505300F1u;
+    static constexpr DWORD kMirrorTextBase = 0x50530100u;
+    static constexpr DWORD kMirrorComboBase = 0x50530200u;
     LONG references_ = 1;
     O* input_;
     bool save_ = false;
+    bool mirrored_ = false;
     LegacyHookHost host_;
     bool initialized_ = false;
     DWORD terminal_error_ = 0;
+    size_t mirrored_count_ = 0;
+    bool has_format_combo_ = false;
+    size_t format_count_ = 0;
+    UINT mirrored_filter_index_ = 0;
+    bool syncing_controls_ = false;
+    void SyncMirroredControlsToCustomize(IFileDialogCustomize* customize, size_t skip_index = static_cast<size_t>(-1)) {
+        if (!customize || mirrored_count_ == 0) return;
+        const auto updated = host_.ReadMirroredCombos();
+        for (size_t i = 0; i < updated.size() && i < mirrored_count_; ++i) {
+            const DWORD text_id = kMirrorTextBase + static_cast<DWORD>(i);
+            const DWORD combo_id = kMirrorComboBase + static_cast<DWORD>(i);
+            const CDCONTROLSTATEF state = updated[i].enabled ? CDCS_ENABLEDVISIBLE : CDCS_VISIBLE;
+            if (!updated[i].label.empty()) (void)customize->SetControlState(text_id, state);
+            (void)customize->SetControlState(combo_id, state);
+            if (i != skip_index && updated[i].selected >= 0 &&
+                static_cast<size_t>(updated[i].selected) < updated[i].items.size()) {
+                (void)customize->SetSelectedControlItem(combo_id, static_cast<DWORD>(updated[i].selected));
+            }
+        }
+    }
     LRESULT ParentMessage(IFileDialog* dialog, UINT message, WPARAM capacity, LPARAM buffer) {
         using C=std::remove_pointer_t<decltype(input_->lpstrFile)>;
         if (message == CDM_GETSPEC || message == CDM_GETFILEPATH || message == CDM_GETFOLDERPATH) {
@@ -180,13 +226,75 @@ template<class O> class LegacyHookEvents final : public IFileDialogEvents {
         initialized_ = true; host_.Notify(CDN_INITDONE); return S_OK;
     }
 public:
-    explicit LegacyHookEvents(O* input, bool save) : input_(input), save_(save), host_(input) {}
+    explicit LegacyHookEvents(O* input, bool save, bool mirrored = false)
+        : input_(input), save_(save), mirrored_(mirrored), host_(input) {}
     DWORD TerminalError() const noexcept { return terminal_error_; }
-    HRESULT Prepare() { return host_.Prepare(); }
+    UINT MirroredFilterIndex() const noexcept { return mirrored_filter_index_; }
+    HRESULT Prepare() { return host_.Prepare(mirrored_); }
+    HRESULT InitializeMirrored(IFileDialog* dialog, const std::vector<std::wstring>& filter_labels, UINT filter_index_1based) {
+        if (!mirrored_ || !dialog) return S_OK;
+        const HRESULT created = host_.CreateMirrored(
+            [this, dialog](UINT message, WPARAM wp, LPARAM lp) { return ParentMessage(dialog, message, wp, lp); },
+            filter_labels, filter_index_1based);
+        if (FAILED(created)) return created;
+        initialized_ = true;
+        host_.Notify(CDN_INITDONE);
+        const auto combos = host_.ReadMirroredCombos();
+        mirrored_count_ = combos.size();
+        const bool mirror_format = filter_labels.size() > 1;
+        if (combos.empty() && !mirror_format) return S_OK;
+        ComPtr<IFileDialogCustomize> customize;
+        const HRESULT qhr = dialog->QueryInterface(IID_PPV_ARGS(&customize));
+        if (FAILED(qhr) || !customize) return FAILED(qhr) ? qhr : E_NOINTERFACE;
+        if (mirror_format) {
+            const bool zh = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
+            const HRESULT fthr = customize->AddText(kMirrorFormatTextId, zh ? L"\u683C\u5F0F" : L"Format");
+            if (FAILED(fthr)) return fthr;
+            const HRESULT fchr = customize->AddComboBox(kMirrorFormatComboId);
+            if (FAILED(fchr)) return fchr;
+            for (size_t j = 0; j < filter_labels.size(); ++j) {
+                const HRESULT fihr = customize->AddControlItem(kMirrorFormatComboId, static_cast<DWORD>(j), filter_labels[j].c_str());
+                if (FAILED(fihr)) return fihr;
+            }
+            const DWORD sel = (filter_index_1based >= 1 && filter_index_1based <= filter_labels.size())
+                ? static_cast<DWORD>(filter_index_1based - 1) : 0u;
+            (void)customize->SetSelectedControlItem(kMirrorFormatComboId, sel);
+            (void)customize->SetControlState(kMirrorFormatTextId, CDCS_ENABLEDVISIBLE);
+            (void)customize->SetControlState(kMirrorFormatComboId, CDCS_ENABLEDVISIBLE);
+            has_format_combo_ = true;
+            format_count_ = filter_labels.size();
+        }
+        for (size_t i = 0; i < combos.size(); ++i) {
+            const auto& combo = combos[i];
+            const DWORD text_id = kMirrorTextBase + static_cast<DWORD>(i);
+            const DWORD combo_id = kMirrorComboBase + static_cast<DWORD>(i);
+            if (!combo.label.empty()) {
+                const HRESULT thr = customize->AddText(text_id, combo.label.c_str());
+                if (FAILED(thr)) return thr;
+                (void)customize->SetControlState(text_id, combo.enabled ? CDCS_ENABLEDVISIBLE : CDCS_VISIBLE);
+            }
+            const HRESULT chr = customize->AddComboBox(combo_id);
+            if (FAILED(chr)) return chr;
+            for (size_t j = 0; j < combo.items.size(); ++j) {
+                const HRESULT ihr = customize->AddControlItem(combo_id, static_cast<DWORD>(j), combo.items[j].c_str());
+                if (FAILED(ihr)) return ihr;
+            }
+            if (combo.selected >= 0 && static_cast<size_t>(combo.selected) < combo.items.size()) {
+                (void)customize->SetSelectedControlItem(combo_id, static_cast<DWORD>(combo.selected));
+            }
+            (void)customize->SetControlState(combo_id, combo.enabled ? CDCS_ENABLEDVISIBLE : CDCS_VISIBLE);
+        }
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER; *out = nullptr;
-        if (iid != IID_IUnknown && iid != IID_IFileDialogEvents) return E_NOINTERFACE;
-        *out = static_cast<IFileDialogEvents*>(this); AddRef(); return S_OK;
+        if (iid == IID_IUnknown || iid == IID_IFileDialogEvents) {
+            *out = static_cast<IFileDialogEvents*>(this); AddRef(); return S_OK;
+        }
+        if (iid == IID_IFileDialogControlEvents) {
+            *out = static_cast<IFileDialogControlEvents*>(this); AddRef(); return S_OK;
+        }
+        return E_NOINTERFACE;
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&references_)); }
     ULONG STDMETHODCALLTYPE Release() override { const auto n=InterlockedDecrement(&references_); if(!n) delete this; return static_cast<ULONG>(n); }
@@ -198,8 +306,29 @@ public:
     }
     HRESULT STDMETHODCALLTYPE OnTypeChange(IFileDialog* dialog) override {
         const HRESULT hr=Ensure(dialog); if(FAILED(hr)) return hr;
-        UINT index=0; if(SUCCEEDED(dialog->GetFileTypeIndex(&index))) input_->nFilterIndex=index;
-        host_.Notify(CDN_TYPECHANGE); return S_OK;
+        UINT index=0;
+        if(SUCCEEDED(dialog->GetFileTypeIndex(&index))) {
+            input_->nFilterIndex=index;
+            if (mirrored_) {
+                mirrored_filter_index_ = index;
+                host_.SyncFilterIndex(index);
+            }
+        }
+        host_.Notify(CDN_TYPECHANGE);
+        if (mirrored_ && !syncing_controls_) {
+            syncing_controls_ = true;
+            try {
+                ComPtr<IFileDialogCustomize> customize;
+                if (SUCCEEDED(dialog->QueryInterface(IID_PPV_ARGS(&customize))) && customize) {
+                    if (has_format_combo_ && index >= 1 && index <= format_count_) {
+                        (void)customize->SetSelectedControlItem(kMirrorFormatComboId, static_cast<DWORD>(index - 1));
+                    }
+                    SyncMirroredControlsToCustomize(customize.Get());
+                }
+            } catch (...) {}
+            syncing_controls_ = false;
+        }
+        return S_OK;
     }
     HRESULT STDMETHODCALLTYPE OnFileOk(IFileDialog* dialog) override {
         try {
@@ -273,13 +402,45 @@ public:
             if(offset>MAXWORD || extension>MAXWORD) return E_INVALIDARG;
             std::copy(encoded.begin(),encoded.end(),input_->lpstrFile); input_->lpstrFile[encoded.size()]=0;
             input_->nFileOffset=static_cast<WORD>(offset);input_->nFileExtension=static_cast<WORD>(extension);
-            UINT index=0; if(SUCCEEDED(dialog->GetFileTypeIndex(&index))) input_->nFilterIndex=index;
+            if (mirrored_filter_index_ > 0) input_->nFilterIndex = mirrored_filter_index_;
+            else { UINT index=0; if(SUCCEEDED(dialog->GetFileTypeIndex(&index))) input_->nFilterIndex=index; }
             return host_.FileOk()?S_FALSE:S_OK;
         } catch (...) { return E_UNEXPECTED; }
     }
     HRESULT STDMETHODCALLTYPE OnFolderChanging(IFileDialog*,IShellItem*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE OnShareViolation(IFileDialog*,IShellItem*,FDE_SHAREVIOLATION_RESPONSE* response) override { *response=FDESVR_DEFAULT;return S_OK; }
     HRESULT STDMETHODCALLTYPE OnOverwrite(IFileDialog*,IShellItem*,FDE_OVERWRITE_RESPONSE* response) override { *response=FDEOR_DEFAULT;return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnItemSelected(IFileDialogCustomize* customize, DWORD id, DWORD item) override {
+        if (!mirrored_ || syncing_controls_) return S_OK;
+        if (has_format_combo_ && id == kMirrorFormatComboId) {
+            if (item >= format_count_) return S_OK;
+            syncing_controls_ = true;
+            try {
+                const UINT one_based = static_cast<UINT>(item) + 1u;
+                mirrored_filter_index_ = one_based;
+                input_->nFilterIndex = one_based;
+                host_.SyncFilterIndex(one_based);
+                host_.Notify(CDN_TYPECHANGE);
+                SyncMirroredControlsToCustomize(customize);
+            } catch (...) {}
+            syncing_controls_ = false;
+            return S_OK;
+        }
+        if (id < kMirrorComboBase) return S_OK;
+        const size_t index = static_cast<size_t>(id - kMirrorComboBase);
+        if (index >= mirrored_count_) return S_OK;
+        syncing_controls_ = true;
+        try {
+            if (host_.SelectMirroredCombo(index, static_cast<int>(item)) && customize) {
+                SyncMirroredControlsToCustomize(customize, index);
+            }
+        } catch (...) {}
+        syncing_controls_ = false;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE OnButtonClicked(IFileDialogCustomize*, DWORD) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnCheckButtonToggled(IFileDialogCustomize*, DWORD, BOOL) override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnControlActivating(IFileDialogCustomize*, DWORD) override { return S_OK; }
 };
 struct LegacySubscription {
     IFileDialog* dialog = nullptr;
@@ -317,7 +478,8 @@ template<class O> bool Run(O* input, bool save, const LegacyDialogFactory& creat
     const bool has_template = (input->Flags & (OFN_ENABLETEMPLATE | OFN_ENABLETEMPLATEHANDLE)) != 0;
     const bool customization = (input->Flags & OFN_ENABLEHOOK) != 0 || has_template;
     const bool hook_only = (input->Flags & OFN_ENABLEHOOK) != 0 && !has_template;
-    const bool hook_host_ready = verified_local_hook_host || (hook_only && verified_remote_hook_host);
+    const bool mirrored_hook = IsMirroredHookCandidate(input, save);
+    const bool hook_host_ready = verified_local_hook_host || ((hook_only || mirrored_hook) && verified_remote_hook_host);
     // Old templates, hooks and multi-select without OFN_EXPLORER use a different
     // protocol. Uncustomized single-select implicitly uses Explorer style.
     if (!(input->Flags & OFN_EXPLORER) && (customization || (input->Flags & OFN_ALLOWMULTISELECT)))
@@ -442,10 +604,15 @@ template<class O> bool Run(O* input, bool save, const LegacyDialogFactory& creat
         if (details.flags_ex & OFN_EX_NOPLACESBAR) options |= FOS_HIDEPINNEDPLACES;
         if (FAILED(setup = dialog->SetOptions(options))) return decline("legacy-decline-set-options", setup);
         std::vector<COMDLG_FILTERSPEC> filters;
-        for (size_t i = 0; i < filter_strings.size(); i += 2) filters.push_back({filter_strings[i].c_str(), filter_strings[i + 1].c_str()});
+        std::vector<std::wstring> filter_labels;
+        for (size_t i = 0; i < filter_strings.size(); i += 2) {
+            filters.push_back({filter_strings[i].c_str(), filter_strings[i + 1].c_str()});
+            filter_labels.push_back(filter_strings[i]);
+        }
+        UINT bounded_index = 1u;
         if (!filters.empty()) {
             if (FAILED(setup = dialog->SetFileTypes(static_cast<UINT>(filters.size()), filters.data()))) return decline("legacy-decline-set-types", setup);
-            const UINT bounded_index = (input->nFilterIndex >= 1 && input->nFilterIndex <= filters.size()) ? input->nFilterIndex : 1u;
+            bounded_index = (input->nFilterIndex >= 1 && input->nFilterIndex <= filters.size()) ? input->nFilterIndex : 1u;
             if (FAILED(setup = dialog->SetFileTypeIndex(bounded_index))) return decline("legacy-decline-set-type-index", setup);
         }
         if (!directory.empty()) {
@@ -478,11 +645,15 @@ template<class O> bool Run(O* input, bool save, const LegacyDialogFactory& creat
         ComPtr<IFileDialogEvents> hook_events;
         LegacyHookEvents<O>* hook_state = nullptr;
         if (customization) {
-            hook_state = new LegacyHookEvents<O>(input, save);
-            hook_events.Attach(hook_state);
+            hook_state = new LegacyHookEvents<O>(input, save, mirrored_hook);
+            hook_events.Attach(static_cast<IFileDialogEvents*>(hook_state));
             if (FAILED(setup = hook_state->Prepare())) return decline("legacy-decline-template-format", setup);
             if (FAILED(setup = dialog->Advise(hook_events.Get(), &hook_subscription.cookie))) return decline("legacy-decline-hook-events", setup);
             hook_subscription.dialog = dialog.Get();
+            if (mirrored_hook) {
+                if (FAILED(setup = hook_state->InitializeMirrored(dialog.Get(), filter_labels, bounded_index)))
+                    return decline("legacy-decline-mirrored-hook", setup);
+            }
         }
         constexpr DWORD kLegacyReadOnlyCheckId = 0x50524F01u;
         if (open_readonly_checkbox) {
@@ -565,7 +736,8 @@ template<class O> bool Run(O* input, bool save, const LegacyDialogFactory& creat
         const auto offset = Encode<C>(packed.substr(0, file_offset)).size();
         const auto ext_offset = extension_offset ? Encode<C>(packed.substr(0, extension_offset)).size() : 0;
         UINT filter_index = input->nFilterIndex;
-        if (!filters.empty() && FAILED(dialog->GetFileTypeIndex(&filter_index))) throw E_FAIL;
+        if (hook_state && hook_state->MirroredFilterIndex() > 0) filter_index = hook_state->MirroredFilterIndex();
+        else if (!filters.empty() && FAILED(dialog->GetFileTypeIndex(&filter_index))) throw E_FAIL;
         if (encoded.size() > input->nMaxFile) {
             if (encoded.size() <= MAXWORD) { const WORD count = static_cast<WORD>(encoded.size()); std::memcpy(input->lpstrFile, &count, sizeof(count)); }
             legacy_dialog_error::SetBridge(FNERR_BUFFERTOOSMALL); return true;
@@ -606,4 +778,5 @@ HRESULT CreateSystemLegacyDialog(bool save, IUnknown** output) {
 }
 bool RunLegacyComDialog(OPENFILENAMEW* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic, bool verified_local_hook_host, const bool* use_original, bool verified_remote_hook_host) { return Run(input, save, create, result, diagnostic, verified_local_hook_host, use_original, verified_remote_hook_host); }
 bool RunLegacyComDialog(OPENFILENAMEA* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic, bool verified_local_hook_host, const bool* use_original, bool verified_remote_hook_host) { return Run(input, save, create, result, diagnostic, verified_local_hook_host, use_original, verified_remote_hook_host); }
+void SetMirroredLegacyHookTestOverride(bool enabled) noexcept { g_mirrored_test_override.store(enabled, std::memory_order_relaxed); }
 }

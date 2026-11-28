@@ -197,6 +197,197 @@ struct FilenameRenderTest {
         return ok;
     }
 
+    static bool RunExtCapsules() {
+        const std::filesystem::path root = L"bench_data/ext-capsule-render";
+        std::filesystem::create_directories(root);
+        std::ofstream log(root / "results.log");
+        int failures = 0;
+        auto check = [&](bool pass, const char* label) {
+            log << (pass ? "[PASS] " : "[FAIL] ") << label << std::endl;
+            failures += !pass;
+        };
+        const HWND hwnd = CreateWindowExW(0, L"STATIC", L"Extension capsule render test",
+            WS_OVERLAPPEDWINDOW, 0, 0, 960, 720, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        {
+            Compositor compositor;
+            if (!hwnd || !compositor.Init(hwnd)) {
+                if (hwnd) DestroyWindow(hwnd);
+                check(false, "initialize compositor");
+                return false;
+            }
+            MainRenderer renderer;
+            renderer.SetCompositor(&compositor);
+            constexpr float scale = 1.5f;
+            compositor.Resize(static_cast<UINT>(960 * scale), static_cast<UINT>(720 * scale));
+            compositor.RecreateTextFormats(scale);
+            renderer.SetScale(scale);
+
+            auto make_table = [](bool adaptive_light, bool upper_no_dot) {
+                auto tbl = std::make_shared<ext_capsule::Table>();
+                ext_capsule::Style st{};
+                st.corner_radius_dip = 4.5f;
+                st.padding_x_dip = 5.5f;
+                st.padding_y_dip = 1.0f;
+                st.border_width_dip = 1.0f;
+                st.gap_dip = 4.5f;
+                st.font_size_delta_dip = -1.0f;
+                st.font_weight = 600u;
+                auto add = [&](const wchar_t* ext, uint32_t lbg, uint32_t lfg, uint32_t lbd,
+                               uint32_t dbg, uint32_t dfg, uint32_t dbd) {
+                    ext_capsule::Rule r{};
+                    r.light_bg = adaptive_light ? lbg : dbg;
+                    r.light_text = adaptive_light ? lfg : dfg;
+                    r.light_border = adaptive_light ? lbd : dbd;
+                    r.dark_bg = dbg;
+                    r.dark_text = dfg;
+                    r.dark_border = dbd;
+                    r.uppercase = upper_no_dot;
+                    r.strip_dot = upper_no_dot;
+                    r.style = st;
+                    tbl->by_ext.emplace(ext, r);
+                };
+                add(L"psd", 0xE6F4FF, 0x005EA6, 0xB3DCFF, 0x001E36, 0x31A8FF, 0x0B4A7D);
+                add(L"ai", 0xFFF2E2, 0xB85000, 0xFFD5A3, 0x331700, 0xFF9A00, 0x6E3400);
+                add(L"prproj", 0xF4ECFF, 0x6D28D9, 0xDDC6FF, 0x241047, 0xC084FC, 0x522794);
+                add(L"c4d", 0xE8EEFF, 0x1D4ED8, 0xBDCEFF, 0x0B1A4A, 0x6094FF, 0x1D3E9E);
+                add(L"blend", 0xFFF0E5, 0xC45500, 0xFFCFA8, 0x361804, 0xFF8A33, 0x70340A);
+                add(L"dwg", 0xFDECEB, 0xB91C1C, 0xF8BDBD, 0x380D0D, 0xFB7185, 0x751D1D);
+                add(L"fig", 0xF3ECFF, 0x7C3AED, 0xD8C2FF, 0x231145, 0xA78BFA, 0x4C2694);
+                return tbl;
+            };
+
+            auto count_color = [&](ID2D1DeviceContext* dc, UINT rx, UINT ry, UINT rw, UINT rh, uint32_t target_rgb) -> size_t {
+                ComPtr<ID2D1Image> image;
+                dc->GetTarget(&image);
+                ComPtr<ID2D1Bitmap1> target, readback;
+                if (!image.get() || FAILED(image->QueryInterface(__uuidof(ID2D1Bitmap1), reinterpret_cast<void**>(&target.p))))
+                    return 0;
+                const auto props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                                                           target->GetPixelFormat(), 96, 96);
+                if (FAILED(dc->CreateBitmap(target->GetPixelSize(), nullptr, 0, &props, &readback))) return 0;
+                if (FAILED(readback->CopyFromBitmap(nullptr, target.get(), nullptr))) return 0;
+                D2D1_MAPPED_RECT mapped{};
+                if (FAILED(readback->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return 0;
+                const int tr = static_cast<int>((target_rgb >> 16) & 0xFFu);
+                const int tg = static_cast<int>((target_rgb >> 8) & 0xFFu);
+                const int tb = static_cast<int>(target_rgb & 0xFFu);
+                size_t hits = 0;
+                const auto sz = target->GetPixelSize();
+                const UINT x1 = std::min(sz.width, rx + rw);
+                const UINT y1 = std::min(sz.height, ry + rh);
+                for (UINT y = ry; y < y1; ++y) {
+                    const auto* px = reinterpret_cast<const uint32_t*>(mapped.bits + y * mapped.pitch);
+                    for (UINT x = rx; x < x1; ++x) {
+                        const uint32_t bgra = px[x];
+                        const int b = static_cast<int>(bgra & 0xFFu);
+                        const int g = static_cast<int>((bgra >> 8) & 0xFFu);
+                        const int r = static_cast<int>((bgra >> 16) & 0xFFu);
+                        if (std::abs(r - tr) <= 12 && std::abs(g - tg) <= 12 && std::abs(b - tb) <= 12) ++hits;
+                    }
+                }
+                readback->Unmap();
+                return hits;
+            };
+
+            struct Scenario {
+                const wchar_t* file_name;
+                bool dark;
+                bool adaptive_light;
+                bool upper_no_dot;
+                uint32_t expected_psd_bg;
+            };
+            const Scenario scenarios[] = {
+                {L"screenshot-style-light.png", false, false, false, 0x001E36},
+                {L"screenshot-style-dark.png",  true,  false, false, 0x001E36},
+                {L"adaptive-upper-light.png",   false, true,  true,  0xE6F4FF},
+            };
+
+            const std::wstring samples[] = {
+                L"cxh-34537.psd",
+                L"\u4E3B\u56FE\u6D77\u62A5_\u53CC\u5341\u4E00.ai",
+                L"\u4E3B\u56FE\u89C6\u9891_15s.prproj",
+                L"product_render_v3.c4d",
+                L"scene_lighting.blend",
+                L"cxh-34537.jpg",
+                L"FS-FR07_\u7535\u8111\u7AEFA+\u957F\u56FE\u7CBE\u4FEE\u7248_\u53CC\u5341\u4E00\u5927\u4FC3\u4E3B\u89C6\u89C9_\u7EC8\u7A3F_20261128.psd",
+                L"ui_kit_components.fig",
+            };
+
+            auto* dc = compositor.Dc();
+            for (const auto& sc : scenarios) {
+                ext_capsule::Store::Instance().Replace(make_table(sc.adaptive_light, sc.upper_no_dot));
+                const Theme theme = MakeTheme(sc.dark, HexColor(0x0078D4));
+                dc->BeginDraw();
+                dc->Clear(theme.bg);
+
+                // Left column: Details / List single-line rows (including a 40+ char truncated .psd).
+                bool long_single_truncated = false;
+                for (int i = 0; i < 8; ++i) {
+                    const float y = (24.0f + i * 38.0f) * scale;
+                    const float w = (i == 6 ? 260.0f : 360.0f) * scale;
+                    const bool cut = renderer.DrawTruncatedName(
+                        samples[i], 32.0f * scale, y, w, 32.0f * scale, theme, false, {}, true, true);
+                    if (i == 6) long_single_truncated = cut;
+                }
+
+                // Right column: Icon-grid centered multi-line tiles (short, CJK, and long wrapped).
+                bool short_icon_cut = true;
+                bool long_icon_cut = false;
+                for (int i = 0; i < 8; ++i) {
+                    const int col = i % 2;
+                    const int row = i / 2;
+                    const float x = (460.0f + col * 230.0f) * scale;
+                    const float y = (28.0f + row * 120.0f) * scale;
+                    // Draw a subtle mock thumbnail frame above the label (verifying zero occlusion).
+                    ComPtr<ID2D1SolidColorBrush> frame_br;
+                    dc->CreateSolidColorBrush(sc.dark ? D2D1::ColorF(0.20f, 0.22f, 0.26f, 1.0f)
+                                                      : D2D1::ColorF(0.88f, 0.90f, 0.94f, 1.0f), &frame_br);
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(
+                        D2D1::RectF(x + 48.0f * scale, y, x + 152.0f * scale, y + 60.0f * scale),
+                        6.0f * scale, 6.0f * scale), frame_br.get());
+                    bool cut = false;
+                    renderer.DrawCenteredIconName(
+                        samples[i], D2D1::RectF(x, y + 66.0f * scale, x + 200.0f * scale, y + 114.0f * scale),
+                        theme.text, theme, {}, &cut, 2, nullptr, true, true);
+                    if (i == 0) short_icon_cut = cut;
+                    if (i == 6) long_icon_cut = cut;
+                }
+
+                // Bottom area: Expanded selected icon name plate with capsule.
+                renderer.DrawExpandedIconName(
+                    samples[6], D2D1::RectF(480.0f * scale, 530.0f * scale, 680.0f * scale, 580.0f * scale),
+                    theme.text, theme, {}, true,
+                    D2D1::RectF(420.0f * scale, 500.0f * scale, 920.0f * scale, 700.0f * scale),
+                    {}, {}, true, true);
+
+                check(SUCCEEDED(dc->EndDraw()), "end draw for capsule scenario");
+                check(compositor.SaveSnapshot((root / sc.file_name).c_str()), "save capsule snapshot");
+                check(long_single_truncated, "long 40+ char .psd reports truncation in single-line view");
+                check(!short_icon_cut, "short .psd fits cleanly without truncation in icon grid");
+                check(long_icon_cut, "long 40+ char .psd truncates stem while preserving capsule in icon grid");
+
+                // Pixel verification: row 0 (.psd) has expected capsule bg pixels; row 5 (.jpg) has 0.
+                const size_t psd_bg_px = count_color(
+                    dc, static_cast<UINT>(32 * scale), static_cast<UINT>(24 * scale),
+                    static_cast<UINT>(360 * scale), static_cast<UINT>(32 * scale), sc.expected_psd_bg);
+                const size_t jpg_bg_px = count_color(
+                    dc, static_cast<UINT>(32 * scale), static_cast<UINT>((24 + 5 * 38) * scale),
+                    static_cast<UINT>(360 * scale), static_cast<UINT>(32 * scale), sc.expected_psd_bg);
+                log << "[INFO] scenario=" << (sc.dark ? "dark" : "light")
+                    << " adaptive=" << sc.adaptive_light
+                    << " psd_bg_px=" << psd_bg_px << " jpg_bg_px=" << jpg_bg_px << std::endl;
+                check(psd_bg_px > 100, "psd row renders colored capsule background");
+                check(jpg_bg_px == 0, "jpg row renders no capsule background");
+            }
+
+            ext_capsule::Store::Instance().Replace(nullptr);
+            compositor.Shutdown();
+        }
+        DestroyWindow(hwnd);
+        log << "failures=" << failures << std::endl;
+        return failures == 0;
+    }
+
     static bool Run() {
         const std::filesystem::path root = L"bench_data/filename-render";
         std::filesystem::create_directories(root);
@@ -406,6 +597,15 @@ bool RunFilenameRenderTest() {
     if (FAILED(hr)) return false;
     compat::EnableDpiAwareness();
     const bool ok = ui::FilenameRenderTest::Run();
+    CoUninitialize();
+    return ok;
+}
+
+bool RunExtCapsuleRenderTest() {
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr)) return false;
+    compat::EnableDpiAwareness();
+    const bool ok = ui::FilenameRenderTest::RunExtCapsules();
     CoUninitialize();
     return ok;
 }

@@ -19,4 +19,7 @@ using LegacyDiagnostic = std::function<void(const LegacyComDiagnostic&)>;
 // that it declined before opening any window. All shown outcomes are consumed.
 bool RunLegacyComDialog(OPENFILENAMEW* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false, const bool* use_original = nullptr, bool verified_remote_hook_host = false);
 bool RunLegacyComDialog(OPENFILENAMEA* input, bool save, const LegacyDialogFactory& create, BOOL& result, const LegacyDiagnostic& diagnostic = {}, bool verified_local_hook_host = false, const bool* use_original = nullptr, bool verified_remote_hook_host = false);
+// Test-only override to exercise the Photoshop Save-for-Web mirrored hook path
+// from a test executable whose basename is not Photoshop.exe.
+void SetMirroredLegacyHookTestOverride(bool enabled) noexcept;
 }

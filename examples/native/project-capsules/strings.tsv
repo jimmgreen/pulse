@@ -1,0 +1,17 @@
+key	zh-CN	zh-TW	en
+PluginName	工程文件后缀胶囊	工程檔案副檔名膠囊	Project File Capsules
+SectionGeneral	基本设置	基本設定	General
+SectionAppearance	外观与格式	外觀與格式	Appearance & Format
+EnableTitle	启用工程文件彩色后缀胶囊	啟用工程檔案彩色副檔名膠囊	Enable project file extension capsules
+EnableDesc	为设计、3D、CAD 与剪辑工程源文件在文件名旁渲染彩色后缀胶囊，零画面遮挡	為設計、3D、CAD 與剪輯工程原始檔在檔名旁繪製彩色副檔名膠囊，零畫面遮擋	Render colored extension capsules next to design, 3D, CAD, and video project filenames without covering thumbnails
+OptionalTitle	包含半工程格式（PDF / SVG）	包含半工程格式（PDF / SVG）	Include semi-project formats (PDF / SVG)
+OptionalDesc	额外为 .pdf 和 .svg 文件启用彩色后缀胶囊（默认关闭）	額外為 .pdf 和 .svg 檔案啟用彩色副檔名膠囊（預設關閉）	Also render colored capsules for .pdf and .svg files (off by default)
+ColorModeTitle	胶囊配色模式	膠囊配色模式	Capsule color style
+ColorModeDesc	选择高对比深底胶囊（浅/深主题均醒目）或双主题自适应（浅色柔底深字 / 深色深底亮字）	選擇高對比深底膠囊（淺/深主題皆醒目）或雙主題自適應（淺色柔底深字 / 深色深底亮字）	Choose high-contrast dark capsules in all themes or theme-adaptive soft light / dark palettes
+ColorModeHighContrast	高对比深底（推荐）	高對比深底（推薦）	High-contrast dark (recommended)
+ColorModeAdaptive	浅/深主题自适应	淺/深主題自適應	Theme-adaptive (light soft / dark)
+LabelStyleTitle	后缀文字格式	副檔名文字格式	Extension label format
+LabelStyleDesc	选择保留点号小写（如 .psd）或去点号大写（如 PSD）	選擇保留點號小寫（如 .psd）或去點號大寫（如 PSD）	Choose dotted lowercase (e.g. .psd) or uppercase without dot (e.g. PSD)
+LabelStyleDottedLower	保留点号小写（.psd）	保留點號小寫（.psd）	Dotted lowercase (.psd)
+LabelStyleUpper	去点号大写（PSD）	去點號大寫（PSD）	Uppercase (PSD)
+CoverageDesc	内置 30 类工程软件、70+ 工程扩展名白名单（Adobe CC、Blender、C4D、3ds Max、Maya、Rhino、SketchUp、KeyShot、ZBrush、AutoCAD/SolidWorks、通用 CAD/3D、Figma、Sketch、CorelDRAW、Affinity、CSP/SAI、Procreate、DaVinci Resolve）；常规图片与音视频保持原样。	內建 30 類工程軟體、70+ 工程副檔名白名單（Adobe CC、Blender、C4D、3ds Max、Maya、Rhino、SketchUp、KeyShot、ZBrush、AutoCAD/SolidWorks、通用 CAD/3D、Figma、Sketch、CorelDRAW、Affinity、CSP/SAI、Procreate、DaVinci Resolve）；常規圖片與影音維持原樣。	Covers 30 design/engineering software families (70+ extensions across Adobe CC, Blender, C4D, 3ds Max, Maya, Rhino, SketchUp, KeyShot, ZBrush, AutoCAD/SolidWorks, CAD/3D, Figma, Sketch, CorelDRAW, Affinity, CSP/SAI, Procreate, DaVinci Resolve). Common raster images and media files stay plain.

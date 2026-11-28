@@ -3387,6 +3387,8 @@ target_sources(pulse_plugin_harness PRIVATE
     src/app/extensions/column_registry.cpp
     src/app/extensions/native/statusbar_adapter.cpp
     src/app/extensions/statusbar_registry.cpp
+    src/app/extensions/native/extcapsules_adapter.cpp
+    src/app/extensions/extcapsule_registry.cpp
     src/app/extensions/native/fileevents_adapter.cpp
     src/app/extensions/file_event_hub.cpp)
 

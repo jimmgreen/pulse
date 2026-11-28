@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "id": "com.pulse.project-capsules",
+  "name": "Project File Capsules",
+  "activation": "startup",
+  "resources": [
+    "context.read",
+    "settings.own"
+  ]
+}

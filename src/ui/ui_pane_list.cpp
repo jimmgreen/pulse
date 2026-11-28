@@ -1326,7 +1326,7 @@ const ListColumns* PaneListColumns(Compositor* compositor, const PaneViewModel& 
     if (!format || count == 0) return nullptr;
     const uint64_t font = typography::Generation();
     const uint64_t alias = app::AliasStore::Instance().Revision();
-    const uint64_t extensions = KnownExtensionsRevision(vm.show_file_extensions);
+    const uint64_t extensions = KnownExtensionsRevision(vm.show_file_extensions) ^ (ext_capsule::Revision() << 8);
     static NameAdvances table;
     if (table.format != format || table.font != font || table.advance.empty()) {
         table.format = format; table.font = font; table.advance.assign(65536, -1.0f);
@@ -1386,7 +1386,21 @@ const ListColumns* PaneListColumns(Compositor* compositor, const PaneViewModel& 
             hit->exact[widest] = 1;
             const int src = vm.SourceIndex(static_cast<int>(widest));
             if (src < 0) continue;
-            hit->text_px[widest] = typography::MeasureLine(compositor, format, ListDisplayName(MakeVisibleEntry(vm, static_cast<size_t>(src))));
+            const ListEntryView& entry = MakeVisibleEntry(vm, static_cast<size_t>(src));
+            const std::wstring display = ListDisplayName(entry);
+            float measured = typography::MeasureLine(compositor, format, display);
+            if (!entry.is_dir && entry.alias.empty() && !entry.hidden_ext && !IsHighContrast() &&
+                ext_capsule::HasAnyRules()) {
+                if (const auto cap_match = ext_capsule::MatchFileName(display, false)) {
+                    const auto cap_m = ext_capsule::MeasureCapsule(compositor, compositor->DwriteFactory(), format,
+                                                                   *cap_match, scale);
+                    if (cap_m.width > 1.0f) {
+                        const std::wstring stem(cap_match->stem);
+                        measured = std::ceil(typography::MeasureLine(compositor, format, stem)) + cap_m.gap + cap_m.width;
+                    }
+                }
+            }
+            hit->text_px[widest] = measured;
         }
     }
     hit->previous = std::move(hit->columns);
@@ -2070,7 +2084,8 @@ bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& f
 namespace {
 // Width and height of an icon-grid name laid out as DrawCenteredIconName
 // lays it out (defined with FitIconName below).
-D2D1_SIZE_F IconGridNameSize(Compositor* compositor, const std::wstring& name, float width, int max_lines);
+D2D1_SIZE_F IconGridNameSize(Compositor* compositor, const std::wstring& name, float width, int max_lines,
+                             float scale = 1.0f, bool allow_capsule = false);
 } // namespace
 
 bool MainRenderer::PointInItemGrip(const PaneViewModel& vm, const D2D1_RECT_F& full_bounds,
@@ -2177,7 +2192,8 @@ bool MainRenderer::PointInItemGrip(const PaneViewModel& vm, const D2D1_RECT_F& f
         const bool size_line = size_label != vm.folder_size_labels.end();
         const int lines = layout.Metrics().name_lines;
         const float cell_w = std::max(1.0f, name.right - name.left);
-        const D2D1_SIZE_F text = IconGridNameSize(compositor_, shown, cell_w, size_line ? std::max(1, lines - 1) : lines);
+        const D2D1_SIZE_F text = IconGridNameSize(compositor_, shown, cell_w, size_line ? std::max(1, lines - 1) : lines,
+                                                  scale_, !entry.is_dir && entry.alias.empty() && !entry.hidden_ext);
         float w = text.width;
         float h = text.height;
         if (size_line) {
@@ -3173,12 +3189,13 @@ void MainRenderer::DrawMorphFrom(const PaneViewModel& vm, const motion::ViewMorp
         const D2D1_RECT_F name = layout.NameRect(i);
         const D2D1_RECT_F moved = D2D1::RectF(name.left + dx, name.top + dy,
                                               name.right + dx, name.bottom + dy);
+        const bool morph_capsule = !e.is_dir && e.alias.empty() && !e.hidden_ext;
         if (grid) {
             DrawCenteredIconName(ShownName(e), moved, theme.text, theme, kNoMatches, nullptr,
-                                 layout.Metrics().name_lines);
+                                 layout.Metrics().name_lines, nullptr, false, morph_capsule);
         } else {
             DrawTruncatedName(ShownName(e), moved.left, moved.top, std::max(1.0f, moved.right - moved.left),
-                              std::max(1.0f, moved.bottom - moved.top), theme, false, kNoMatches);
+                              std::max(1.0f, moved.bottom - moved.top), theme, false, kNoMatches, false, morph_capsule);
         }
         if (details) {
             const D2D1_RECT_F row = layout.ItemRect(i);
@@ -4758,7 +4775,7 @@ IDWriteTextFormat* MainRenderer::NameSemiboldFormat() {
 
 bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                                      const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
-                                     bool dim_extension) {
+                                     bool dim_extension, bool allow_capsule) {
     ++frame_perf_.name_draws;
     (void)selected;
     if (!compositor_ || !compositor_->Dc() || !compositor_->DwriteFactory() ||
@@ -4808,6 +4825,66 @@ bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
     IDWriteTextFormat* fmt = name_nowrap_formats_[format_slot].get()
         ? name_nowrap_formats_[format_slot].get() : base_fmt;
     MakeBrush(dc, theme.text, brText_);
+
+    // Inline colored extension capsule (pulse.extcapsules): stem may truncate with
+    // ellipsis, while the capsule on the right stays intact.
+    if (allow_capsule && !IsHighContrast() && ext_capsule::HasAnyRules()) {
+        const bool dark = theme.bg.r < 0.5f;
+        if (const auto cap_match = ext_capsule::MatchFileName(name, dark)) {
+            const auto cap_m = ext_capsule::MeasureCapsule(compositor_, factory, base_fmt, *cap_match, scale_);
+            if (cap_m.width > 1.0f && w >= cap_m.width + cap_m.gap + 12.0f * scale_) {
+                const std::wstring stem(cap_match->stem);
+                const auto stem_matches = ext_capsule::StemMatchRanges(matches, stem.size());
+                const float stem_budget = std::max(1.0f, w - cap_m.width - cap_m.gap);
+                const auto name_fit_start = std::chrono::steady_clock::now();
+                const std::wstring fitted_stem = FitHighlightedFileName(
+                    compositor_, factory, fmt, stem, stem_budget, stem_matches, scale_);
+                const auto name_draw_start = std::chrono::steady_clock::now();
+                frame_perf_.name_fit_us += static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(name_draw_start - name_fit_start).count());
+                const D2D1_RECT_F stem_rc = D2D1::RectF(x, y, x + stem_budget, y + h);
+                const auto visible_matches = VisibleNameMatchRanges(stem, fitted_stem, stem_matches);
+                bool drawn = false;
+                if (visible_matches.empty()) {
+                    drawn = compositor_->DrawLumaText(fitted_stem, fmt, stem_rc, brText_->GetColor(), theme.bg,
+                                                      DWRITE_TEXT_ALIGNMENT_LEADING);
+                }
+                ComPtr<IDWriteTextLayout> stem_layout;
+                if (!drawn && SUCCEEDED(factory->CreateTextLayout(fitted_stem.c_str(),
+                        static_cast<UINT32>(fitted_stem.size()), fmt, stem_budget, h, &stem_layout)) &&
+                    stem_layout.get()) {
+                    stem_layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    stem_layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    stem_layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    float y_snap = y;
+                    DWRITE_TEXT_METRICS tm{};
+                    DWRITE_LINE_METRICS lm{};
+                    UINT32 lc = 0;
+                    if (SUCCEEDED(stem_layout->GetMetrics(&tm)) &&
+                        SUCCEEDED(stem_layout->GetLineMetrics(&lm, 1, &lc)) && lc > 0) {
+                        const float baseline = y + tm.top + lm.baseline;
+                        y_snap += std::round(baseline) - baseline;
+                    }
+                    DrawNameHighlightBackground(compositor_, stem_layout.get(), {x, y_snap}, stem_rc,
+                                                visible_matches, theme, scale_);
+                    compositor_->DrawTextLayout({x, y_snap}, stem_layout.get(), brText_.get(),
+                                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                } else if (!drawn) {
+                    dc->DrawText(fitted_stem.c_str(), static_cast<UINT32>(fitted_stem.size()), fmt, &stem_rc,
+                                 brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                }
+                const float stem_w = std::min(stem_budget,
+                    MeasureLayoutText(compositor_, factory, fmt, fitted_stem) +
+                    HighlightPaddingWidth(stem, fitted_stem, stem_matches, scale_));
+                const float pill_x = std::min(x + w - cap_m.width, x + stem_w + cap_m.gap);
+                ext_capsule::DrawCapsule(dc, compositor_, factory, base_fmt, *cap_match, cap_m,
+                                         pill_x, y + h * 0.5f, scale_, theme.text.a);
+                frame_perf_.name_draw_us += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - name_draw_start).count());
+                return fitted_stem != stem;
+            }
+        }
+    }
 
     const auto name_fit_start = std::chrono::steady_clock::now();
     const std::wstring shown = FitHighlightedFileName(compositor_, factory, fmt, name, w, matches, scale_);
@@ -4964,12 +5041,15 @@ int FolderIconNameLines(Compositor* compositor, const PaneViewModel& vm, float s
     struct Cached {
         std::weak_ptr<const std::vector<fs::DirEntry>> snapshot;
         float width, font;
+        uint64_t capsule_rev;
         int lines;
     };
+    const uint64_t capsule_rev = ext_capsule::Revision();
     static std::vector<Cached> cache;
     const auto same = [&](const Cached& c) {
         return !c.snapshot.expired() && !c.snapshot.owner_before(vm.snapshot) &&
-               !vm.snapshot.owner_before(c.snapshot) && c.width == width && c.font == font;
+               !vm.snapshot.owner_before(c.snapshot) && c.width == width && c.font == font &&
+               c.capsule_rev == capsule_rev;
     };
     for (const Cached& c : cache) if (same(c)) return c.lines;
     const float budget = std::max(1.0f, width - 1.0f);  // as LayoutIconName
@@ -4982,6 +5062,20 @@ int FolderIconNameLines(Compositor* compositor, const PaneViewModel& vm, float s
         const ListEntryView& e = MakeVisibleEntry(vm, i);
         const std::wstring name = e.alias.empty() ? ShownName(e) : e.alias;
         if (name.empty()) continue;
+        if (!e.is_dir && e.alias.empty() && !e.hidden_ext && !IsHighContrast() && ext_capsule::HasAnyRules()) {
+            if (const auto cap_match = ext_capsule::MatchFileName(name, false)) {
+                const auto cap_m = ext_capsule::MeasureCapsule(compositor, compositor->DwriteFactory(), fmt,
+                                                               *cap_match, scale);
+                if (cap_m.width > 1.0f && width >= cap_m.width + cap_m.gap + 12.0f * scale) {
+                    const std::wstring stem(cap_match->stem);
+                    const auto lay = ext_capsule::LayoutIconNameWithCapsule(
+                        compositor, compositor->DwriteFactory(), fmt, stem, width, kIconGridMaxNameLines,
+                        cap_m.width, cap_m.gap, {});
+                    needed.push_back(lay.total_lines);
+                    continue;
+                }
+            }
+        }
         needed.push_back(static_cast<int>(WrapIconName(compositor->DwriteFactory(), fmt, name, budget,
             static_cast<size_t>(kIconGridMaxNameLines)).size()));
     }
@@ -4990,17 +5084,59 @@ int FolderIconNameLines(Compositor* compositor, const PaneViewModel& vm, float s
     const int lines = AutoIconNameLines(needed, has_folders);
     std::erase_if(cache, [](const Cached& c) { return c.snapshot.expired(); });
     if (cache.size() >= 16) cache.erase(cache.begin());
-    cache.push_back({vm.snapshot, width, font, lines});
+    cache.push_back({vm.snapshot, width, font, capsule_rev, lines});
     return lines;
 }
 
 // Pictures and videos: tiles in their own aspect on the photo wall.
 bool WallPicture(const std::wstring& name, bool is_dir) { return IsWallPicture(name, is_dir); }
 
-D2D1_SIZE_F IconGridNameSize(Compositor* compositor, const std::wstring& name, float width, int max_lines) {
+D2D1_SIZE_F IconGridNameSize(Compositor* compositor, const std::wstring& name, float width, int max_lines,
+                             float scale, bool allow_capsule) {
     IDWriteFactory2* factory = compositor ? compositor->DwriteFactory() : nullptr;
     if (!factory || !compositor->FileNameFormat() || name.empty()) return D2D1::SizeF(0.0f, 0.0f);
-    const IconNameText fit = FitIconName(compositor, factory, compositor->FileNameFormat(), name, width,
+    IDWriteTextFormat* fmt = compositor->FileNameFormat();
+    if (allow_capsule && !IsHighContrast() && ext_capsule::HasAnyRules()) {
+        if (const auto cap_match = ext_capsule::MatchFileName(name, false)) {
+            const auto cap_m = ext_capsule::MeasureCapsule(compositor, factory, fmt, *cap_match, scale);
+            if (cap_m.width > 1.0f && width >= cap_m.width + cap_m.gap + 12.0f * scale) {
+                const std::wstring stem(cap_match->stem);
+                const auto lay = ext_capsule::LayoutIconNameWithCapsule(
+                    compositor, factory, fmt, stem, width, std::max(1, max_lines), cap_m.width, cap_m.gap, {});
+                float total_w = 0.0f;
+                float total_h = 0.0f;
+                if (!lay.prefix_text.empty()) {
+                    ComPtr<IDWriteTextLayout> pl;
+                    if (SUCCEEDED(factory->CreateTextLayout(lay.prefix_text.c_str(),
+                            static_cast<UINT32>(lay.prefix_text.size()), fmt, width, 4096.0f, &pl)) && pl.get()) {
+                        pl->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        DWRITE_TEXT_METRICS m{};
+                        if (SUCCEEDED(pl->GetMetrics(&m))) {
+                            total_w = std::max(total_w, m.width);
+                            total_h += m.height;
+                        }
+                    }
+                }
+                float last_w = 0.0f;
+                float last_h = cap_m.height;
+                if (!lay.last_line.empty()) {
+                    ComPtr<IDWriteTextLayout> ll;
+                    if (SUCCEEDED(factory->CreateTextLayout(lay.last_line.c_str(),
+                            static_cast<UINT32>(lay.last_line.size()), fmt, width, 4096.0f, &ll)) && ll.get()) {
+                        ll->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        DWRITE_TEXT_METRICS m{};
+                        if (SUCCEEDED(ll->GetMetrics(&m))) {
+                            last_w = m.width;
+                            last_h = std::max(last_h, m.height);
+                        }
+                    }
+                }
+                const float group_w = lay.last_line.empty() ? cap_m.width : (last_w + cap_m.gap + cap_m.width);
+                return D2D1::SizeF(std::min(width, std::max(total_w, group_w)), total_h + last_h);
+            }
+        }
+    }
+    const IconNameText fit = FitIconName(compositor, factory, fmt, name, width,
                                          std::max(1, max_lines), {});
     ComPtr<IDWriteTextLayout> layout;
     if (FAILED(factory->CreateTextLayout(fit.shown.c_str(), static_cast<UINT32>(fit.shown.size()),
@@ -5424,11 +5560,81 @@ void MainRenderer::DimNameExtension(IDWriteTextLayout* layout, const std::wstrin
 bool MainRenderer::DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
                                         const D2D1_COLOR_F& color, const Theme& theme, const std::vector<NameMatchRange>& matches,
                                         bool* truncated, int max_lines, float* text_height,
-                                        bool dim_extension) {
+                                        bool dim_extension, bool allow_capsule) {
     if (truncated) *truncated = false;
     if (!compositor_ || !compositor_->Dc() || !compositor_->DwriteFactory() || name.empty()) return false;
     const float width = std::max(1.0f, bounds.right - bounds.left);
     const float height = std::max(1.0f, bounds.bottom - bounds.top);
+    IDWriteFactory2* factory = compositor_->DwriteFactory();
+    IDWriteTextFormat* fmt = compositor_->FileNameFormat();
+    if (allow_capsule && !IsHighContrast() && ext_capsule::HasAnyRules() && fmt) {
+        const bool dark = theme.bg.r < 0.5f;
+        if (const auto cap_match = ext_capsule::MatchFileName(name, dark)) {
+            const auto cap_m = ext_capsule::MeasureCapsule(compositor_, factory, fmt, *cap_match, scale_);
+            if (cap_m.width > 1.0f && width >= cap_m.width + cap_m.gap + 12.0f * scale_) {
+                const std::wstring stem(cap_match->stem);
+                const auto stem_matches = ext_capsule::StemMatchRanges(matches, stem.size());
+                const auto lay = ext_capsule::LayoutIconNameWithCapsule(
+                    compositor_, factory, fmt, stem, width, std::max(1, max_lines), cap_m.width, cap_m.gap,
+                    stem_matches);
+                if (truncated) *truncated = lay.truncated;
+                MakeBrush(compositor_->Dc(), color, brText_);
+                float prefix_h = 0.0f;
+                if (!lay.prefix_text.empty()) {
+                    ComPtr<IDWriteTextLayout> pl;
+                    if (SUCCEEDED(factory->CreateTextLayout(lay.prefix_text.c_str(),
+                            static_cast<UINT32>(lay.prefix_text.size()), fmt, width, height, &pl)) && pl.get()) {
+                        pl->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        pl->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                        pl->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        const DWRITE_TRIMMING untrimmed{DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0};
+                        pl->SetTrimming(&untrimmed, nullptr);
+                        DWRITE_TEXT_METRICS pm{};
+                        if (SUCCEEDED(pl->GetMetrics(&pm))) prefix_h = pm.height;
+                        DrawNameHighlightBackground(compositor_, pl.get(), {bounds.left, bounds.top}, bounds,
+                                                    lay.prefix_matches, theme, scale_);
+                        compositor_->DrawTextLayout(D2D1::Point2F(bounds.left, bounds.top), pl.get(),
+                                                    brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    }
+                }
+                const float last_y = bounds.top + prefix_h;
+                const float avail_h = std::max(1.0f, bounds.bottom - last_y);
+                float last_text_w = 0.0f;
+                float last_text_h = IconNameLineDip() * scale_;
+                ComPtr<IDWriteTextLayout> ll;
+                if (!lay.last_line.empty() &&
+                    SUCCEEDED(factory->CreateTextLayout(lay.last_line.c_str(),
+                        static_cast<UINT32>(lay.last_line.size()), fmt, width, avail_h, &ll)) && ll.get()) {
+                    ll->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    ll->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                    ll->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    const DWRITE_TRIMMING untrimmed{DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0};
+                    ll->SetTrimming(&untrimmed, nullptr);
+                    DWRITE_TEXT_METRICS lm{};
+                    if (SUCCEEDED(ll->GetMetrics(&lm))) {
+                        last_text_w = std::max(lm.width, lm.widthIncludingTrailingWhitespace);
+                        last_text_h = lm.height;
+                    }
+                }
+                const float row_h = std::max(last_text_h, cap_m.height);
+                const float group_w = lay.last_line.empty() ? cap_m.width : (last_text_w + cap_m.gap + cap_m.width);
+                const float group_x = bounds.left + std::max(0.0f, (width - group_w) * 0.5f);
+                if (ll.get()) {
+                    const float text_y = last_y + (row_h - last_text_h) * 0.5f;
+                    const D2D1_RECT_F line_clip = D2D1::RectF(bounds.left, last_y, bounds.right, bounds.bottom);
+                    DrawNameHighlightBackground(compositor_, ll.get(), {group_x, text_y}, line_clip,
+                                                lay.last_matches, theme, scale_);
+                    compositor_->DrawTextLayout(D2D1::Point2F(group_x, text_y), ll.get(),
+                                                brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                }
+                const float pill_x = lay.last_line.empty() ? group_x : (group_x + last_text_w + cap_m.gap);
+                ext_capsule::DrawCapsule(compositor_->Dc(), compositor_, factory, fmt, *cap_match, cap_m,
+                                         pill_x, last_y + row_h * 0.5f, scale_, color.a);
+                if (text_height) *text_height = prefix_h + row_h;
+                return lay.truncated;
+            }
+        }
+    }
     const IconNameText fit = FitIconName(compositor_, compositor_->DwriteFactory(),
         compositor_->FileNameFormat(), name, width, std::max(1, max_lines), matches);
     if (truncated) *truncated = fit.truncated;
@@ -5503,7 +5709,8 @@ float MainRenderer::DrawExpandedIconName(const std::wstring& name, const D2D1_RE
                                         const D2D1_COLOR_F& color, const Theme& theme,
                                         const std::vector<NameMatchRange>& matches, bool pane_focused,
                                         const D2D1_RECT_F& view, const std::wstring& note,
-                                        const D2D1_COLOR_F& note_color, bool dim_extension) {
+                                        const D2D1_COLOR_F& note_color, bool dim_extension,
+                                        bool allow_capsule) {
     auto* dc = compositor_ ? compositor_->Dc() : nullptr;
     if (!dc || !compositor_->DwriteFactory() || name.empty()) return 0.0f;
     constexpr int kExpandedLines = 6;
@@ -5516,6 +5723,128 @@ float MainRenderer::DrawExpandedIconName(const std::wstring& name, const D2D1_RE
     const int room = std::max(1, static_cast<int>(std::floor(
         (view.bottom - edge - note_h - bounds.top) / line)));
     const float cell_w = std::max(1.0f, bounds.right - bounds.left);
+    if (allow_capsule && !IsHighContrast() && ext_capsule::HasAnyRules() && compositor_->FileNameFormat()) {
+        const bool dark = theme.bg.r < 0.5f;
+        IDWriteFactory2* factory = compositor_->DwriteFactory();
+        IDWriteTextFormat* fmt = compositor_->FileNameFormat();
+        if (const auto cap_match = ext_capsule::MatchFileName(name, dark)) {
+            const auto cap_m = ext_capsule::MeasureCapsule(compositor_, factory, fmt, *cap_match, scale_);
+            if (cap_m.width > 1.0f) {
+                const std::wstring stem(cap_match->stem);
+                const auto stem_matches = ext_capsule::StemMatchRanges(matches, stem.size());
+                float width = cell_w;
+                auto lay = ext_capsule::LayoutIconNameWithCapsule(
+                    compositor_, factory, fmt, stem, width, std::min(kExpandedLines, room), cap_m.width, cap_m.gap,
+                    stem_matches);
+                if (lay.truncated) {
+                    const float wide = std::min({2.0f * cell_w + 8.0f * scale_, std::max(cell_w, 280.0f * scale_),
+                                                 std::max(1.0f, view.right - view.left - 2.0f * edge)});
+                    width = std::max(cell_w, wide);
+                    lay = ext_capsule::LayoutIconNameWithCapsule(
+                        compositor_, factory, fmt, stem, width, room, cap_m.width, cap_m.gap, stem_matches);
+                }
+                float overflow = 0.0f;
+                if (lay.truncated) {
+                    const auto all = ext_capsule::LayoutIconNameWithCapsule(
+                        compositor_, factory, fmt, stem, width, 64, cap_m.width, cap_m.gap, stem_matches);
+                    if (all.total_lines > room) {
+                        overflow = std::min(static_cast<float>(all.total_lines - room) * line,
+                                            std::max(0.0f, bounds.top - view.top - edge - line));
+                    }
+                }
+                const float mid0 = (bounds.left + bounds.right) * 0.5f;
+                const float left = std::clamp(mid0 - width * 0.5f, view.left + edge,
+                                              std::max(view.left + edge, view.right - edge - width));
+                const D2D1_RECT_F text = D2D1::RectF(left, bounds.top, left + width,
+                                                     bounds.top + static_cast<float>(room) * line + 2.0f * scale_);
+                float prefix_w = 0.0f, prefix_h = 0.0f;
+                ComPtr<IDWriteTextLayout> pl;
+                if (!lay.prefix_text.empty() &&
+                    SUCCEEDED(factory->CreateTextLayout(lay.prefix_text.c_str(),
+                        static_cast<UINT32>(lay.prefix_text.size()), fmt, width, text.bottom - text.top, &pl)) &&
+                    pl.get()) {
+                    pl->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    pl->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    pl->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                    const DWRITE_TRIMMING untrimmed{DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0};
+                    pl->SetTrimming(&untrimmed, nullptr);
+                    DWRITE_TEXT_METRICS pm{};
+                    if (SUCCEEDED(pl->GetMetrics(&pm))) {
+                        prefix_w = pm.widthIncludingTrailingWhitespace;
+                        prefix_h = pm.height;
+                    }
+                }
+                float last_w = 0.0f, last_h = line;
+                ComPtr<IDWriteTextLayout> ll;
+                if (!lay.last_line.empty() &&
+                    SUCCEEDED(factory->CreateTextLayout(lay.last_line.c_str(),
+                        static_cast<UINT32>(lay.last_line.size()), fmt, width, text.bottom - text.top, &ll)) &&
+                    ll.get()) {
+                    ll->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                    ll->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                    ll->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+                    const DWRITE_TRIMMING untrimmed{DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0};
+                    ll->SetTrimming(&untrimmed, nullptr);
+                    DWRITE_TEXT_METRICS lm{};
+                    if (SUCCEEDED(ll->GetMetrics(&lm))) {
+                        last_w = std::max(lm.width, lm.widthIncludingTrailingWhitespace);
+                        last_h = lm.height;
+                    }
+                }
+                const float row_h = std::max(last_h, cap_m.height);
+                const float last_group_w = lay.last_line.empty() ? cap_m.width : (last_w + cap_m.gap + cap_m.width);
+                float note_w = 0.0f;
+                if (!note.empty() && compositor_->SmallFormat())
+                    note_w = MeasureLayoutText(compositor_, factory, compositor_->SmallFormat(), note);
+                const float pad_x = 4.0f * scale_;
+                const float plate_w = std::min(width, std::max({prefix_w, last_group_w, note_w})) + pad_x * 2.0f;
+                const float mid = (text.left + text.right) * 0.5f;
+                const float name_h = std::max(line, prefix_h + row_h);
+                const D2D1_RECT_F plate = D2D1::RectF(mid - plate_w * 0.5f, text.top - 2.0f * scale_,
+                    mid + plate_w * 0.5f, text.top + name_h + note_h + 3.0f * scale_);
+                const D2D1_COLOR_F base = theme.bg;
+                const D2D1_COLOR_F tint = pane_focused ? theme.fill_selected : theme.fill_selected_inactive;
+                const D2D1_COLOR_F fill = D2D1::ColorF(
+                    base.r + (tint.r - base.r) * tint.a, base.g + (tint.g - base.g) * tint.a,
+                    base.b + (tint.b - base.b) * tint.a, 1.0f);
+                MakeBrush(dc, fill, brFillInput_);
+                const float radius = theme.radius_control * scale_;
+                FillRoundedRect(dc, brFillInput_.get(), plate.left, plate.top, plate.right - plate.left,
+                                plate.bottom - plate.top, radius);
+                MakeBrush(dc, WithAlpha(theme.accent, 0.55f), brFillInput_);
+                dc->DrawRoundedRectangle(D2D1::RoundedRect(plate, radius, radius), brFillInput_.get(), scale_);
+                MakeBrush(dc, color, brText_);
+                if (pl.get()) {
+                    DrawNameHighlightBackground(compositor_, pl.get(), {text.left, text.top}, plate,
+                                                lay.prefix_matches, theme, scale_);
+                    compositor_->DrawTextLayout(D2D1::Point2F(text.left, text.top), pl.get(), brText_.get(),
+                                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                }
+                const float last_y = text.top + prefix_h;
+                const float group_x = text.left + std::max(0.0f, (width - last_group_w) * 0.5f);
+                if (ll.get()) {
+                    const float ly = last_y + (row_h - last_h) * 0.5f;
+                    DrawNameHighlightBackground(compositor_, ll.get(), {group_x, ly}, plate,
+                                                lay.last_matches, theme, scale_);
+                    compositor_->DrawTextLayout(D2D1::Point2F(group_x, ly), ll.get(), brText_.get(),
+                                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                }
+                const float pill_x = lay.last_line.empty() ? group_x : (group_x + last_w + cap_m.gap);
+                ext_capsule::DrawCapsule(dc, compositor_, factory, fmt, *cap_match, cap_m,
+                                         pill_x, last_y + row_h * 0.5f, scale_, color.a);
+                if (note_w > 0.0f) {
+                    auto* format = compositor_->SmallFormat();
+                    const auto alignment = format->GetTextAlignment();
+                    format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                    MakeBrush(dc, note_color, brTextSecondary_);
+                    DrawTextEndEllipsis(compositor_, format, brTextSecondary_.get(), note,
+                                        plate.left + pad_x, text.top + name_h, plate.right - plate.left - 2.0f * pad_x, line);
+                    format->SetTextAlignment(alignment);
+                }
+                return overflow;
+            }
+        }
+    }
     float width = cell_w;
     IconNameText fit = FitIconName(compositor_, compositor_->DwriteFactory(), compositor_->FileNameFormat(),
                                    name, width, std::min(kExpandedLines, room), matches);
@@ -6086,6 +6415,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         std::wstring note;          // a folder's size, kept under the name
         D2D1_COLOR_F note_color{};
         bool dim_extension = false;
+        bool allow_capsule = false;
         int source = -1;
     } expanded_name;
     // Details tree (inline folder expansion): chevrons, guide lines and the
@@ -6849,10 +7179,25 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 : alias_both ? e.alias + L"\u2003\u2003" + shown_name : e.alias;
             static const std::vector<NameMatchRange> kNoAliasMatches;
             const auto name_matches = has_alias ? kNoAliasMatches : NameMatchRanges(shown_name, highlight_terms);
+            const bool allow_capsule = !e.is_dir && !has_alias && !e.hidden_ext;
             if (iconGrid && tagDotCount > 0) {
-                const float fullNameW = MeasureLayoutText(
+                float fullNameW = MeasureLayoutText(
                     compositor_, compositor_->DwriteFactory(), compositor_->FileNameFormat(), shown_name) +
                     HighlightPaddingWidth(shown_name, shown_name, name_matches, scale_);
+                if (allow_capsule && !IsHighContrast() && ext_capsule::HasAnyRules()) {
+                    if (const auto cap_match = ext_capsule::MatchFileName(shown_name, theme.bg.r < 0.5f)) {
+                        const auto cap_m = ext_capsule::MeasureCapsule(
+                            compositor_, compositor_->DwriteFactory(), compositor_->FileNameFormat(), *cap_match, scale_);
+                        if (cap_m.width > 1.0f) {
+                            const std::wstring stem(cap_match->stem);
+                            const auto stem_matches = ext_capsule::StemMatchRanges(name_matches, stem.size());
+                            fullNameW = std::ceil(MeasureLayoutText(compositor_, compositor_->DwriteFactory(),
+                                                                    compositor_->FileNameFormat(), stem) +
+                                                  HighlightPaddingWidth(stem, stem, stem_matches, scale_)) +
+                                        cap_m.gap + cap_m.width;
+                        }
+                    }
+                }
                 const float nameGap = 4.0f * scale_;
                 const float cellW = nameRc.right - nameRc.left;
                 const float leftover = std::max(0.0f, cellW - fullNameW - nameGap);
@@ -6909,7 +7254,8 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 list_mark ? nameX + kListAliasMarkDip * scale_ : nameX, textY, textH, nameColRight - ai_reserve, cell.top, cell.bottom, scale_,
                 has_alias ? alias_line : shown_name, tagDotCount, badgeW, showStar, showNewTab, showMore,
                 compositor_, compositor_->DwriteFactory(), nameFormat, change != nullptr,
-                vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0, name_matches, row_actions_);
+                vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0, name_matches, row_actions_,
+                allow_capsule);
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
                 // wider than its own cell.
@@ -6980,7 +7326,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         MakeBrush(dc, on_photo.text, brText_);
                         name_truncated = DrawTruncatedName(has_alias ? alias_line : shown_name, thumbRect.left + 6.0f * scale_,
                             thumbRect.bottom - 4.0f * scale_ - line, std::max(1.0f, thumbRect.right - thumbRect.left - 12.0f * scale_),
-                            line, on_photo, false, name_matches, false);
+                            line, on_photo, false, name_matches, false, allow_capsule);
                     }
                 } else if (iconGrid && tagDotCount == 0) {
                     // A folder showing its size keeps the last line for it.
@@ -6990,7 +7336,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     if (size_line && !wall_rows) label.bottom = layout.FolderSizeRect(i).top;
                     DrawCenteredIconName(has_alias ? e.alias : shown_name, label, nameColor, theme, name_matches,
                                          &name_truncated, size_line ? std::max(1, name_lines - 1) : name_lines,
-                                         nullptr, !e.is_dir && !has_alias && !e.hidden_ext);
+                                         nullptr, !e.is_dir && !has_alias && !e.hidden_ext, allow_capsule);
                     // The single selected item shows its whole name on top of
                     // the rows below (drawn after every row), a folder's size
                     // under it.
@@ -7000,6 +7346,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         expanded_name.source = src;
                         expanded_name.name = has_alias ? e.alias : shown_name;
                         expanded_name.dim_extension = !e.is_dir && !has_alias && !e.hidden_ext;
+                        expanded_name.allow_capsule = allow_capsule;
                         expanded_name.bounds = D2D1::RectF(nameRc.left + row_dx, nameRc.top + row_dy,
                                                            nameRc.right + row_dx, nameRc.bottom + row_dy);
                         expanded_name.color = nameColor;
@@ -7067,7 +7414,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     if (nm.was) {
                         // An assistant rename on its way: the old name until its turn.
                         name_truncated = DrawTruncatedName(*nm.was, trail.name_x, textY, trail.name_w, textH, name_theme,
-                                                           selected, {}, detailsView && !e.is_dir && !e.hidden_ext);
+                                                           selected, {}, detailsView && !e.is_dir && !e.hidden_ext, allow_capsule);
                     } else if (nm.alpha < 1.0f) {
                         // ...then the new one rises into place (inside the row).
                         D2D1_MATRIX_3X2_F before;
@@ -7080,12 +7427,14 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                                       nullptr);
                         dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, nm.dy) * before);
                         name_truncated = DrawTruncatedName(shown_name, trail.name_x, textY, trail.name_w, textH, name_theme,
-                                                           selected, name_matches, detailsView && !e.is_dir && !e.hidden_ext);
+                                                           selected, name_matches, detailsView && !e.is_dir && !e.hidden_ext,
+                                                           allow_capsule);
                         dc->SetTransform(before);
                         dc->PopLayer();
                     } else {
                         name_truncated = DrawTruncatedName(shown_name, trail.name_x, textY, trail.name_w, textH, name_theme,
-                                                           selected, name_matches, detailsView && !e.is_dir && !e.hidden_ext);
+                                                           selected, name_matches, detailsView && !e.is_dir && !e.hidden_ext,
+                                                           allow_capsule);
                     }
                     name_semibold_ = false;
                     // Icon grids with tag dots keep the name on one line; the
@@ -7096,6 +7445,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         expanded_name.source = src;
                         expanded_name.name = shown_name;
                         expanded_name.dim_extension = !e.is_dir && !e.hidden_ext;
+                        expanded_name.allow_capsule = allow_capsule;
                         expanded_name.bounds = D2D1::RectF(nameRc.left + row_dx, nameRc.top + row_dy,
                                                            nameRc.right + row_dx, nameRc.bottom + row_dy);
                         expanded_name.color = nameColor;
@@ -7909,7 +8259,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         dc->PushAxisAlignedClip(D2D1::RectF(x, y, x + w, y + h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         const float overflow = DrawExpandedIconName(expanded_name.name, expanded_name.bounds, expanded_name.color, theme,
                              expanded_name.matches, pane_focused, viewport, expanded_name.note,
-                             expanded_name.note_color, expanded_name.dim_extension);
+                             expanded_name.note_color, expanded_name.dim_extension, expanded_name.allow_capsule);
         dc->PopAxisAlignedClip();
         if (pane_focused && overflow > 0.0f) {
             expanded_overflow_px_ = overflow;
