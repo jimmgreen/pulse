@@ -129,6 +129,21 @@ int wmain(int argc, wchar_t** argv) {
         Check(Fraction(-1, 0, 100) == 0 && Fraction(120, 0, 100) == 1, "drag clamps outside window");
         Check(Fraction(50, 0, 100) == .5 && Fraction(1, 1, 1) == 0, "DPI-independent fraction and zero width");
         Check(VideoPreview::Supports(L"test.MP4") && !VideoPreview::Supports(L"test.gif"), "video selection preserves GIF path");
+        {
+            const GUID av1{0x31305641, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+            const GUID h264{0x34363248, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+            Check(VideoPreview::PackFirst(L".mp4", false, true, av1) && VideoPreview::PackFirst(L".mkv", false, true, av1),
+                  "AV1 video goes to the FFmpeg pack first");
+            Check(!VideoPreview::PackFirst(L".mp4", false, true, h264) && !VideoPreview::PackFirst(L".mp4", false, false, av1),
+                  "H.264 and unprobed video stay on Media Foundation");
+            Check(VideoPreview::PackFirst(L".mpg", false, false, GUID{}) && VideoPreview::PackFirst(L".mp4", true, true, h264),
+                  "MPEG program streams and missing decoders keep preferring the pack");
+            Check(VideoPreview::FallBackToPack(false, true, false, E_NOTIMPL), "failure after open but before playback falls back");
+            Check(VideoPreview::FallBackToPack(false, false, false, E_FAIL), "failure before open falls back");
+            Check(!VideoPreview::FallBackToPack(false, true, true, E_FAIL), "failure after playback started stays on Media Foundation");
+            Check(!VideoPreview::FallBackToPack(false, true, false, S_OK) && VideoPreview::FallBackToPack(true, true, true, S_OK),
+                  "clean close stays; explicit backend switch always falls back");
+        }
     }
     if (argc == 2 && wcscmp(argv[1], L"--timeline-only") == 0) return failures ? 1 : 0;
     if (argc != 2 && !cadence_only && !open_only && !audio_prefs_only && !end_seek_only && !unsupported_audio_only && !tracks_only) { std::puts("Video runtime tests require an isolated fixture path"); return 2; }

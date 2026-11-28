@@ -214,6 +214,12 @@ bool MediaPackPlayable() {
 }
 
 // Formats Media Foundation is asked to open at all.
+// MFVideoFormat_AV1 ('AV01' on the MFVideoFormat_Base GUID), spelled out so older SDKs build.
+bool IsAv1Subtype(const GUID& subtype) {
+    static constexpr GUID kAv1{0x31305641, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+    return IsEqualGUID(subtype, kAv1) != FALSE;
+}
+
 bool NativeExtension(const std::wstring& ext) {
     for (const auto* known : {L".mp4", L".m4v", L".mov", L".wmv", L".avi", L".mkv", L".webm", L".mpg",
                               L".mpeg", L".m2ts", L".mts", L".3gp", L".mp3", L".wav", L".flac", L".m4a", L".m4b",
@@ -507,6 +513,22 @@ void VideoPreview::Step() {
 void (*g_video_preview_open_for_test)() = nullptr;
 #endif
 
+bool VideoPreview::PackFirst(const std::wstring& ext, bool missing_decoder, bool subtype_known, const GUID& video_subtype) {
+    // MPEG program streams: Media Foundation runs the clock and the audio but
+    // presents only a grey picture (MPEG-1 and MPEG-2 alike).
+    if (ext == L".mpg" || ext == L".mpeg") return true;
+    // No installed decoder accepts the video track.
+    if (missing_decoder) return true;
+    // AV1: the Store AV1 Video Extension enumerates as a decoder and the media
+    // item opens, but MFPlay's Play then fails with E_NOTIMPL; dav1d in the pack
+    // plays it.
+    return subtype_known && IsAv1Subtype(video_subtype);
+}
+
+bool VideoPreview::FallBackToPack(bool switch_backend, bool ready, bool started, HRESULT hr) {
+    return switch_backend || (FAILED(hr) && (!ready || !started));
+}
+
 void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     struct Finish {
         std::shared_ptr<Shared> state;
@@ -527,7 +549,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
 #endif
     const ULONGLONG opened_at = GetTickCount64();
     diagnostics::runtime::Event("playback_open", {{"session", state->session},
-        {"remote", path.rfind(L"\\\\", 0) == 0}, {"card", state->card}});
+        {"remote", pulse::path::StripExtendedPathPrefix(path).rfind(L"\\\\", 0) == 0}, {"card", state->card}});
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     HMODULE library = nullptr;
     ComPtr<IMFPMediaPlayer> player;
@@ -543,10 +565,10 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
              hr == MF_E_TOPO_CODEC_NOT_FOUND);
     };
     if (FAILED(com)) { fail(com); return; }
+    NativeProbe probe;
     if (!IsAudio(path) && !state->stop.load()) {
         const ULONGLONG probe_started = GetTickCount64();
         CodecInfo codec;
-        NativeProbe probe;
         const bool missing = MissingVideoDecoder(pulse::path::StripExtendedPathPrefix(path), codec, probe);
         if (missing) {
             std::lock_guard lock(state->mutex);
@@ -579,12 +601,11 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     }
     const std::wstring ext = LowerExtension(path);
     const bool mf_format = NativeExtension(ext);
-    // MPEG program streams: Media Foundation runs the clock and the audio but
-    // presents only a grey picture (MPEG-1 and MPEG-2 alike), so the pack goes
-    // first when it is installed.
-    const bool pack_first = ext == L".mpg" || ext == L".mpeg";
-    if (!pack_ffmpeg.empty() && !state->stop.load() &&
-        (!mf_format || pack_first || state->snapshot.missing_decoder)) {
+    const bool pack_first = PackFirst(ext, state->snapshot.missing_decoder, probe.subtype_known, probe.subtype);
+    if (!pack_ffmpeg.empty() && !state->stop.load() && (!mf_format || pack_first)) {
+        diagnostics::runtime::Event("playback_backend", {{"session", state->session}, {"backend", 2},
+            {"native_format", mf_format}, {"pack_first", pack_first},
+            {"av1", probe.subtype_known && IsAv1Subtype(probe.subtype)}});
         if (RunFfmpeg(state, path, pack_ffmpeg)) { CoUninitialize(); return; }
     }
     if (!mf_format) {
@@ -612,6 +633,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     bool positioning = false;
     bool ended = false;
     bool operation_error = false;
+    bool started = false; // Play or a frame step has succeeded at least once.
     uint32_t stepped = 0;
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     bool switch_backend = false;
@@ -621,12 +643,19 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     while (SUCCEEDED(hr) && player && !state->stop.load()) {
         for (const auto& event : events->Take()) {
             if (FAILED(event.error)) {
-                if (!ready || event.type == MFP_EVENT_TYPE_ERROR) { hr = event.error; fail(hr); break; }
+                diagnostics::runtime::Event("playback_control_error", {{"session", state->session},
+                    {"hr", static_cast<uint32_t>(event.error)}, {"event_type", static_cast<uint32_t>(event.type)},
+                    {"ready", ready}, {"started", started}}, diagnostics::runtime::Level::Warning);
+                // Before anything has played, a failure means this topology cannot
+                // play the file (e.g. Play -> E_NOTIMPL); let the pack take over.
+                if (!ready || event.type == MFP_EVENT_TYPE_ERROR || (!started && !pack_ffmpeg.empty())) {
+                    hr = event.error;
+                    break;
+                }
                 busy = false;
                 positioning = false;
                 operation_error = true;
                 std::lock_guard lock(state->mutex);
-                diagnostics::runtime::Event("playback_control_error", {{"session", state->session}, {"hr", static_cast<uint32_t>(event.error)}}, diagnostics::runtime::Level::Warning);
                 state->snapshot.control_error = event.error;
                 state->playing = false;
                 state->steps = 0;
@@ -702,15 +731,21 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 state->steps = 0;
                 break;
             }
-            case MFP_EVENT_TYPE_FRAME_STEP: ++stepped; busy = false; break;
+            case MFP_EVENT_TYPE_FRAME_STEP: ++stepped; busy = false; started = true; break;
             case MFP_EVENT_TYPE_POSITION_SET:
                 ended = false; stepped = 0; busy = false; positioning = false; break;
-            case MFP_EVENT_TYPE_PLAY: ended = false; stepped = 0; busy = false; break;
+            case MFP_EVENT_TYPE_PLAY: ended = false; stepped = 0; busy = false; started = true; break;
             case MFP_EVENT_TYPE_PAUSE: busy = false; break;
             default: break;
             }
         }
-        if (FAILED(hr)) { fail(hr); break; }
+        if (FAILED(hr)) {
+            // An item that opened but never played is handed to the pack below;
+            // do not flash an error before the pack's first picture.
+            const bool pack_retry = ready && !started && !pack_ffmpeg.empty() && !state->stop.load();
+            if (!pack_retry) fail(hr);
+            break;
+        }
         MFP_MEDIAPLAYER_STATE actual = MFP_MEDIAPLAYER_STATE_EMPTY;
         player->GetState(&actual);
         const int64_t duration = ready ? Position(player.Get(), true) : 0;
@@ -835,6 +870,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
         }
         HRESULT control = S_OK;
         bool issued = false;
+        uint32_t control_kind = 0; // 1 seek, 2 pause, 3 frame step, 5 play (4 = rate, above)
         if (ready && (!busy || (positioning && seek)) && !operation_error) {
             if (seek && duration > 0) {
                 PROPVARIANT target{};
@@ -846,12 +882,13 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                     static_cast<int64_t>(fraction * static_cast<double>(duration)));
                 control = player->SetPosition(MFP_POSITIONTYPE_100NS, &target);
                 issued = true;
+                control_kind = 1;
             } else if (!want_play && actual == MFP_MEDIAPLAYER_STATE_PLAYING) {
-                control = player->Pause(); issued = true;
+                control = player->Pause(); issued = true; control_kind = 2;
             } else if (step) {
-                control = player->FrameStep(); issued = true;
+                control = player->FrameStep(); issued = true; control_kind = 3;
             } else if (want_play && actual != MFP_MEDIAPLAYER_STATE_PLAYING) {
-                control = player->Play(); issued = true;
+                control = player->Play(); issued = true; control_kind = 5;
             }
             if (issued && SUCCEEDED(control)) {
                 busy = true;
@@ -859,7 +896,10 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
             }
             if (FAILED(control)) {
-                diagnostics::runtime::Event("playback_control_error", {{"session", state->session}, {"hr", static_cast<uint32_t>(control)}}, diagnostics::runtime::Level::Warning);
+                diagnostics::runtime::Event("playback_control_error", {{"session", state->session},
+                    {"hr", static_cast<uint32_t>(control)}, {"control", control_kind}, {"ready", ready},
+                    {"started", started}}, diagnostics::runtime::Level::Warning);
+                if (!started && !pack_ffmpeg.empty() && !state->stop.load()) { hr = control; break; }
                 operation_error = true;
                 std::lock_guard lock(state->mutex);
                 state->snapshot.control_error = control;
@@ -894,8 +934,13 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     if (library) FreeLibrary(library);
     // Media Foundation could not open it at all (e.g. MKV with an unknown
     // audio codec, broken indexes): let the pack try before giving up.
-    if ((switch_backend || (!ready && FAILED(hr))) && !pack_ffmpeg.empty() && !state->stop.load()) {
-        if (!RunFfmpeg(state, path, pack_ffmpeg) && !state->stop.load()) fail(HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
+    // It can also open the item and then fail before the first frame (AV1 under
+    // MFPlay: Play -> E_NOTIMPL).
+    if (FallBackToPack(switch_backend, ready, started, hr) && !pack_ffmpeg.empty() && !state->stop.load()) {
+        diagnostics::runtime::Event("playback_fallback", {{"session", state->session}, {"hr", static_cast<uint32_t>(hr)},
+            {"ready", ready}, {"started", started}, {"switch_backend", switch_backend}});
+        if (!RunFfmpeg(state, path, pack_ffmpeg) && !state->stop.load())
+            fail(ready && FAILED(hr) ? hr : HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
     }
     CoUninitialize();
 }

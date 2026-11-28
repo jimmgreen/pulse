@@ -62,6 +62,12 @@ public:
     // waveform).
     static bool Supports(const std::wstring& path);
     static bool IsAudio(const std::wstring& path);
+    // Backend policy (pure; unit tested). True when the FFmpeg pack, if installed,
+    // should play the file before Media Foundation is tried.
+    static bool PackFirst(const std::wstring& ext, bool missing_decoder, bool subtype_known, const GUID& video_subtype);
+    // True when a Media Foundation attempt should be retried through the pack: an
+    // explicit backend switch, or a failure before playback ever started.
+    static bool FallBackToPack(bool switch_backend, bool ready, bool started, HRESULT hr);
     // card: the hover preview card's silent loop. Starts muted, lets the
     // pointer through to the owner, and decodes FFmpeg frames at card size.
     // Four process-wide workers include retired decoders. At capacity Open
