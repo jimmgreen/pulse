@@ -24,6 +24,9 @@ if(PULSE_WITH_TEST_HOOKS)
     set_property(SOURCE src/app/app_commands.cpp APPEND PROPERTY
         COMPILE_DEFINITIONS PULSE_WITH_TEST_HOOKS=1)
     target_sources(pulse PRIVATE src/app/context_menu_speed_test.cpp)
+    if(TARGET pulse_content_progress_ui_test)
+        target_sources(pulse_content_progress_ui_test PRIVATE src/app/context_menu_speed_test.cpp)
+    endif()
     set_source_files_properties(src/app/context_menu_speed_test.cpp
         PROPERTIES COMPILE_DEFINITIONS PULSE_WITH_TEST_HOOKS=1)
 endif()
