@@ -90,7 +90,7 @@ bool TestShellNew() {
     check(ExpandShellCommand(L"tool.exe /dir %W %1", L"C:\\docs folder\\a b.pdf", &w_replaced) ==
               L"tool.exe /dir \"C:\\docs folder\" \"C:\\docs folder\\a b.pdf\"" && w_replaced,
           "%W expands to quoted parent directory alongside %1");
-    check(ExpandShellCommand(L"tool.exe %w", L"C:\\a.pdf") == L"tool.exe \"C:\\\"",
+    check(ExpandShellCommand(L"tool.exe %w", L"C:\\a.pdf") == L"tool.exe \"C:\\\\\"",
           "%w on drive root preserves trailing backslash");
     check(ExpandShellCommand(L"tool.exe \"%W\"", L"C:\\docs\\a.pdf") ==
               L"tool.exe \"C:\\docs\"",
@@ -256,7 +256,7 @@ int wmain(int argc, wchar_t** argv) {
     check(ExpandShellCommand(L"tool.exe /dir %W %1", L"C:\\docs folder\\a b.pdf") ==
               L"tool.exe /dir \"C:\\docs folder\" \"C:\\docs folder\\a b.pdf\"",
           "ExpandShellCommand expands %W to quoted parent directory alongside %1");
-    check(ExpandShellCommand(L"tool.exe %w", L"C:\\a.pdf") == L"tool.exe \"C:\\\"",
+    check(ExpandShellCommand(L"tool.exe %w", L"C:\\a.pdf") == L"tool.exe \"C:\\\\\"",
           "ExpandShellCommand preserves trailing backslash for drive root %w");
     check(ExpandShellCommand(L"tool.exe \"%W\"", L"C:\\docs\\a.pdf") ==
               L"tool.exe \"C:\\docs\"",

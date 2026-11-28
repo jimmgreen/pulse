@@ -1363,7 +1363,7 @@ struct EngineTestAccess {
         check(size(a).available && size(a).bytes == 100 && size(b).available && size(b).bytes == 0,
             "MFT metadata aggregates nested folders and known empty zero");
         const auto builds = e.folder_sizes_.Builds();
-        VolumeInfo active; active.id = e.vols_[0].volume_id;
+        VolumeInfo active; active.id = e.vols_[0].volume_id; active.mount_point = fixture.root_path().wstring();
         e.UpdateVolumeVisibilityLocked({active});
         check(size(a).bytes == 100 && e.folder_sizes_.Builds() == builds,
             "routine volume visibility polling preserves size aggregates");

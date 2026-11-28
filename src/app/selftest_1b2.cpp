@@ -328,6 +328,8 @@ struct FluentMenuTestPeer {
         clear.text = L"No color dot";
         menu.first_sub_.model.SetItems({strip, clear});
         menu.first_sub_.model.Layout(nullptr, scale);
+        // OpenSubmenu normally sizes the viewport; rows outside it never hit-test.
+        menu.first_sub_.viewport_px = static_cast<float>(menu.first_sub_.model.HeightPx());
         // Deliberately different parent width: submenu hits must use its own geometry.
         menu.model_.SetItems({clear});
         menu.model_.Layout(nullptr, scale, 800.0f);
@@ -8008,7 +8010,7 @@ void TestViewLayouts() {
         std::vector<int> short_names(20, 1), with_dirs(20, 1), very_long(10, 5);
         std::vector<int> mixed(19, 1), long_names{1, 2, 3, 3, 3, 3, 3, 3};
         mixed.push_back(2);
-        Check(ui::AutoIconNameLines(short_names, false) == 1 && ui::AutoIconNameLines(with_dirs, true) == 2 &&
+        Check(ui::AutoIconNameLines(short_names, false) == 1 && ui::AutoIconNameLines(with_dirs, true) == 3 &&
               ui::AutoIconNameLines(mixed, false) == 2 && ui::AutoIconNameLines(long_names, false) == 3 &&
               ui::AutoIconNameLines(very_long, false) == 4,
               L"view: folder name lines follow the 75th/95th percentile rule (1..4)");

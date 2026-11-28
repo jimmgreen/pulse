@@ -262,9 +262,12 @@ int RunContentProgressUiTest(int argc, char** argv) {
     const auto cancel_rect=D2D1::RectF(0,0,static_cast<float>(s.compositor.Width()),static_cast<float>(s.compositor.Height()));
     const auto cancel_metrics=ui::MakeStatusBarMetrics(cancel_vm,cancel_rect,s.scale,24*s.scale,
         s.compositor.DwriteFactory(),s.compositor.SmallFormat());
-    HandleLButtonDown(&s,s.hwnd,WM_LBUTTONDOWN,0,MAKELPARAM(
+    // The cancel control is a release button: press arms it, release dispatches.
+    const LPARAM cancel_point=MAKELPARAM(
         static_cast<int>((cancel_metrics.cancel_search.left+cancel_metrics.cancel_search.right)/2),
-        static_cast<int>((cancel_metrics.cancel_search.top+cancel_metrics.cancel_search.bottom)/2)));
+        static_cast<int>((cancel_metrics.cancel_search.top+cancel_metrics.cancel_search.bottom)/2));
+    HandleLButtonDown(&s,s.hwnd,WM_LBUTTONDOWN,MK_LBUTTON,cancel_point);
+    HandleLButtonUp(&s,s.hwnd,WM_LBUTTONUP,0,cancel_point);
     check(!BuildVm(s,false).status.query_active && !BuildVm(s,false).status.query_cancellable &&
         tab->search_content_stopped && !tab->content_count_final,"cancellation stops refresh and hides control without finalizing partial count");
     capture(L"cancelled");

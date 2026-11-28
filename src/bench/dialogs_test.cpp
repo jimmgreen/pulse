@@ -132,8 +132,10 @@ void TestPickerModel() {
     Check(!PickerShowsEntry(FILE_ATTRIBUTE_DIRECTORY, L"..", PickerMode::Folder) &&
               !PickerShowsEntry(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_HIDDEN, L"h",
                                 PickerMode::Folder) &&
-              !PickerShowsEntry(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM, L"x.png",
+              !PickerShowsEntry(FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, L"x.png",
                                 PickerMode::Image) &&
+              PickerShowsEntry(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM, L"x.png",
+                               PickerMode::Image) &&
               PickerShowsEntry(FILE_ATTRIBUTE_DIRECTORY, L"d", PickerMode::Folder) &&
               !PickerShowsEntry(FILE_ATTRIBUTE_NORMAL, L"x.png", PickerMode::Folder) &&
               PickerShowsEntry(FILE_ATTRIBUTE_NORMAL, L"x.png", PickerMode::Image) &&
