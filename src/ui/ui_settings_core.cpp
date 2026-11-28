@@ -518,53 +518,277 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         const I ui_font_size[]={I::UiFontSmall,I::UiFontDefault,I::UiFontLarge,I::UiFontLarger};const int ui_font_size_values[]={90,100,112,125};
         segmented(lay.ui_font_size_card,lay.ui_font_size_row,ui_font_size,ui_font_size_values,vm.settings_ui_font_scale,H::SettingsUiFontSize,I::SettingsUiFontSize,I::SettingsUiFontSizeDesc,4,L"\xE8E9");
         if(lay.wallpaper_card.bottom>lay.wallpaper_card.top) {
+        // Cached before the source-gated rows draw: app code positions the inline
+        // editors from these rows even when that source is not selected yet.
+        settings_background_fields_[0] = lay.wallpaper_url_row;
+        settings_background_fields_[1] = lay.wallpaper_pointer_row;
         const auto& preview = lay.wallpaper_preview;
         MakeBrush(dc, theme.fill_hover, brFillHover_);
         FillRoundedRect(dc, brFillHover_.get(), preview.left, preview.top,
                         preview.right - preview.left, preview.bottom - preview.top, 6.0f * scale_);
-        if (!vm.background_image.empty())
-            material_.DrawSourceCover(dc, preview, vm.background_image);
+        const std::wstring& preview_path = !vm.background_resolved_path.empty()
+            ? vm.background_resolved_path : vm.background_image;
+        if (!preview_path.empty())
+            material_.DrawSourceCover(dc, preview, preview_path);
         MakeBrush(dc, theme.stroke_card, brStrokeCard_);
         dc->DrawRoundedRectangle(D2D1::RoundedRect(preview, 6.0f * scale_, 6.0f * scale_),
                                  brStrokeCard_.get(), 1.0f);
         const float text_left = preview.right + 12.0f * scale_;
-        const bool compact_wallpaper = lay.wallpaper_choose.top >
+        const bool compact_wallpaper = lay.wallpaper_clear.top >
             lay.wallpaper_card.top + 64.0f * scale_;
         const float text_right = compact_wallpaper
             ? lay.wallpaper_card.right - 16.0f * scale_
-            : lay.wallpaper_choose.left - 12.0f * scale_;
+            : lay.wallpaper_clear.left - 12.0f * scale_;
         MakeBrush(dc, theme.text, brText_);
         DrawTextRect(dc, compositor_->TextFormat(), brText_.get(),
                      pulse::l10n::Get(pulse::l10n::StringId::SettingsWallpaper),
                      text_left, lay.wallpaper_card.top + 18.0f * scale_,
                      (std::max)(40.0f * scale_, text_right - text_left), 22.0f * scale_);
-        const std::wstring wallpaper_desc = vm.background_image.empty()
+        const std::wstring wallpaper_desc = preview_path.empty()
             ? pulse::l10n::Get(pulse::l10n::StringId::SettingsWallpaperDesc)
-            : FileNameOf(vm.background_image);
+            : FileNameOf(preview_path);
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
         DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), wallpaper_desc,
                      text_left, lay.wallpaper_card.top + 42.0f * scale_,
                      (std::max)(40.0f * scale_, text_right - text_left), 18.0f * scale_);
-        fluent::ControlState choose{};
-        choose.hovered = IsHovered(vm, HitTestResult::SettingsWallpaper, 0);
-        painter_.DrawButton({ lay.wallpaper_choose,
-                              pulse::l10n::Get(pulse::l10n::StringId::ChooseImage), {},
-                              fluent::ButtonKind::Standard, choose });
         fluent::ControlState clear{};
-        clear.enabled = !vm.background_image.empty();
+        clear.enabled = !preview_path.empty() || vm.background_source != 0;
         clear.hovered = clear.enabled && IsHovered(vm, HitTestResult::SettingsWallpaper, 1);
         painter_.DrawButton({ lay.wallpaper_clear,
                               pulse::l10n::Get(pulse::l10n::StringId::Clear), {},
                               fluent::ButtonKind::Standard, clear });
 
 
+        } else {
+            // Card collapsed: drop stale rows so hidden editors cannot stay placed.
+            settings_background_fields_[0] = D2D1_RECT_F{};
+            settings_background_fields_[1] = D2D1_RECT_F{};
         }
             const I looks[]={I::WallpaperLookSubtle,I::WallpaperLookBalanced,I::WallpaperLookVivid};const int look_ticks[]={25,50,75};
             slider(lay.wallpaper_look_card,lay.wallpaper_look_row,vm.wallpaper_look,kPanelTransparencyMax,look_ticks,looks,H::SettingsWallpaperLook,I::SettingsWallpaperLook,I::SettingsWallpaperLookDesc,L"%",L"\xE7A1");
             const I blurs[]={I::WallpaperBlurOff,I::WallpaperBlurLight,I::WallpaperBlurStrong};const int blur_ticks[]={0,14,28};
-            const bool blur_dim=dim_begin(vm.background_image.empty());
+            const bool blur_dim=dim_begin(vm.background_resolved_path.empty() && vm.background_image.empty());
             slider(lay.wallpaper_blur_card,lay.wallpaper_blur_row,vm.wallpaper_blur,kWallpaperBlurMax,blur_ticks,blurs,H::SettingsWallpaperBlur,I::SettingsWallpaperBlur,I::SettingsWallpaperBlurDesc,L" px",L"\xEB42");
             dim_end(blur_dim);
+        {
+            // Numeric-tick slider matching `slider` geometry without altering its StringId signature.
+            auto slider_nums = [&](D2D1_RECT_F card, D2D1_RECT_F const* cells, int value, int max_value,
+                                   const int* ticks, const wchar_t* const* tick_labels, H::Region hit,
+                                   I title, I desc, const wchar_t* unit, const wchar_t* icon) {
+                if (card.bottom <= card.top) return;
+                const bool stacked = cells[0].left < card.left + 100.0f * scale_;
+                label(card, l10n::Get(title), title == desc ? L"" : l10n::Get(desc), icon,
+                      stacked ? card.right - 16.0f * scale_ : cells[0].left - 12.0f * scale_);
+                const auto g = SettingsSlider(cells, scale_);
+                const bool hot = vm.hover_region == static_cast<int>(hit);
+                const float span = (std::max)(1.0f, g.right - g.left);
+                const auto x_of = [&](int v) {
+                    return g.left + span * std::clamp(static_cast<float>(v) / static_cast<float>(max_value), 0.0f, 1.0f);
+                };
+                const float x = x_of(value);
+                const float th = 4.0f * scale_;
+                MakeBrush(dc, WithAlpha(theme.text, 0.16f), brFillHover_);
+                dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(g.left, g.cy - th / 2.0f, g.right, g.cy + th / 2.0f),
+                                                           th / 2.0f, th / 2.0f), brFillHover_.get());
+                MakeBrush(dc, theme.accent, brAccent_);
+                if (x > g.left) {
+                    dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(g.left, g.cy - th / 2.0f, x, g.cy + th / 2.0f),
+                                                               th / 2.0f, th / 2.0f), brAccent_.get());
+                }
+                float min_left = g.left - 9.0f * scale_;
+                for (int i = 0; i < 3; ++i) {
+                    if (ticks[i] < 0) continue;
+                    const float tx = x_of(ticks[i]);
+                    MakeBrush(dc, WithAlpha(theme.text_secondary, value == ticks[i] ? 0.9f : 0.55f), brTextSecondary_);
+                    if (ticks[i] > 0) {
+                        dc->FillRectangle(D2D1::RectF(tx - 0.5f * scale_, g.cy + 5.0f * scale_,
+                                                      tx + 0.5f * scale_, g.cy + 8.0f * scale_), brTextSecondary_.get());
+                    }
+                    const bool at_end = ticks[i] >= max_value;
+                    const float tw = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->SmallFormat(), tick_labels[i]);
+                    D2D1_RECT_F lr{};
+                    auto align = fluent::HorizontalAlignment::Center;
+                    if (ticks[i] == 0) {
+                        lr = D2D1::RectF(g.left - 9.0f * scale_, g.cy + 8.0f * scale_, g.left + 60.0f * scale_, g.cy + 22.0f * scale_);
+                        align = fluent::HorizontalAlignment::Left;
+                        min_left = g.left - 9.0f * scale_ + tw + 6.0f * scale_;
+                    } else if (at_end) {
+                        lr = D2D1::RectF(g.right - 60.0f * scale_, g.cy + 8.0f * scale_, g.right + 9.0f * scale_, g.cy + 22.0f * scale_);
+                        align = fluent::HorizontalAlignment::Right;
+                    } else if (tx - tw * 0.5f < min_left) {
+                        lr = D2D1::RectF(min_left, g.cy + 8.0f * scale_, min_left + tw + 4.0f * scale_, g.cy + 22.0f * scale_);
+                        align = fluent::HorizontalAlignment::Left;
+                        min_left = min_left + tw + 6.0f * scale_;
+                    } else {
+                        lr = D2D1::RectF(tx - 34.0f * scale_, g.cy + 8.0f * scale_, tx + 34.0f * scale_, g.cy + 22.0f * scale_);
+                        min_left = tx + tw * 0.5f + 6.0f * scale_;
+                    }
+                    painter_.DrawText(tick_labels[i], lr, compositor_->SmallFormat(),
+                                      value == ticks[i] ? theme.text : theme.text_secondary, align);
+                }
+                MakeBrush(dc, WithAlpha(theme.surface_card, 1.0f), brFillInput_);
+                MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+                const float outer = 9.0f * scale_;
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, g.cy), outer, outer), brFillInput_.get());
+                dc->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(x, g.cy), outer, outer), brStrokeCard_.get(), 1.0f);
+                const float inner = (hot ? 6.0f : 5.0f) * scale_;
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, g.cy), inner, inner), brAccent_.get());
+                painter_.DrawText(std::to_wstring(value) + unit,
+                                  D2D1::RectF(g.right + 10.0f * scale_, g.cy - 10.0f * scale_, cells[2].right, g.cy + 10.0f * scale_),
+                                  compositor_->TextFormat(), theme.text, fluent::HorizontalAlignment::Right);
+            };
+
+            const I bg_sources[] = {I::BackgroundSourceImage, I::BackgroundSourceFolder, I::BackgroundSourceUrl, I::BackgroundSourceApi};
+            const int bg_source_values[] = {0, 1, 2, 3};
+            segmented(lay.wallpaper_source_card, lay.wallpaper_source_row, bg_sources, bg_source_values,
+                      vm.background_source, H::SettingsWallpaperSource, I::SettingsBackgroundSource, I::SettingsBackgroundSource, 4, L"\xE8B9");
+
+            if (!vm.background_notice.empty()) {
+                if (lay.wallpaper_pick.top > lay.wallpaper_source_card.bottom + 8.0f * scale_) {
+                    const bool stacked_actions = lay.wallpaper_pick.top - lay.wallpaper_source_card.bottom >= 40.0f * scale_;
+                    const float nx = lay.wallpaper_source_card.left + 16.0f * scale_;
+                    const float ny = lay.wallpaper_source_card.bottom + (stacked_actions ? 10.0f : 12.0f) * scale_;
+                    const float nr = stacked_actions ? lay.wallpaper_source_card.right - 16.0f * scale_ : lay.wallpaper_pick.left - 12.0f * scale_;
+                    if (nr > nx + 24.0f * scale_)
+                        painter_.DrawWrappedCaption(vm.background_notice, D2D1::Point2F(nx, ny), nr - nx, theme.text_secondary);
+                } else if (lay.wallpaper_source_card.bottom > lay.wallpaper_source_card.top &&
+                           lay.wallpaper_source_row[0].left > lay.wallpaper_source_card.left + 70.0f * scale_) {
+                    const float nx = lay.wallpaper_source_card.left + 54.0f * scale_;
+                    const float nr = lay.wallpaper_source_row[0].left - 12.0f * scale_;
+                    painter_.DrawWrappedCaption(vm.background_notice, D2D1::Point2F(nx, lay.wallpaper_source_card.top + 35.0f * scale_),
+                                                nr - nx, theme.text_secondary);
+                }
+            }
+
+            if (lay.wallpaper_pick.bottom > lay.wallpaper_pick.top) {
+                fluent::ControlState pick{};
+                pick.enabled = true;
+                pick.hovered = IsHovered(vm, H::SettingsWallpaper, 0);
+                painter_.DrawButton({ lay.wallpaper_pick,
+                                      l10n::Get(vm.background_source == 1 ? I::SettingsHomeFolderPick : I::ChooseImage),
+                                      {}, fluent::ButtonKind::Standard, pick });
+            }
+            if (lay.wallpaper_next.bottom > lay.wallpaper_next.top) {
+                fluent::ControlState next{};
+                next.enabled = vm.background_source != 0;
+                next.hovered = next.enabled && IsHovered(vm, H::SettingsWallpaperNext, 0);
+                painter_.DrawButton({ lay.wallpaper_next, l10n::Get(I::BackgroundNext), {}, fluent::ButtonKind::Standard, next });
+            }
+
+            auto draw_edit_row = [&](D2D1_RECT_F row, bool enabled, int hit_index, I title, I desc,
+                                     const std::wstring& placeholder, const wchar_t* icon) {
+                if (row.bottom <= row.top) return;
+                const bool dimmed = dim_begin(!enabled);
+                const float field_h = 32.0f * scale_;
+                const float field_top = row.top + (std::max)(0.0f, (row.bottom - row.top - field_h) * 0.5f);
+                const float field_left = (std::max)(row.left + 16.0f * scale_, row.right - 16.0f * scale_ - 360.0f * scale_);
+                const D2D1_RECT_F field_rect = D2D1::RectF(field_left, field_top, row.right - 16.0f * scale_, field_top + field_h);
+                const bool compact = field_left < row.left + 180.0f * scale_;
+                const float desc_h = compact ? 21.0f : (std::max)(21.0f, (row.bottom - row.top) / scale_ - 38.0f);
+                label(row, l10n::Get(title), (compact || title == desc) ? L"" : l10n::Get(desc), icon,
+                      compact ? row.right - 16.0f * scale_ : field_left - 12.0f * scale_, desc_h);
+                fluent::TextFieldSpec spec{};
+                spec.bounds = field_rect;
+                spec.placeholder = placeholder;
+                spec.hosted_edit = true;
+                spec.state.enabled = enabled;
+                spec.state.hovered = enabled && IsHovered(vm, H::SettingsWallpaper, hit_index);
+                painter_.DrawTextField(spec);
+                dim_end(dimmed);
+            };
+            draw_edit_row(lay.wallpaper_url_row, vm.background_source == 2 || vm.background_source == 3,
+                          2, I::BackgroundSourceUrl, I::BackgroundSourceUrl, l10n::Get(I::BackgroundUrlPlaceholder), L"\xE71B");
+            draw_edit_row(lay.wallpaper_pointer_row, vm.background_source == 3,
+                          3, I::BackgroundApiPointer, I::BackgroundApiPointerDesc, L"/data/url", L"\xE943");
+
+            const I bg_fits[] = {I::BackgroundFitContain, I::BackgroundFitCover, I::BackgroundFitStretch, I::BackgroundFitOriginal};
+            const int bg_fit_values[] = {0, 1, 2, 3};
+            segmented(lay.wallpaper_fit_card, lay.wallpaper_fit_row, bg_fits, bg_fit_values,
+                      vm.background_fit, H::SettingsWallpaperFit, I::SettingsBackgroundFit, I::SettingsBackgroundFit, 4, L"\xE740");
+
+            if (lay.wallpaper_position_card.bottom > lay.wallpaper_position_card.top) {
+                const float text_right = lay.wallpaper_position_cell[0].left - 12.0f * scale_;
+                const float desc_h = (std::max)(44.0f, (lay.wallpaper_position_card.bottom - lay.wallpaper_position_card.top) / scale_ - 48.0f);
+                label(lay.wallpaper_position_card, l10n::Get(I::SettingsBackgroundPosition),
+                      l10n::Get(I::SettingsBackgroundPositionDesc), L"\xE80A", text_right, desc_h);
+                for (int i = 0; i < 9; ++i) {
+                    const auto cell = lay.wallpaper_position_cell[i];
+                    if (cell.bottom <= cell.top) continue;
+                    const bool selected = vm.background_position == i;
+                    const bool hovered = IsHovered(vm, H::SettingsWallpaperPosition, i);
+                    painter_.FillRoundedRect(cell, 6.0f * scale_,
+                                             selected ? WithAlpha(theme.accent, vm.dark ? 0.14f : 0.10f)
+                                                      : hovered ? theme.fill_hover : theme.fill_input);
+                    const auto frame = D2D1::RectF(cell.left + 12.0f * scale_, cell.top + 12.0f * scale_,
+                                                   cell.right - 12.0f * scale_, cell.bottom - 12.0f * scale_);
+                    if (i == 4) {
+                        painter_.FillRoundedRect(frame, 3.0f * scale_,
+                                                 WithAlpha(selected ? theme.accent : theme.text_secondary, selected ? 0.24f : 0.14f));
+                        painter_.StrokeRoundedRect(frame, 3.0f * scale_,
+                                                   selected ? theme.accent : theme.text_secondary, 1.2f * scale_);
+                    } else {
+                        painter_.StrokeRoundedRect(frame, 3.0f * scale_, WithAlpha(theme.text_secondary, 0.35f), 1.0f);
+                        const float pad = 3.0f * scale_;
+                        const float fw = (std::max)(4.0f * scale_, frame.right - frame.left - 2.0f * pad);
+                        const float fh = (std::max)(4.0f * scale_, frame.bottom - frame.top - 2.0f * pad);
+                        const float bw = fw * 0.45f;
+                        const float bh = fh * 0.45f;
+                        const float bx = frame.left + pad + static_cast<float>(i % 3) * (fw - bw) * 0.5f;
+                        const float by = frame.top + pad + static_cast<float>(i / 3) * (fh - bh) * 0.5f;
+                        painter_.FillRoundedRect(D2D1::RectF(bx, by, bx + bw, by + bh), 2.0f * scale_,
+                                                 WithAlpha(selected ? theme.accent : theme.text_secondary, selected ? 0.78f : 0.45f));
+                    }
+                    MakeBrush(dc, selected ? theme.accent : hovered ? theme.text_secondary : theme.stroke_card, brStrokeCard_);
+                    dc->DrawRoundedRectangle(D2D1::RoundedRect(cell, 6.0f * scale_, 6.0f * scale_), brStrokeCard_.get(),
+                                             selected ? 1.5f * scale_ : 1.0f * scale_);
+                    if (selected) {
+                        const auto center = D2D1::Point2F(cell.right - 9.0f * scale_, cell.bottom - 9.0f * scale_);
+                        MakeBrush(dc, theme.accent, brAccent_);
+                        dc->FillEllipse(D2D1::Ellipse(center, 7.0f * scale_, 7.0f * scale_), brAccent_.get());
+                        DrawIconText(center.x - 6.0f * scale_, center.y - 6.0f * scale_, 12.0f * scale_, 12.0f * scale_,
+                                     L"\xE73E", L"", theme.accent_text, 0.6f);
+                    }
+                }
+            }
+
+            {
+                const bool ratio_dim = dim_begin(vm.background_position == 4);
+                const int ratio_ticks[] = {25, 50, 100};
+                const wchar_t* ratio_labels[] = {L"25%", L"50%", L"100%"};
+                slider_nums(lay.wallpaper_ratio_card, lay.wallpaper_ratio_row, vm.background_ratio, 100,
+                            ratio_ticks, ratio_labels, H::SettingsWallpaperRatio,
+                            I::SettingsBackgroundRatio, I::SettingsBackgroundRatio, L"%", L"\xE91B");
+                dim_end(ratio_dim);
+            }
+
+            const I bg_regions[] = {I::BackgroundRegionWindow, I::BackgroundRegionList};
+            const int bg_region_values[] = {0, 1};
+            segmented(lay.wallpaper_region_card, lay.wallpaper_region_row, bg_regions, bg_region_values,
+                      vm.background_region, H::SettingsWallpaperRegion, I::SettingsBackgroundRegion, I::SettingsBackgroundRegion, 2, L"\xE8A7");
+
+            {
+                const int opacity_ticks[] = {25, 50, 75};
+                const wchar_t* opacity_labels[] = {L"25%", L"50%", L"75%"};
+                slider_nums(lay.wallpaper_opacity_card, lay.wallpaper_opacity_row, vm.background_opacity, 100,
+                            opacity_ticks, opacity_labels, H::SettingsWallpaperOpacity,
+                            I::SettingsBackgroundOpacity, I::SettingsBackgroundOpacityDesc, L"%", L"\xE790");
+            }
+
+            const I bg_switches[] = {I::BackgroundSwitchManual, I::BackgroundSwitchStartup, I::BackgroundSwitchTimed, I::BackgroundSwitchNavigate};
+            const int bg_switch_values[] = {0, 1, 2, 3};
+            segmented(lay.wallpaper_switch_card, lay.wallpaper_switch_row, bg_switches, bg_switch_values,
+                      vm.background_switch, H::SettingsWallpaperSwitch, I::SettingsBackgroundSwitch, I::SettingsBackgroundSwitch, 4, L"\xE895");
+
+            {
+                const bool interval_dim = dim_begin(vm.background_switch != 2);
+                const int interval_ticks[] = {5, 30, 120};
+                const wchar_t* interval_labels[] = {L"5", L"30", L"120"};
+                slider_nums(lay.wallpaper_interval_card, lay.wallpaper_interval_row, vm.background_interval_min, 1440,
+                            interval_ticks, interval_labels, H::SettingsWallpaperInterval,
+                            I::SettingsBackgroundInterval, I::SettingsBackgroundInterval, L" min", L"\xE823");
+                dim_end(interval_dim);
+            }
+        }
         }
         if(page==11) {
         painter_.DrawWrappedCaption(l10n::Get(I::StartupIntegrationLead),D2D1::Point2F(lay.startup_lead.left,lay.startup_lead.top),lay.startup_lead.right-lay.startup_lead.left,theme.text_secondary);
@@ -1628,5 +1852,9 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         DrawIconText(lay.content_rebuild.right-38*scale_,lay.content_rebuild.top+22*scale_,18*scale_,18*scale_,L"\xE76C",L"",theme.text_secondary,0.75f);
         }
     }
+}
+
+D2D1_RECT_F MainRenderer::SettingsBackgroundFieldRect(int field) const {
+    return field >= 0 && field < 2 ? settings_background_fields_[field] : D2D1_RECT_F{};
 }
 } // namespace pulse::ui

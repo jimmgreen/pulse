@@ -4293,10 +4293,16 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsWallpaperLook ||
                    hit.region == ui::HitTestResult::SettingsWallpaperBlur ||
+                   hit.region == ui::HitTestResult::SettingsWallpaperRatio ||
+                   hit.region == ui::HitTestResult::SettingsWallpaperOpacity ||
+                   hit.region == ui::HitTestResult::SettingsWallpaperInterval ||
                    hit.region == ui::HitTestResult::SettingsFrameLook ||
                    hit.region == ui::HitTestResult::SettingsAccentSlider) {
             const int which = hit.region == ui::HitTestResult::SettingsWallpaperLook ? 0
                 : hit.region == ui::HitTestResult::SettingsWallpaperBlur ? 1
+                : hit.region == ui::HitTestResult::SettingsWallpaperRatio ? 6
+                : hit.region == ui::HitTestResult::SettingsWallpaperOpacity ? 7
+                : hit.region == ui::HitTestResult::SettingsWallpaperInterval ? 8
                 : hit.region == ui::HitTestResult::SettingsFrameLook ? 5 : 2 + std::clamp(hit.sub_index, 0, 2);
             s->settings.BeginSlider(which);
             s->settings.SliderValue(which, hit.index);
@@ -4307,7 +4313,14 @@ static LRESULT DispatchLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wPar
             if (hit.index >= 0 && hit.index < static_cast<int>(std::size(languages)))
                 s->settings.Language(languages[hit.index]);
         } else if (hit.region == ui::HitTestResult::SettingsWallpaper) {
-            s->settings.Wallpaper(hit.index);
+            // 0 chooses a picture (or a folder once the source says so), 1
+            // clears every source, 2/3 open the URL / API-pointer fields.
+            if (hit.index == 2) StartBackgroundUrlEdit(*s, false);
+            else if (hit.index == 3) StartBackgroundUrlEdit(*s, true);
+            else if (hit.index == 0 && s->appPrefs.background_source == app::kBackgroundSourceFolder)
+                s->settings.BackgroundPickFolder();
+            else
+                s->settings.Wallpaper(hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsIndexVolume) {
             s->settings.ToggleVolume(hit.index);

@@ -68,6 +68,9 @@ constexpr SettingDestination destinations[]={
     // 0 外观
     {I::SettingsTheme,0,0},{I::SettingsThemeColor,0,0},{I::AccentCustomTitle,0,32},{I::SettingsWindowEffect,0,0},{I::SettingsFrameLook,0,0},{I::MenuAcrylic,0,0},
     {I::SettingsWallpaper,0,0},{I::SettingsWallpaperLook,0,0},{I::SettingsWallpaperBlur,0,0},
+    {I::SettingsBackgroundSource,0,0},{I::SettingsBackgroundFit,0,0},{I::SettingsBackgroundPosition,0,0},
+    {I::SettingsBackgroundRegion,0,0},{I::SettingsBackgroundOpacity,0,0},{I::SettingsBackgroundSwitch,0,0},
+    {I::SettingsBackgroundInterval,0,0},
     {I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},
     {I::NativeExtensionSettingsTitle,ui::kSettingsPageNativeExtensions,0},
     // 16 界面布局
@@ -129,6 +132,30 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         case I::SettingsWallpaper: haystack += L" " + l10n::Get(I::SettingsWallpaperDesc); break;
         case I::SettingsWallpaperLook: haystack += L" " + l10n::Get(I::SettingsWallpaperLookDesc); break;
         case I::SettingsWallpaperBlur: haystack += L" " + l10n::Get(I::SettingsWallpaperBlurDesc); break;
+        case I::SettingsBackgroundSource:
+            haystack += L" " + l10n::Get(I::BackgroundSourceImage) + L" " + l10n::Get(I::BackgroundSourceFolder) +
+                        L" " + l10n::Get(I::BackgroundSourceUrl) + L" " + l10n::Get(I::BackgroundSourceApi) +
+                        L" " + l10n::Get(I::BackgroundApiPointer) + L" " + l10n::Get(I::BackgroundApiPointerDesc);
+            break;
+        case I::SettingsBackgroundFit:
+            haystack += L" " + l10n::Get(I::BackgroundFitContain) + L" " + l10n::Get(I::BackgroundFitCover) +
+                        L" " + l10n::Get(I::BackgroundFitStretch) + L" " + l10n::Get(I::BackgroundFitOriginal);
+            break;
+        case I::SettingsBackgroundPosition:
+            haystack += L" " + l10n::Get(I::SettingsBackgroundPositionDesc) + L" " + l10n::Get(I::SettingsBackgroundRatio);
+            break;
+        case I::SettingsBackgroundRegion:
+            haystack += L" " + l10n::Get(I::BackgroundRegionWindow) + L" " + l10n::Get(I::BackgroundRegionList);
+            break;
+        case I::SettingsBackgroundOpacity: haystack += L" " + l10n::Get(I::SettingsBackgroundOpacityDesc); break;
+        case I::SettingsBackgroundSwitch:
+            haystack += L" " + l10n::Get(I::BackgroundSwitchManual) + L" " + l10n::Get(I::BackgroundSwitchStartup) +
+                        L" " + l10n::Get(I::BackgroundSwitchTimed) + L" " + l10n::Get(I::BackgroundSwitchNavigate) +
+                        L" " + l10n::Get(I::BackgroundNext);
+            break;
+        case I::SettingsBackgroundInterval:
+            haystack += L" " + l10n::Get(I::SettingsBackgroundSwitch) + L" " + l10n::Get(I::BackgroundSwitchTimed);
+            break;
         case I::SettingsLanguage: haystack += L" " + l10n::Get(I::SettingsLanguageDesc); break;
         case I::SettingsTextRender: haystack += L" " + l10n::Get(I::SettingsTextRenderDesc); break;
         case I::SettingsUiFontSize: haystack += L" " + l10n::Get(I::SettingsUiFontSizeDesc); break;
@@ -535,6 +562,12 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsExternalOpen: s.settings.ExternalOpen(hit.index);break;
     case H::SettingsDensity: s.settings.RowHeight(hit.index);break;
     case H::SettingsTextRender: s.settings.TextRendering(hit.index);break;
+    case H::SettingsWallpaperSource: s.settings.BackgroundSource(hit.index);break;
+    case H::SettingsWallpaperFit: s.settings.BackgroundFit(hit.index);break;
+    case H::SettingsWallpaperPosition: s.settings.BackgroundPosition(hit.index);break;
+    case H::SettingsWallpaperRegion: s.settings.BackgroundRegion(hit.index);break;
+    case H::SettingsWallpaperSwitch: s.settings.BackgroundSwitch(hit.index);break;
+    case H::SettingsWallpaperNext: s.settings.BackgroundNext();break;
     case H::SettingsSearchResult: OpenSettingsSearchResult(s, hit.index); break;
     case H::SettingsSearchClear:
         if (s.hwndSettingsSearchEdit) SetWindowTextW(s.hwndSettingsSearchEdit, L"");

@@ -3794,6 +3794,21 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     FillFolderSizes(s, vm);
     vm.window_effect = ui::WindowEffectFromId(s.appPrefs.window_effect);
     vm.background_image = s.appPrefs.background_image;
+    // The service owns the random/network picture; without one the single image
+    // stays what every renderer has always drawn.
+    const app::BackgroundImageSnapshot bg = s.core.background_image.Snapshot();
+    vm.background_resolved_path = bg.path.empty() ? s.appPrefs.background_image : bg.path;
+    vm.background_source = s.appPrefs.background_source;
+    vm.background_switch = s.appPrefs.background_switch;
+    vm.background_interval_min = s.appPrefs.background_interval_min;
+    vm.background_fit = s.appPrefs.background_fit;
+    vm.background_position = s.appPrefs.background_position;
+    vm.background_ratio = s.appPrefs.background_ratio;
+    vm.background_region = s.appPrefs.background_region;
+    vm.background_opacity = s.appPrefs.background_opacity;
+    vm.background_image_version = bg.version;
+    vm.background_busy = bg.busy;
+    vm.background_notice = bg.error;
     vm.wallpaper_look = s.appPrefs.wallpaper_look;
     vm.wallpaper_blur = s.appPrefs.wallpaper_blur;
     vm.frame_transparency = s.appPrefs.frame_transparency;

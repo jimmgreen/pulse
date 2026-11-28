@@ -21,6 +21,7 @@ namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; 
 #include "app_model.h"
 #include "app_prefs.h"
 #include "app_worker.h"
+#include "background_image_service.h"
 #include "closed_tabs.h"
 #include "closed_windows.h"
 #include "context_menu_controller.h"
@@ -136,6 +137,9 @@ struct AppCore {
     app::SearchHistory searchHistory;
     app::SearchHistoryWriter searchHistoryWriter;
     app::SettingsController settings;
+    // The one background picture every window draws: settings push its
+    // configuration, the UI timer ticks it, renders read its snapshot.
+    app::BackgroundImageService background_image;
     app::UpdateChecker update_checker;
     app::UpdateResult update_result;
     bool update_result_ready = false;

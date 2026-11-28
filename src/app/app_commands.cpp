@@ -6659,6 +6659,23 @@ static void RefreshEditFonts(AppState& s) {
         SendMessageW(s.hwndTagRenameEdit, WM_SETFONT, reinterpret_cast<WPARAM>(s.editFont), TRUE);
 }
 
+void SyncBackgroundImage(AppState& s) {
+    app::BackgroundImageConfig config;
+    config.source = static_cast<app::BackgroundSource>(
+        app::NormalizeBackgroundSource(s.appPrefs.background_source));
+    // The single image belongs to the Image source only: a folder, URL or API
+    // picture must not fall back to the old single path.
+    if (config.source == app::BackgroundSource::Image) config.image = s.appPrefs.background_image;
+    config.folder = s.appPrefs.background_folder;
+    config.url = s.appPrefs.background_url;
+    config.api_pointer = s.appPrefs.background_api_pointer;
+    config.switch_mode = static_cast<app::BackgroundSwitchMode>(
+        app::NormalizeBackgroundSwitchMode(s.appPrefs.background_switch));
+    config.interval_minutes = app::NormalizeBackgroundInterval(s.appPrefs.background_interval_min);
+    // Idempotent: an unchanged configuration keeps the current picture.
+    s.core.background_image.SetConfig(std::move(config));
+}
+
 void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     // Cheap when unchanged; 文件夹最近变化 (ChangeTracking) also feeds it.
     s.renderer.SetMtimeHint(app::MtimeHintFromPrefs(s.appPrefs));
@@ -6677,6 +6694,13 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     if (app::HasEffect(effects, app::SettingsEffect::WindowMaterial)) {
         s.renderer.InvalidateWallpaper();
         ApplyAppWindowChrome(s);
+    }
+    if (app::HasEffect(effects, app::SettingsEffect::BackgroundImage)) {
+        SyncBackgroundImage(s);
+        // The picture is process-wide: every window repaints, not just this one.
+        app::ForEachWindowSharingCore(s, [](AppState& window) {
+            InvalidateRect(window.hwnd, nullptr, FALSE);
+        });
     }
     if (app::HasEffect(effects, app::SettingsEffect::MenuMaterial))
         ui::FluentMenu::SetAcrylicEnabled(s.appPrefs.menu_acrylic && !s.safeMode);

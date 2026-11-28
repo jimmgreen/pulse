@@ -87,6 +87,11 @@ int MainRenderer::SettingsSliderValueAt(const WindowViewModel& vm, const D2D1_RE
     if (which >= 2 && which <= 4)
         return SettingsSliderValue(SettingsSlider(lay.accent_slider_cells[which - 2], scale_), x, which == 2 ? 360 : 100);
     if (which == 5) return SettingsSliderValue(SettingsSlider(lay.frame_look_row, scale_), x, kFrameTransparencyMax);
+    // 6..8: the random background's ratio / opacity / interval sliders. Ratio
+    // and interval are normalised by the controller afterwards.
+    if (which == 6) return SettingsSliderValue(SettingsSlider(lay.wallpaper_ratio_row, scale_), x, 100);
+    if (which == 7) return SettingsSliderValue(SettingsSlider(lay.wallpaper_opacity_row, scale_), x, 100);
+    if (which == 8) return SettingsSliderValue(SettingsSlider(lay.wallpaper_interval_row, scale_), x, 1440);
     return which == 0
         ? SettingsSliderValue(SettingsSlider(lay.wallpaper_look_row, scale_), x, kPanelTransparencyMax)
         : SettingsSliderValue(SettingsSlider(lay.wallpaper_blur_row, scale_), x, kWallpaperBlurMax);
@@ -607,14 +612,32 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         return r;
                     }
                 }
-                if (ContainsPt(lay.wallpaper_choose, x, y)) {
+                if (ContainsPt(lay.wallpaper_clear, x, y)) {
+                    r.region = HitTestResult::SettingsWallpaper;
+                    r.index = 1;
+                    return r;
+                }
+                // 随机背景图: 选择图片/选择文件夹 (0, the source decides which),
+                // 下一张, and the two hosted address fields.
+                if (ContainsPt(lay.wallpaper_pick, x, y)) {
                     r.region = HitTestResult::SettingsWallpaper;
                     r.index = 0;
                     return r;
                 }
-                if (ContainsPt(lay.wallpaper_clear, x, y)) {
+                if (ContainsPt(lay.wallpaper_next, x, y)) {
+                    r.region = HitTestResult::SettingsWallpaperNext;
+                    r.index = 0;
+                    return r;
+                }
+                if ((vm.background_source == 2 || vm.background_source == 3) &&
+                    ContainsPt(lay.wallpaper_url_row, x, y)) {
                     r.region = HitTestResult::SettingsWallpaper;
-                    r.index = 1;
+                    r.index = 2;
+                    return r;
+                }
+                if (vm.background_source == 3 && ContainsPt(lay.wallpaper_pointer_row, x, y)) {
+                    r.region = HitTestResult::SettingsWallpaper;
+                    r.index = 3;
                     return r;
                 }
                 // Sliders: index carries the value under the pointer.
@@ -635,11 +658,63 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                                                   kPanelTransparencyMax);
                     return r;
                 }
-                if (!vm.background_image.empty() && ContainsPt(slider_zone(lay.wallpaper_blur_row), x, y)) {
+                if ((!vm.background_resolved_path.empty() || !vm.background_image.empty()) &&
+                    ContainsPt(slider_zone(lay.wallpaper_blur_row), x, y)) {
                     r.region = HitTestResult::SettingsWallpaperBlur;
                     r.index = SettingsSliderValue(SettingsSlider(lay.wallpaper_blur_row, scale_), x,
                                                   kWallpaperBlurMax);
                     return r;
+                }
+                if (ContainsPt(slider_zone(lay.wallpaper_ratio_row), x, y)) {
+                    r.region = HitTestResult::SettingsWallpaperRatio;
+                    r.index = SettingsSliderValue(SettingsSlider(lay.wallpaper_ratio_row, scale_), x, 100);
+                    return r;
+                }
+                if (ContainsPt(slider_zone(lay.wallpaper_opacity_row), x, y)) {
+                    r.region = HitTestResult::SettingsWallpaperOpacity;
+                    r.index = SettingsSliderValue(SettingsSlider(lay.wallpaper_opacity_row, scale_), x, 100);
+                    return r;
+                }
+                if (ContainsPt(slider_zone(lay.wallpaper_interval_row), x, y)) {
+                    r.region = HitTestResult::SettingsWallpaperInterval;
+                    r.index = SettingsSliderValue(SettingsSlider(lay.wallpaper_interval_row, scale_), x, 1440);
+                    return r;
+                }
+                // Choice rows and the position grid (disjoint from the sliders above).
+                for (int i = 0; i < 4; ++i) {
+                    if (ContainsPt(lay.wallpaper_source_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsWallpaperSource;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                for (int i = 0; i < 4; ++i) {
+                    if (ContainsPt(lay.wallpaper_fit_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsWallpaperFit;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                for (int i = 0; i < 9; ++i) {
+                    if (ContainsPt(lay.wallpaper_position_cell[i], x, y)) {
+                        r.region = HitTestResult::SettingsWallpaperPosition;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                for (int i = 0; i < 2; ++i) {
+                    if (ContainsPt(lay.wallpaper_region_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsWallpaperRegion;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                for (int i = 0; i < 4; ++i) {
+                    if (ContainsPt(lay.wallpaper_switch_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsWallpaperSwitch;
+                        r.index = i;
+                        return r;
+                    }
                 }
                 if (ContainsPt(lay.hidden_files_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle;

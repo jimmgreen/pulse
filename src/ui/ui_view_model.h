@@ -1402,6 +1402,21 @@ struct WindowViewModel {
     bool backdrop_enabled = false;
     WindowEffect window_effect = WindowEffect::MicaAlt;
     std::wstring background_image;
+    // Random background image (background_image_service.h): the path the shared
+    // service resolved (empty: draw background_image), where the picture comes
+    // from, how it fills its area and when it changes.
+    std::wstring background_resolved_path;
+    int background_source = 0;
+    int background_switch = 0;
+    int background_interval_min = 30;
+    int background_fit = 1;
+    int background_position = 4;
+    int background_ratio = 50;
+    int background_region = 0;
+    int background_opacity = 100;
+    uint64_t background_image_version = 0;
+    bool background_busy = false;
+    std::wstring background_notice;
     int wallpaper_look = 50; // interface transparency 0..90 (AppPrefs::wallpaper_look)
     int wallpaper_blur = 14; // wallpaper blur in DIPs 0..40
     int frame_transparency = 10; // 侧边栏与标题栏 0..100 (AppPrefs::frame_transparency)
@@ -1957,6 +1972,17 @@ struct HitTestResult {
         ColumnStripHScroll,  // ancestor strip scrollbar
         SettingsWallpaperLook,
         SettingsWallpaperBlur,
+        // 背景图 › 随机背景: source, fit, position, ratio, region, opacity,
+        // switch mode, interval and the 下一张 button.
+        SettingsWallpaperSource,
+        SettingsWallpaperFit,
+        SettingsWallpaperPosition,
+        SettingsWallpaperRatio,
+        SettingsWallpaperRegion,
+        SettingsWallpaperOpacity,
+        SettingsWallpaperSwitch,
+        SettingsWallpaperInterval,
+        SettingsWallpaperNext,
         SettingsFrameLook,     // 窗口效果 › 侧边栏与标题栏 slider; index = value
         SettingsAccentCustom,  // 主题色 › 自定义 button
         SettingsAccentSlider,  // sub_index 0 hue, 1 saturation, 2 lightness; index = value

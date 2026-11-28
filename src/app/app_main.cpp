@@ -767,6 +767,7 @@ void Render(AppState& s) {
     if (!s.workspaceRenameRoot.empty()) LayoutWorkspaceRenameOverlay(s);
     if (s.addressEditing) LayoutAddressEditor(s);
     LayoutSettingsSearch(s);
+    LayoutBackgroundUrlEdit(s);
     SyncStoreEdits(s, vm);
     if (s.filterEditing) LayoutFilterEditor(s);
     AiAssistantLayout(s);
@@ -1231,6 +1232,10 @@ static void HandOffAtExit(AppState& s, HWND hwnd) {
     const uint64_t sweep_ms = timer.Lap();
     s.single_instance.Release();
     StartExitWatchdog();
+    // The fetch worker can sit in WinHTTP for up to its I/O timeout; stop it
+    // after the watchdog so a dead network cannot hold the exit. Cache files
+    // are published with a rename, so an interrupted one leaves no half image.
+    s.core.background_image.Shutdown();
     diagnostics::runtime::Event("exit_handoff", {{"tray", tray_ms}, {"search", search_ms},
         {"save", save_ms}, {"ops", ops_ms}, {"sweep", sweep_ms}, {"release", timer.Lap()}});
 }
@@ -1247,6 +1252,33 @@ static void ExitPulse(AppState& s) {
     for (HWND window : s.core.windows.ExitOrder())
         if (window != self && IsWindow(window)) DestroyWindow(window);
     if (self && IsWindow(self)) DestroyWindow(self);
+}
+
+// 背景图 › 随机背景: the shared picture follows its switch mode (startup, timed,
+// on navigate) and every window repaints once a new path or a busy/error state
+// arrived. The first tick pushes the loaded preferences into the service; the
+// folder restored with the session is the baseline, not a navigation.
+static void TickBackgroundImage(AppState& s) {
+    bool navigated = false;
+    const app::Tab* tab = ActiveTab(s);
+    if (!s.backgroundTickStarted) {
+        s.backgroundTickStarted = true;
+        SyncBackgroundImage(s);
+        if (tab) s.backgroundNavPath = tab->current_path;
+    } else if (tab && tab->current_path != s.backgroundNavPath) {
+        s.backgroundNavPath = tab->current_path;
+        navigated = true;
+    }
+    s.core.background_image.Tick(GetTickCount64(), navigated);
+    const app::BackgroundImageSnapshot snapshot = s.core.background_image.Snapshot();
+    if (snapshot.version == s.backgroundSeenVersion && snapshot.busy == s.backgroundSeenBusy &&
+        snapshot.error == s.backgroundSeenError) return;
+    s.backgroundSeenVersion = snapshot.version;
+    s.backgroundSeenBusy = snapshot.busy;
+    s.backgroundSeenError = snapshot.error;
+    app::ForEachWindowSharingCore(s, [](AppState& window) {
+        InvalidateRect(window.hwnd, nullptr, FALSE);
+    });
 }
 
 static LRESULT HandleSystemBroadcast(AppState& s, app::SystemBroadcast kind, WPARAM wParam) {
@@ -1933,6 +1965,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, 
                 const std::wstring initial = path;
                 return PickFolder(app::CurrentWindow(*s), path, owned_title.c_str(), L"settings:" + owned_title,
                                   initial);
+            };
+            settings_callbacks.background_next = [s] {
+                app::CurrentWindow(*s).core.background_image.Next();
             };
             settings_callbacks.apply_effects = [s](app::SettingsEffect effects) {
                 // Every window shows the changed setting.
@@ -3009,6 +3044,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, 
             }
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
+            TickBackgroundImage(*s);
             TickQuickPreviewSelection(*s, now);
             SyncDetailsPreview(*s);
             if (TickSidebarRefresh(*s, now)) {

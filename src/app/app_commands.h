@@ -295,6 +295,9 @@ void SyncQuickPreview(AppState& s);
 void StartCloudPreviewDownload(AppState& s, const std::wstring& path, uint64_t size);
 void HandleCloudDownloadMessage(AppState& s, WPARAM event, LPARAM job);
 void ApplySettingsEffects(AppState& s, app::SettingsEffect effects);
+// Random background image: pushes AppPrefs::background_* into the process-wide
+// service. Called on startup, from the settings effect and by the UI tick.
+void SyncBackgroundImage(AppState& s);
 app::SettingsTaskCompletion SettingsCompletion(HWND hwnd);
 void SetThemeMode(AppState& s, int mode);
 bool HandleSettingsControl(AppState& s, const ui::HitTestResult& hit);

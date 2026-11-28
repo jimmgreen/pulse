@@ -1542,6 +1542,13 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsWallpaper: target=l.wallpaper_card;break;
     case I::SettingsWallpaperLook: target=l.wallpaper_look_card;break;
     case I::SettingsWallpaperBlur: target=l.wallpaper_blur_card;break;
+    case I::SettingsBackgroundSource: target=l.wallpaper_source_card;break;
+    case I::SettingsBackgroundFit: target=l.wallpaper_fit_card;break;
+    case I::SettingsBackgroundPosition: target=l.wallpaper_position_card;break;
+    case I::SettingsBackgroundRegion: target=l.wallpaper_region_card;break;
+    case I::SettingsBackgroundOpacity: target=l.wallpaper_opacity_card;break;
+    case I::SettingsBackgroundSwitch: target=l.wallpaper_switch_card;break;
+    case I::SettingsBackgroundInterval: target=l.wallpaper_interval_card;break;
     case I::SettingsFrameLook: target=l.frame_look_card;break;
     case I::SettingsTrayIcon: target=l.tray_icon_card;break;
     case I::SettingsShelfShake: target=l.shelf_shake_row;break;

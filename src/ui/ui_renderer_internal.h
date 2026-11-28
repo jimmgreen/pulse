@@ -3157,6 +3157,29 @@ struct SettingsLayout {
     D2D1_RECT_F wallpaper_look_row[3]{};
     D2D1_RECT_F wallpaper_blur_card{};
     D2D1_RECT_F wallpaper_blur_row[3]{};
+    // 随机背景图: where the picture comes from, then how and when it is drawn.
+    // wallpaper_url_row / wallpaper_pointer_row are the whole rows; the hosted
+    // editors inset them (background_url_edit.cpp).
+    D2D1_RECT_F wallpaper_source_card{};
+    D2D1_RECT_F wallpaper_source_row[4]{};
+    D2D1_RECT_F wallpaper_pick{};
+    D2D1_RECT_F wallpaper_next{};
+    D2D1_RECT_F wallpaper_url_row{};
+    D2D1_RECT_F wallpaper_pointer_row{};
+    D2D1_RECT_F wallpaper_fit_card{};
+    D2D1_RECT_F wallpaper_fit_row[4]{};   // four-way picker; the drawing card labels it
+    D2D1_RECT_F wallpaper_position_card{};
+    D2D1_RECT_F wallpaper_position_cell[9]{};   // 3x3, row-major like the pref
+    D2D1_RECT_F wallpaper_ratio_card{};
+    D2D1_RECT_F wallpaper_ratio_row[3]{};       // the three cells of the slider track
+    D2D1_RECT_F wallpaper_region_card{};
+    D2D1_RECT_F wallpaper_region_row[2]{};
+    D2D1_RECT_F wallpaper_opacity_card{};
+    D2D1_RECT_F wallpaper_opacity_row[3]{};
+    D2D1_RECT_F wallpaper_switch_card{};
+    D2D1_RECT_F wallpaper_switch_row[4]{};
+    D2D1_RECT_F wallpaper_interval_card{};
+    D2D1_RECT_F wallpaper_interval_row[3]{};
     D2D1_RECT_F frame_look_card{};     // 窗口效果 › 侧边栏与标题栏
     D2D1_RECT_F frame_look_row[3]{};
     D2D1_RECT_F startup_row[3]{};

@@ -443,6 +443,10 @@ struct AppState : AppCoreOwner {
     int settingsSearchTarget = 0;
     ULONGLONG settingsSearchTargetUntil = 0;
     HWND hwndSettingsSearchEdit = nullptr;
+    // 设置 › 背景图: the hosted URL / API-pointer field, and which of the two
+    // rows it edits (background_url_edit.cpp).
+    HWND hwndBackgroundUrlEdit = nullptr;
+    bool backgroundUrlEditPointer = false;
     bool settingsScrollbarHot = false;
     app::ScrollbarFade settingsScrollbarFade;
     bool paneScrollbarHot = false;
@@ -623,6 +627,14 @@ struct AppState : AppCoreOwner {
     uint64_t extensionColumnsRevision = 0;  // pulse.columns values / providers this window has painted
     uint64_t extensionStatusRevision = 0;   // pulse.statusbar items this window has painted
     uint64_t cloudSyncRevision = 0;  // CloudSyncProbe answers this window has painted  // tag catalog revision last published for grouping
+    // Random background image (background_image_service.h): the active tab's
+    // folder on the last UI tick (OnNavigate), what this window has painted of
+    // the service's snapshot, and whether the tick has started the service.
+    std::wstring backgroundNavPath;
+    uint64_t backgroundSeenVersion = 0;
+    bool backgroundSeenBusy = false;
+    std::wstring backgroundSeenError;
+    bool backgroundTickStarted = false;
     float addressSearchAnimation = 0.0f;
     float addressScopeAnimation = 0.0f;
     ULONGLONG addressAnimationTick = 0;
@@ -1160,5 +1172,10 @@ inline AppState* GetAppState(HWND hwnd) {
 inline std::wstring ClipboardPath(const std::wstring& p) {
     return path::StripExtendedPathPrefix(p);
 }
+
+// background_url_edit.cpp: 背景图 › 网络地址 / API 指针的内联输入框.
+void StartBackgroundUrlEdit(AppState& s, bool pointer_row);
+void LayoutBackgroundUrlEdit(AppState& s);
+void CommitBackgroundUrl(AppState& s);
 
 } // namespace pulse

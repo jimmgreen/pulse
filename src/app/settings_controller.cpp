@@ -1120,6 +1120,23 @@ bool SettingsController::SliderValue(int which, int value) {
         prefs_->frame_transparency = value;
         return true;
     }
+    if (which >= 6 && which <= 8) {
+        // 随机背景图: live while dragging, like the accent sliders; EndSlider
+        // saves. The pref normalisers own the real ratio / interval bounds.
+        if (!prefs_) return false;
+        const int before = which == 6 ? prefs_->background_ratio
+                         : which == 7 ? prefs_->background_opacity
+                                      : prefs_->background_interval_min;
+        const int normalized = which == 6 ? NormalizeBackgroundRatio(value)
+                             : which == 7 ? NormalizeBackgroundOpacity(value)
+                                          : NormalizeBackgroundInterval(value);
+        if (before == normalized) return false;
+        if (which == 6) prefs_->background_ratio = normalized;
+        else if (which == 7) prefs_->background_opacity = normalized;
+        else prefs_->background_interval_min = normalized;
+        Apply(SettingsEffect::BackgroundImage);
+        return true;
+    }
     if (!prefs_ || which < 0 || which > 1) return false;
     const bool snap = GetKeyState(VK_SHIFT) >= 0;
     int& target = which == 0 ? prefs_->wallpaper_look : prefs_->wallpaper_blur;
@@ -1181,13 +1198,139 @@ void SettingsController::Wallpaper(int action) {
     std::wstring path;
     if (action == 0 && ui_.pick_image && ui_.pick_image(path)) {
         if (!path.empty()) {
-            if (prefs_->StoreBackgroundImage(path)) Apply(SettingsEffect::WindowMaterial);
-            else if (ui_.show_error) ui_.show_error(l10n::HantText(l10n::Get(l10n::StringId::TheNewWallpaperCouldNotBeSavedThePreviousWallpaperWasKept).c_str()));
+            // The service mirrors the single image too, so the resolved path
+            // never keeps the picture the user just replaced.
+            if (prefs_->StoreBackgroundImage(path)) {
+                // The picked image is drawn from the single-image source even when a
+                // folder, URL, or API source was selected. Those sources keep their
+                // values so switching back does not lose the user's input.
+                prefs_->background_source = kBackgroundSourceImage;
+                Apply(SettingsEffect::WindowMaterial | SettingsEffect::BackgroundImage);
+            } else if (ui_.show_error) ui_.show_error(l10n::HantText(l10n::Get(l10n::StringId::TheNewWallpaperCouldNotBeSavedThePreviousWallpaperWasKept).c_str()));
         }
-    } else if (action == 1 && !prefs_->background_image.empty()) {
-        prefs_->ClearBackgroundImage();
-        SaveAndApply(SettingsEffect::WindowMaterial);
+    } else if (action == 1) {
+        // 清除 drops every source, not only the single image: the folder, URL
+        // and API pointer go too, so the window returns to the plain material.
+        prefs_->ClearBackground();
+        SaveAndApply(SettingsEffect::WindowMaterial | SettingsEffect::BackgroundImage);
     }
+}
+
+void SettingsController::BackgroundSource(int index) {
+    if (!prefs_) return;
+    const int value = NormalizeBackgroundSource(index);
+    if (prefs_->background_source == value) return;
+    prefs_->background_source = value;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundFit(int index) {
+    if (!prefs_) return;
+    const int value = NormalizeBackgroundFit(index);
+    if (prefs_->background_fit == value) return;
+    prefs_->background_fit = value;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundPosition(int index) {
+    if (!prefs_) return;
+    const int value = NormalizeBackgroundPosition(index);
+    if (prefs_->background_position == value) return;
+    prefs_->background_position = value;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundRatio(int value) {
+    if (!prefs_) return;
+    const int ratio = NormalizeBackgroundRatio(value);
+    if (prefs_->background_ratio == ratio) return;
+    prefs_->background_ratio = ratio;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundRegion(int index) {
+    if (!prefs_) return;
+    const int region = std::clamp(index, kBackgroundRegionWindow, kBackgroundRegionList);
+    if (prefs_->background_region == region) return;
+    prefs_->background_region = region;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundOpacity(int value) {
+    if (!prefs_) return;
+    const int opacity = NormalizeBackgroundOpacity(value);
+    if (prefs_->background_opacity == opacity) return;
+    prefs_->background_opacity = opacity;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundSwitch(int index) {
+    if (!prefs_) return;
+    const int mode = NormalizeBackgroundSwitchMode(index);
+    if (prefs_->background_switch == mode) return;
+    prefs_->background_switch = mode;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundInterval(int value) {
+    if (!prefs_) return;
+    const int minutes = NormalizeBackgroundInterval(value);
+    if (prefs_->background_interval_min == minutes) return;
+    prefs_->background_interval_min = minutes;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundNext() {
+    if (!prefs_) return;
+    // Sync first, so the service already holds the current configuration; then
+    // ask it for another picture. The service lives in AppCore, which the
+    // controller does not reach: the callback owns that call.
+    Apply(SettingsEffect::BackgroundImage);
+    if (ui_.background_next) ui_.background_next();
+}
+
+bool SettingsController::BackgroundPickFolder() {
+    if (!prefs_ || !ui_.pick_folder) return false;
+    std::wstring folder = prefs_->background_folder;
+    // The settings row names the choice; the picker's own title stays empty.
+    if (!ui_.pick_folder(folder, L"") || folder.empty()) return false;
+    prefs_->background_folder = std::move(folder);
+    prefs_->background_source = kBackgroundSourceFolder;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+    return true;
+}
+
+void SettingsController::BackgroundSetUrl(std::wstring url) {
+    if (!prefs_) return;
+    const size_t first = url.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) return;  // nothing to point at
+    const size_t last = url.find_last_not_of(L" \t\r\n");
+    url.erase(last + 1);
+    url.erase(0, first);
+    const int source = prefs_->background_source;
+    // A URL typed on the API row keeps that row; any other source becomes URL.
+    const int next_source = source == kBackgroundSourceUrl || source == kBackgroundSourceApi
+        ? source : kBackgroundSourceUrl;
+    if (prefs_->background_url == url && prefs_->background_source == next_source) return;
+    prefs_->background_url = std::move(url);
+    prefs_->background_source = next_source;
+    SaveAndApply(SettingsEffect::BackgroundImage);
+}
+
+void SettingsController::BackgroundSetApiPointer(std::wstring pointer) {
+    if (!prefs_) return;
+    const size_t first = pointer.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos) {
+        pointer.clear();
+    } else {
+        const size_t last = pointer.find_last_not_of(L" \t\r\n");
+        pointer.erase(last + 1);
+        pointer.erase(0, first);
+    }
+    // An empty pointer is meaningful: the response body itself is the URL.
+    if (prefs_->background_api_pointer == pointer) return;
+    prefs_->background_api_pointer = std::move(pointer);
+    SaveAndApply(SettingsEffect::BackgroundImage);
 }
 
 void SettingsController::ChangeTrackingDays(int days) {

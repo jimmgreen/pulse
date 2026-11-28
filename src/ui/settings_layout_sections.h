@@ -280,6 +280,45 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.wallpaper_blur_card=row(seg_h,true); segments(l.wallpaper_blur_card,l.wallpaper_blur_row,3,282);
         l.wallpaper_look_card=row(seg_h); segments(l.wallpaper_look_card,l.wallpaper_look_row,3,282);
 
+        // 随机背景图: the source picks which row below it applies, so it comes
+        // first; then the actions, the address rows and the picture settings.
+        l.wallpaper_source_card=row(seg_h);
+        segments(l.wallpaper_source_card,l.wallpaper_source_row,4,narrow ? 300.0f : 400.0f);
+        {
+            // 选择图片 / 选择文件夹 and 下一张: one row of their own so the
+            // existing 选择/清除 buttons above keep their geometry.
+            const auto r=row(seg_h);
+            const float top=r.bottom-44*scale;
+            l.wallpaper_next=D2D1::RectF(right-16*scale-96*scale,top,right-16*scale,top+32*scale);
+            l.wallpaper_pick=D2D1::RectF(l.wallpaper_next.left-8*scale-140*scale,top,
+                l.wallpaper_next.left-8*scale,top+32*scale);
+        }
+        l.wallpaper_url_row=row(seg_h);
+        l.wallpaper_pointer_row=row(seg_h);
+        l.wallpaper_fit_card=row(seg_h);
+        segments(l.wallpaper_fit_card,l.wallpaper_fit_row,4,narrow ? 300.0f : 360.0f);
+        {
+            // A square 3x3 grid on the right of its card; the drawing card puts
+            // the position glyphs in the cells.
+            l.wallpaper_position_card=row(228.0f);
+            const float grid=204.0f*scale, gap=8.0f*scale, cell=(grid-2.0f*gap)/3.0f;
+            const float gx=right-16*scale-grid, gy=l.wallpaper_position_card.top+12*scale;
+            for(int i=0;i<9;++i) {
+                const float cx=gx+(i%3)*(cell+gap), cy=gy+(i/3)*(cell+gap);
+                l.wallpaper_position_cell[i]=D2D1::RectF(cx,cy,cx+cell,cy+cell);
+            }
+        }
+        l.wallpaper_ratio_card=row(seg_h);
+        segments(l.wallpaper_ratio_card,l.wallpaper_ratio_row,3,narrow ? 300.0f : 360.0f);
+        l.wallpaper_region_card=row(seg_h);
+        segments(l.wallpaper_region_card,l.wallpaper_region_row,2,282);
+        l.wallpaper_opacity_card=row(seg_h);
+        segments(l.wallpaper_opacity_card,l.wallpaper_opacity_row,3,narrow ? 300.0f : 360.0f);
+        l.wallpaper_switch_card=row(seg_h);
+        segments(l.wallpaper_switch_card,l.wallpaper_switch_row,4,narrow ? 300.0f : 400.0f);
+        l.wallpaper_interval_card=row(seg_h);
+        segments(l.wallpaper_interval_card,l.wallpaper_interval_row,3,narrow ? 300.0f : 360.0f);
+
         section(I::SettingsSecTextLanguage);
         l.language_card=row(seg_h); l.language_choice=choice(l.language_card,176);
         l.text_render_card=row(seg_h); fitted_segments(l.text_render_card,l.text_render_row,{I::TextRenderAuto,I::TextRenderSharp,I::TextRenderSmooth});

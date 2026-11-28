@@ -42,6 +42,7 @@ enum class SettingsEffect : uint32_t {
     MenuMaterial = 1u << 14,
     SearchSwitch = 1u << 15,
     ShelfWatcher = 1u << 16,
+    BackgroundImage = 1u << 17,
 };
 
 constexpr SettingsEffect operator|(SettingsEffect left, SettingsEffect right) noexcept {
@@ -109,6 +110,9 @@ public:
     struct UiCallbacks {
         std::function<bool(std::wstring&)> pick_image;
         std::function<bool(std::wstring&, std::wstring_view)> pick_folder;
+        // 背景图 › 下一张: the shared service draws another picture (the
+        // controller itself does not reach the service).
+        std::function<void()> background_next;
         std::function<void(SettingsEffect)> apply_effects;
         std::function<void(const std::wstring&)> show_error;
         std::function<void()> integration_changing;
@@ -304,6 +308,22 @@ public:
     const int* custom_accent() const noexcept { return custom_hsl_; }
     void Language(std::wstring_view language_id);
     void Wallpaper(int action);
+    // 背景图 › 随机背景 (AppPrefs::background_*): every value is normalized and
+    // saved only when it really changed. Next asks for another picture, the
+    // folder picker stores a folder as the source.
+    void BackgroundSource(int index);   // 0..3
+    void BackgroundFit(int index);      // 0..3
+    void BackgroundPosition(int index); // 0..8
+    void BackgroundRatio(int value);    // 20..100
+    void BackgroundRegion(int index);   // 0..1
+    void BackgroundOpacity(int value);  // 0..100
+    void BackgroundSwitch(int index);   // 0..3
+    void BackgroundInterval(int value); // 1..1440
+    void BackgroundNext();
+    bool BackgroundPickFolder();
+    void BackgroundSetUrl(std::wstring url);
+    // RFC 6901 pointer into an API response body; empty means the body is the URL.
+    void BackgroundSetApiPointer(std::wstring pointer);
     void ToggleUi(int index);
     // 本地右键菜单 › Pulse 菜单 tab: 0 on a file, 1 blank area, 2 row buttons.
     int ContextTab() const { return context_tab_; }
