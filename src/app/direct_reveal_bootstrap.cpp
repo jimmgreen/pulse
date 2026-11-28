@@ -120,8 +120,12 @@ DWORD Eligible(HANDLE process, DWORD pid) {
     USHORT target = 0, native = 0;
     if (!machine(process, &target, &native)) return Last();
     if ((target ? target : native) != IMAGE_FILE_MACHINE_AMD64) return ERROR_EXE_MACHINE_TYPE_MISMATCH;
+    // GetProcessInformation is Windows 8+ and must not be a static import (Windows 8.1 startup guard).
+    const auto query_protection = reinterpret_cast<decltype(&GetProcessInformation)>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
+    if (!query_protection) return ERROR_NOT_SUPPORTED;
     PROCESS_PROTECTION_LEVEL_INFORMATION protection{};
-    if (!GetProcessInformation(process, ProcessProtectionLevelInfo, &protection, sizeof(protection))) return Last();
+    if (!query_protection(process, ProcessProtectionLevelInfo, &protection, sizeof(protection))) return Last();
     return protection.ProtectionLevel == PROTECTION_LEVEL_NONE ? ERROR_SUCCESS : ERROR_ACCESS_DENIED;
 }
 struct Module { uintptr_t base; DWORD size; std::wstring path; };

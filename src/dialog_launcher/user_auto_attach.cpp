@@ -359,8 +359,13 @@ struct Engine {
         if ((error = ProcessMachine(process.value, machine)) || machine != kMachine) {
             return error ? error : ERROR_BAD_EXE_FORMAT;
         }
+        // Resolved at run time: pulse.exe links this code and must not statically import a
+        // Windows 8+ API (Windows 8.1 startup guard).
+        static const auto query_protection = reinterpret_cast<decltype(&GetProcessInformation)>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
         PROCESS_PROTECTION_LEVEL_INFORMATION protection{};
-        if (!GetProcessInformation(process.value, ProcessProtectionLevelInfo, &protection, sizeof(protection)) ||
+        if (!query_protection ||
+            !query_protection(process.value, ProcessProtectionLevelInfo, &protection, sizeof(protection)) ||
             protection.ProtectionLevel != PROTECTION_LEVEL_NONE) {
             return ERROR_ACCESS_DENIED;
         }

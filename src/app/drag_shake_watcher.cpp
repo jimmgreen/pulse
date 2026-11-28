@@ -1,4 +1,5 @@
 #include "drag_shake_watcher.h"
+#include "../common/windows_compat.h"
 #include <shlobj.h>
 #include <shellapi.h>
 #include <shellscalingapi.h>
@@ -24,8 +25,8 @@ POINT UnpackPoint(int64_t v) noexcept {
 float MonitorScaleAt(POINT pt) noexcept {
     HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     if (mon) {
-        UINT dpi_x = 96, dpi_y = 96;
-        if (SUCCEEDED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y)) && dpi_x > 0)
+        // Resolved at run time: a static shcore import breaks the Windows 8.1 startup guard.
+        if (const UINT dpi_x = compat::MonitorDpi(mon); dpi_x > 0)
             return static_cast<float>(dpi_x) / 96.0f;
     }
     return 1.0f;

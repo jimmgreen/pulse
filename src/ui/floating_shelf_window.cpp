@@ -5,6 +5,7 @@
 #include "../app/drag_shake_watcher.h"
 #include "../app/shelf_snippets.h"
 #include "../common/localization.h"
+#include "../common/windows_compat.h"
 #include "../common/text_format.h"
 #include <dwmapi.h>
 #include <ole2.h>
@@ -44,8 +45,8 @@ std::wstring FillOne(std::wstring s, const wchar_t* key, const std::wstring& val
 
 float ScaleForPoint(POINT pt) noexcept {
     if (HMONITOR mon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)) {
-        UINT dx = 96, dy = 96;
-        if (SUCCEEDED(GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dx, &dy)) && dx > 0)
+        // Resolved at run time: a static shcore import breaks the Windows 8.1 startup guard.
+        if (const UINT dx = compat::MonitorDpi(mon); dx > 0)
             return static_cast<float>(dx) / 96.0f;
     }
     return 1.0f;
