@@ -6614,5 +6614,6 @@
 #define IDS_QUICK_LOOK_FILTER_VIDEOS                                                     7996
 #define IDS_QUICK_LOOK_IMMERSIVE                                                         7997
 #define IDS_DOCK_STACK_REMOVE                                                            7993
+#define IDS_LIST_FOLDER_COVER_FULL                                                       7998
 
 #endif  // PULSE_STRING_IDS_H

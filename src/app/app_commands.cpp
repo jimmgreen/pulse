@@ -1743,6 +1743,17 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         if (!s.isolatedTest) s.appPrefs.Save();
         InvalidateRect(s.hwnd, nullptr, FALSE);
         break;
+    case app::CmdViewCoverFull:
+        s.appPrefs.folder_cover_full = !s.appPrefs.folder_cover_full;
+        s.renderer.SetFolderCoverFull(s.appPrefs.folder_cover_full);
+        s.renderer.DropFailedFolderThumbnails();
+        if (!s.isolatedTest) s.appPrefs.Save();
+        if (const auto* tab = ActiveTab(s)) {
+            s.store.MarkDirty(tab->current_path);
+            RefreshActiveTab(s);
+        }
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        break;
     case app::CmdApplyViewToAllFolders:
         ApplyViewToAllFolders(s);
         break;
@@ -3125,6 +3136,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     app::BackgroundViewOptions view_options;
     view_options.view_mode = tab->view_mode;
     view_options.wall = tab->wall;
+    view_options.cover_full = s.appPrefs.folder_cover_full;
     view_options.sort_column = tab->sort_column;
     view_options.sort_direction = tab->sort_direction;
     view_options.folder_sort = static_cast<int>(tab->EffectiveFolderSort());
@@ -6707,6 +6719,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         s.renderer.SetRowActions(app::RowActionMask(s.ctxMenuPrefs.builtin_hidden,
             s.ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s.renderer.SetThumbnailBadges(s.appPrefs.list_thumbnail_badges);
+    s.renderer.SetFolderCoverFull(s.appPrefs.folder_cover_full);
         app::SetMediaColumnsEnabled(s.appPrefs.media_columns);
         app::SetExtensionColumnPrefs(s.appPrefs.extension_columns_hidden, s.appPrefs.extension_column_widths);
     }

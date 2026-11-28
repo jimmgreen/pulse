@@ -6594,6 +6594,7 @@ BEGIN
     IDS_QUICK_LOOK_FILTER_PHOTOS "图片"
     IDS_QUICK_LOOK_FILTER_VIDEOS "视频"
     IDS_QUICK_LOOK_IMMERSIVE "沉浸式看图"
+    IDS_LIST_FOLDER_COVER_FULL "文件夹封面铺满"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13187,6 +13188,7 @@ BEGIN
     IDS_QUICK_LOOK_FILTER_PHOTOS "Photos"
     IDS_QUICK_LOOK_FILTER_VIDEOS "Videos"
     IDS_QUICK_LOOK_IMMERSIVE "Photo viewer layout"
+    IDS_LIST_FOLDER_COVER_FULL "Folder shows its own cover art"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

@@ -20,6 +20,8 @@ public:
     void RemoveNotifyWindow(HWND hwnd);
     void Reset();
     void Refresh();
+    // Folder icon mode changed: cached negative results no longer apply.
+    void DropFailedEntries();
     void TrimForBackground(size_t max_bytes);
     size_t TrimInactiveWorkingSet();
     void BeginFrame(HWND owner = nullptr, bool full = true);

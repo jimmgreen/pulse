@@ -6621,3 +6621,4 @@ QuickLookFilterPhotos	IDS_QUICK_LOOK_FILTER_PHOTOS	7995	图片	Photos	圖片
 QuickLookFilterVideos	IDS_QUICK_LOOK_FILTER_VIDEOS	7996	视频	Videos	影片
 QuickLookImmersive	IDS_QUICK_LOOK_IMMERSIVE	7997	沉浸式看图	Photo viewer layout	沉浸式看圖
 DockStackRemove	IDS_DOCK_STACK_REMOVE	7993	从程序坞移除	Remove from Dock	從程式塢移除
+ListFolderCoverFull	IDS_LIST_FOLDER_COVER_FULL	7998	文件夹封面铺满	Folder shows its own cover art	資料夾封面鋪滿

@@ -183,6 +183,7 @@ enum MenuCmd : int {
     CmdAiOrganizeHere = 5201,
     CmdDupKeepThis = 5202,               // 重复文件 tab row: 只保留这份
     CmdDupReapplyRules = 5203,           // 重复文件 tab row: 按规则重新标
+    CmdViewCoverFull = 5204,             // view menu: folder shows its own cover art (toggle)
     CmdShellStaticBase = 6000,
     CmdShellComBase = 8000,
     CmdShellComLast = CmdShellComBase + 0x7FFF, // live and predicted Shell menu IDs
@@ -297,6 +298,7 @@ struct BackgroundViewOptions {
     ui::SortDirection sort_direction = ui::SortDirection::Asc;
     int folder_sort = 0; // 0 folders first, 1 folders last, 2 mixed
     bool wall = false;   // the icon view is a photo wall
+    bool cover_full = false;   // folder icons show their own cover art
     bool details_panel = false;
     bool can_sort = true;
     bool indexed_search = false;
@@ -341,7 +343,7 @@ std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset);
 std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode,
                                               bool details_panel = false,
                                               bool can_apply_all = false,
-                                              bool wall = false);
+                                              bool wall = false, bool cover_full = false);
 
 // Ctrl+K / address omnibar: verbs + index hits + recent folders at the end.
 struct OmnibarQuery {

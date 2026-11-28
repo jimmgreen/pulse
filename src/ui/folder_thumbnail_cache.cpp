@@ -107,6 +107,18 @@ void FolderThumbnailCache::Refresh() {
         visible.force = true; visible.attempted = false; visible.blocked = false;
     }
 }
+void FolderThumbnailCache::DropFailedEntries() {
+    // Folder icon mode changed: every cached folder composite (and the compact
+    // revisit copy, which answers Draw before the request path does) belongs to
+    // the old mode and must go, or the old picture keeps winning.
+    cache_.Evict();
+    std::lock_guard lock(cache_.mutex_);
+    cache_.epoch_.fetch_add(1, std::memory_order_relaxed);
+    for (auto& [key, visible] : visible_) {
+        visible.force = true; visible.attempted = false; visible.blocked = false;
+        visible.admitted = false; visible.seen = true;
+    }
+}
 void FolderThumbnailCache::BeginFrame(HWND owner, bool full) {
     cache_.BeginFrame();
     visibility_changed_ = false;

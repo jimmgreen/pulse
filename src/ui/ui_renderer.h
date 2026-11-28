@@ -561,6 +561,8 @@ public:
     // frame (window px: icon left, row top/right/bottom).
     const std::vector<D2D1_RECT_F>& LandingRects() const { return landing_rects_; }
     void RefreshFolderThumbnails() { folder_thumbnail_cache_.Refresh(); }
+    // Folder icon mode changed: drop cached negative results so the old mode redraws.
+    void DropFailedFolderThumbnails() { folder_thumbnail_cache_.DropFailedEntries(); }
     // A preview pack was installed, removed or switched: files that had no
     // thumbnail may have one now, so cached results are dropped.
     void RenameImageThumbnail(const std::wstring& from, const std::wstring& to, uint64_t modified, uint64_t size) {
@@ -570,6 +572,7 @@ public:
     void EvictThumbnails() { thumbnail_cache_.Evict(); hover_cache_.Evict(); }
     auto FolderThumbnailDebugStats() { return folder_thumbnail_cache_.ReadDebugStats(); }
     void SetFolderThumbnailsEnabled(bool enabled) { folder_thumbnails_enabled_ = enabled; }
+    void SetFolderCoverFull(bool on) { folder_cover_full_ = on; }
     // region = HitTestResult region of the button that copied, index its index.
     void NotifyCopied(int region, int index) {
         copy_feedback_.Trigger(region, index, GetTickCount64());
@@ -1307,6 +1310,7 @@ private:
     ThumbnailCache& thumbnail_cache_ = caches_.thumbnails;
     FolderThumbnailCache& folder_thumbnail_cache_ = caches_.folder_thumbnails;
     bool folder_thumbnails_enabled_ = true;
+    bool folder_cover_full_ = false;
     ThumbnailCache& details_cache_ = caches_.details;
     ThumbnailCache& hover_cache_ = caches_.hover;
     HWND notify_hwnd_ = nullptr;

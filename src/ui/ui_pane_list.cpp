@@ -2536,6 +2536,10 @@ PreviewDrawResult MainRenderer::DrawEntryThumbnail(ID2D1DeviceContext* dc,
             (entry.path.size() == 7 && entry.path.starts_with(L"\\\\?\\") && entry.path[5] == L':');
         if (!folder_thumbnails_enabled_ || !grid || entry.is_link || entry.record_only || entry.cloud_recall || drive_root || IsHighContrast())
             return PreviewDrawResult::Failed;
+        // The folder shows its own cover art (the desktop.ini icon) instead of the
+        // folder artwork: fall back to the shell icon path the row views already use.
+        if (folder_cover_full_)
+            return PreviewDrawResult::Failed;
         // Folder composites need only their on-screen resolution. In particular
         // a 96 px large icon should not consume a 256 px CPU+GPU cache slot.
         const float edge = std::max(dest.right - dest.left, dest.bottom - dest.top);

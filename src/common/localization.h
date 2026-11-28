@@ -6604,6 +6604,7 @@ enum class StringId : UINT {
     QuickLookFilterVideos = IDS_QUICK_LOOK_FILTER_VIDEOS,
     QuickLookImmersive = IDS_QUICK_LOOK_IMMERSIVE,
     DockStackRemove = IDS_DOCK_STACK_REMOVE,
+    ListFolderCoverFull = IDS_LIST_FOLDER_COVER_FULL,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

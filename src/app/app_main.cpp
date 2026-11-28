@@ -1892,6 +1892,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, 
         s->renderer.SetRowActions(app::RowActionMask(s->ctxMenuPrefs.builtin_hidden,
             s->ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s->renderer.SetThumbnailBadges(s->appPrefs.list_thumbnail_badges);
+    s->renderer.SetFolderCoverFull(s->appPrefs.folder_cover_full);
         app::InstallMediaColumns();
         app::SetMediaColumnsEnabled(s->appPrefs.media_columns);
         app::InstallExtensionColumns();
