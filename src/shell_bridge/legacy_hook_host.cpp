@@ -65,6 +65,30 @@ std::wstring WindowText(HWND hwnd) {
     buf.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
     return buf;
 }
+
+// Photoshop Save for Web's Explorer child dialog already contains these four
+// controls when the hook's WM_INITDIALOG runs (0x0BBB/0x0BB9 Settings,
+// 0x0BBC/0x0BBA Slices). Pre-create them when absent so the hook populates them.
+void CreateMirroredStubControls(HWND dialog) noexcept {
+    if (!dialog || GetDlgItem(dialog, 0x0BB9) || GetDlgItem(dialog, 0x0BBA)) return;
+    HDC dc = GetDC(nullptr);
+    const int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    if (dc) ReleaseDC(nullptr, dc);
+    const bool zh = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
+    const auto make = [&](const wchar_t* klass, const wchar_t* text, DWORD style, int x, int y, int cx, int cy, int id) {
+        HWND control = CreateWindowExW(0, klass, text, WS_CHILD | WS_VISIBLE | style,
+            MulDiv(x, dpi, 144), MulDiv(y, dpi, 144),
+            MulDiv(cx, dpi, 144), MulDiv(cy, dpi, 144),
+            dialog, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
+        if (control) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
+        }
+    };
+    make(L"Static", zh ? L"\u8BBE\u7F6E\uFF1A" : L"Settings:", SS_LEFT, 2, 10, 140, 19, 0x0BBB);
+    make(L"ComboBox", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 144, 5, 369, 120, 0x0BB9);
+    make(L"Static", zh ? L"\u5207\u7247\uFF1A" : L"Slices:", SS_LEFT, 2, 48, 140, 19, 0x0BBC);
+    make(L"ComboBox", L"", CBS_DROPDOWNLIST | WS_VSCROLL, 144, 43, 369, 120, 0x0BBA);
+}
 }
 LegacyHookHost::LegacyHookHost(OPENFILENAMEW* input) noexcept : input_(input),
     hook_(input && (input->Flags & OFN_ENABLEHOOK) ? input->lpfnHook : nullptr), thread_(GetCurrentThreadId()) {}
@@ -87,6 +111,7 @@ INT_PTR CALLBACK LegacyHookHost::DialogProc(HWND window, UINT message, WPARAM wp
         self = reinterpret_cast<LegacyHookHost*>(lp);
         if (!self || !SetPropW(window, kProperty, self)) return FALSE;
         self->child_ = window;
+        if (self->mirrored_) CreateMirroredStubControls(window);
         lp = reinterpret_cast<LPARAM>(self->input_);
     }
     if (!self) return FALSE;
@@ -348,11 +373,21 @@ void LegacyHookHost::SyncFilterIndex(UINT filter_index_1based) {
     if (count <= 0) return;
     const LRESULT zero_based = filter_index_1based > 0 ? static_cast<LRESULT>(filter_index_1based - 1) : 0;
     SendMessageW(filter_combo_, CB_SETCURSEL, static_cast<WPARAM>(std::clamp<LRESULT>(zero_based, 0, count - 1)), 0);
+    if (child_ && IsWindow(child_)) {
+        SendMessageW(child_, WM_COMMAND, MAKEWPARAM(cmb1, CBN_SELCHANGE), reinterpret_cast<LPARAM>(filter_combo_));
+    }
 }
 
 std::vector<MirroredLegacyCombo> LegacyHookHost::ReadMirroredCombos() const {
     std::vector<MirroredLegacyCombo> out;
     if (!child_ || !IsWindow(child_) || GetCurrentThreadId() != thread_) return out;
+
+    // Drain any queued initialization messages posted to the off-screen sub-dialog.
+    MSG msg{};
+    for (int pumped = 0; pumped < 16 && PeekMessageW(&msg, child_, 0, 0, PM_REMOVE); ++pumped) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
 
     struct ChildInfo {
         HWND hwnd = nullptr;
@@ -382,24 +417,29 @@ std::vector<MirroredLegacyCombo> LegacyHookHost::ReadMirroredCombos() const {
         MirroredLegacyCombo combo;
         combo.hwnd = ch.hwnd;
         combo.control_id = ch.id;
-        combo.label = pending_label;
+        std::wstring explicit_label;
+        if (ch.id == 0x0BB9) {
+            if (HWND st = GetDlgItem(child_, 0x0BBB)) explicit_label = TrimLabel(WindowText(st));
+        } else if (ch.id == 0x0BBA) {
+            if (HWND st = GetDlgItem(child_, 0x0BBC)) explicit_label = TrimLabel(WindowText(st));
+        }
+        combo.label = !explicit_label.empty() ? std::move(explicit_label) : pending_label;
         pending_label.clear();
         combo.enabled = IsWindowEnabled(ch.hwnd) != FALSE;
         const LRESULT count = SendMessageW(ch.hwnd, CB_GETCOUNT, 0, 0);
-        if (count > 0 && count <= 256) {
-            combo.items.reserve(static_cast<size_t>(count));
-            for (LRESULT i = 0; i < count; ++i) {
-                const LRESULT len = SendMessageW(ch.hwnd, CB_GETLBTEXTLEN, static_cast<WPARAM>(i), 0);
-                if (len == CB_ERR || len < 0 || len > 4096) {
-                    combo.items.emplace_back();
-                    continue;
-                }
-                std::wstring item(static_cast<size_t>(len) + 1, L'\0');
-                const LRESULT copied = SendMessageW(ch.hwnd, CB_GETLBTEXT, static_cast<WPARAM>(i),
-                                                    reinterpret_cast<LPARAM>(item.data()));
-                item.resize(copied != CB_ERR && copied >= 0 ? static_cast<size_t>(copied) : 0);
-                combo.items.push_back(std::move(item));
+        if (count <= 0 || count > 256) continue;
+        combo.items.reserve(static_cast<size_t>(count));
+        for (LRESULT i = 0; i < count; ++i) {
+            const LRESULT len = SendMessageW(ch.hwnd, CB_GETLBTEXTLEN, static_cast<WPARAM>(i), 0);
+            if (len == CB_ERR || len < 0 || len > 4096) {
+                combo.items.emplace_back();
+                continue;
             }
+            std::wstring item(static_cast<size_t>(len) + 1, L'\0');
+            const LRESULT copied = SendMessageW(ch.hwnd, CB_GETLBTEXT, static_cast<WPARAM>(i),
+                                                reinterpret_cast<LPARAM>(item.data()));
+            item.resize(copied != CB_ERR && copied >= 0 ? static_cast<size_t>(copied) : 0);
+            combo.items.push_back(std::move(item));
         }
         const LRESULT sel = SendMessageW(ch.hwnd, CB_GETCURSEL, 0, 0);
         combo.selected = (sel != CB_ERR && sel >= 0 && sel < static_cast<LRESULT>(combo.items.size()))

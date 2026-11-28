@@ -386,23 +386,28 @@ int DiagnosticTest() {
             ULONG STDMETHODCALLTYPE AddRef() override { return ++refs; }
             ULONG STDMETHODCALLTYPE Release() override { if (--refs == 0) { delete this; return 0; } return refs; }
             HRESULT STDMETHODCALLTYPE Show(HWND) override {
-                // Verify both "设置" (5 items, enabled) and "切片" (1 item, disabled) were mirrored before Show.
+                // Verify "格式" (3 items, selected=1), "设置" (5 items, enabled), and "切片" (1 item, disabled) were mirrored before Show.
+                const auto* format_label = Find(0x505300F0u);
+                const auto* format_combo = Find(0x505300F1u);
                 const auto* settings_label = Find(0x50530100u);
                 const auto* settings_combo = Find(0x50530200u);
                 const auto* slices_label = Find(0x50530101u);
                 const auto* slices_combo = Find(0x50530201u);
-                mirrored_before_show = settings_label && settings_label->text == L"\u8BBE\u7F6E" &&
+                mirrored_before_show = format_label && !format_label->text.empty() &&
+                    format_combo && format_combo->items.size() == 3 && format_combo->selected == 1 &&
+                    (format_combo->state & CDCS_ENABLED) &&
+                    settings_label && !settings_label->text.empty() &&
                     settings_combo && settings_combo->items.size() == 5 && settings_combo->selected == 0 &&
                     (settings_combo->state & CDCS_ENABLED) &&
-                    slices_label && slices_label->text == L"\u5207\u7247" &&
+                    slices_label && !slices_label->text.empty() &&
                     slices_combo && slices_combo->items.size() == 1 && !(slices_combo->state & CDCS_ENABLED);
                 if (ctrl_events) {
                     ctrl_events->OnItemSelected(static_cast<IFileDialogCustomize*>(this), 0x50530200u, 2u);
                     if (const auto* s = Find(0x50530201u)) slice_enabled_after_change = (s->state & CDCS_ENABLED) != 0;
+                    // Select format item 0 via mirrored Format combo (syncs cmb1 + nFilterIndex even without OnTypeChange).
+                    ctrl_events->OnItemSelected(static_cast<IFileDialogCustomize*>(this), 0x505300F1u, 0u);
                 }
-                filter_index = 1;
                 if (events) {
-                    events->OnTypeChange(static_cast<IFileDialog*>(this));
                     file_ok_accepted = (events->OnFileOk(static_cast<IFileDialog*>(this)) == S_OK);
                 }
                 return file_ok_accepted ? S_OK : HRESULT_FROM_WIN32(ERROR_CANCELLED);
@@ -518,11 +523,8 @@ int DiagnosticTest() {
         ps_ofn.Flags = 0x008888A4u;  // Exact Photoshop Save for Web flags (OFN_ENABLEHOOK|OFN_ENABLETEMPLATEHANDLE)
         ps_ofn.lpfnHook = [](HWND hdlg, UINT msg, WPARAM wp, LPARAM lp) -> UINT_PTR {
             if (msg == WM_INITDIALOG) {
-                CreateWindowExW(0, L"Static", L"\u8BBE\u7F6E\uFF1A", WS_CHILD | WS_VISIBLE, 8, 8, 60, 20, hdlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(0x0BBB)), nullptr, nullptr);
-                CreateWindowExW(0, L"ComboBox", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 72, 8, 160, 120, hdlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(0x0BB9)), nullptr, nullptr);
-                CreateWindowExW(0, L"Static", L"\u5207\u7247\uFF1A", WS_CHILD | WS_VISIBLE, 240, 8, 60, 20, hdlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(0x0BBC)), nullptr, nullptr);
-                HWND slices = CreateWindowExW(0, L"ComboBox", L"", WS_CHILD | WS_VISIBLE | WS_DISABLED | CBS_DROPDOWNLIST, 304, 8, 160, 120, hdlg, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(0x0BBA)), nullptr, nullptr);
-                (void)slices;
+                // Real Photoshop Save for Web expects 0x0BBB/0x0BB9/0x0BBC/0x0BBA to already exist.
+                if (HWND slices = GetDlgItem(hdlg, 0x0BBA)) EnableWindow(slices, FALSE);
                 return 0;  // PS hook returns 0; host must still keep dialog alive!
             }
             if (msg == WM_NOTIFY) {
