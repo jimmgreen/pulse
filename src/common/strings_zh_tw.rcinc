@@ -6629,4 +6629,6 @@ BEGIN
     IDS_DOCK_SPRING_DROPPED "已放入「%s」"
     IDS_SETTINGS_SIDEBAR_NEW_TAB "側欄按一下在新分頁中開啟"
     IDS_SETTINGS_SIDEBAR_NEW_TAB_DESC "收藏、快速存取、磁碟、網路等側欄項目都新開分頁，已開啟的位置直接切換過去"
+    IDS_SETTINGS_RECENT_ITEMS "記錄最近使用的檔案和資料夾"
+    IDS_SETTINGS_RECENT_ITEMS_DESC "關閉後不再記錄新項目；現有項目會保留，直到手動清除。"
 END

@@ -2721,6 +2721,15 @@ int wmain(int argc, wchar_t** argv) {
     parsed_prefs.sidebar_new_tab = true;
     parsed_prefs.ResetToDefaults();
     passed &= Report("reset turns the sidebar new-tab setting off", !parsed_prefs.sidebar_new_tab);
+    passed &= Report("recent recording is on by default", prefs.recent_items_enabled);
+    settings_ui.ToggleUi(86);
+    passed &= Report("recent recording switch turns off and persists without touching apps-first",
+        !prefs.recent_items_enabled && parsed_prefs.FromJson(prefs.ToJson()) && !parsed_prefs.recent_items_enabled);
+    settings_ui.ToggleUi(86);
+    passed &= Report("recent recording switch turns back on", prefs.recent_items_enabled);
+    parsed_prefs.recent_items_enabled = false;
+    passed &= Report("older preferences keep recording recent items",
+        parsed_prefs.FromJson(L"{}") && parsed_prefs.recent_items_enabled);
     passed &= Report("confirm before deleting setting has localized text",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDelete).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDeleteDesc).empty() &&

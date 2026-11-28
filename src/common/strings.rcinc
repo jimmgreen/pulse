@@ -6631,6 +6631,8 @@ BEGIN
     IDS_DOCK_SPRING_DROPPED "已放入「%s」"
     IDS_SETTINGS_SIDEBAR_NEW_TAB "侧栏单击在新标签页中打开"
     IDS_SETTINGS_SIDEBAR_NEW_TAB_DESC "收藏、快速访问、磁盘、网络等侧栏项目都新开标签页，已打开的位置直接切换过去"
+    IDS_SETTINGS_RECENT_ITEMS "记录最近使用的文件和文件夹"
+    IDS_SETTINGS_RECENT_ITEMS_DESC "关闭后不再记录新项目；已有项目会保留，直到手动清除。"
 END
 
 LANGUAGE 0x09, 0x01
@@ -13261,6 +13263,8 @@ BEGIN
     IDS_DOCK_SPRING_DROPPED "Moved to %s"
     IDS_SETTINGS_SIDEBAR_NEW_TAB "Open sidebar items in a new tab"
     IDS_SETTINGS_SIDEBAR_NEW_TAB_DESC "Starred, Quick access, drives, network and other sidebar items open in a new tab; a location that is already open is switched to"
+    IDS_SETTINGS_RECENT_ITEMS "Record recently used files and folders"
+    IDS_SETTINGS_RECENT_ITEMS_DESC "Turning this off stops new records; existing items remain until manually cleared."
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

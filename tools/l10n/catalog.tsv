@@ -2915,6 +2915,8 @@ SettingsLanDiscovery	IDS_SETTINGS_LAN_DISCOVERY	4115	自动发现局域网设备
 SettingsLanDiscoveryDesc	IDS_SETTINGS_LAN_DISCOVERY_DESC	4116	打开「网络位置」时用 mDNS 和 WS-Discovery 查找电脑和 NAS；只收应答，不登录、不扫描子网。	Finds PCs and NAS devices with mDNS and WS-Discovery when Network locations opens. Listens only; never signs in.	開啟「網路位置」時用 mDNS 和 WS-Discovery 尋找電腦和 NAS；只收回應，不登入、不掃描子網路。
 SettingsNetworkRecent	IDS_SETTINGS_NETWORK_RECENT	4117	记录最近访问的服务器	Remember recent servers	記錄最近存取的伺服器
 SettingsNetworkRecentDesc	IDS_SETTINGS_NETWORK_RECENT_DESC	4118	保留最近打开过的 20 个网络共享，只保存在本机。	Keeps the last 20 network shares you opened, on this PC only.	保留最近開啟過的 20 個網路共用，只儲存在本機。
+SettingsRecentItems	IDS_SETTINGS_RECENT_ITEMS	8035	记录最近使用的文件和文件夹	Record recently used files and folders	記錄最近使用的檔案和資料夾
+SettingsRecentItemsDesc	IDS_SETTINGS_RECENT_ITEMS_DESC	8036	关闭后不再记录新项目；已有项目会保留，直到手动清除。	Turning this off stops new records; existing items remain until manually cleared.	關閉後不再記錄新項目；現有項目會保留，直到手動清除。
 SettingsHiddenSharesDesc	IDS_SETTINGS_HIDDEN_SHARES_DESC	4119	列出以 $ 结尾的共享（如 C$、ADMIN$），通常只有管理员会用到。	Lists shares ending in $ (like C$ and ADMIN$). Usually only administrators need them.	列出以 $ 結尾的共用（如 C$、ADMIN$），通常只有系統管理員會用到。
 SettingsLanCache	IDS_SETTINGS_LAN_CACHE	4120	发现结果保留	Keep found devices	探索結果保留
 SettingsLanCacheDesc	IDS_SETTINGS_LAN_CACHE_DESC	4121	期间回到「网络位置」直接显示上次结果；随时可按 F5 重新发现。	Until then, Network locations shows the last results. Press F5 to look again.	期間回到「網路位置」直接顯示上次結果；隨時可按 F5 重新探索。

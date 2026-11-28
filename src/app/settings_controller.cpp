@@ -1443,6 +1443,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 18) {
         prefs_->list_zebra_rows = !prefs_->list_zebra_rows;
         SaveAndApply(SettingsEffect::ListStyle);
+    } else if (index == 86) {
+        prefs_->recent_items_enabled = !prefs_->recent_items_enabled;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 19) {
         prefs_->list_size_bar = !prefs_->list_size_bar;
         SaveAndApply(SettingsEffect::ListStyle);
