@@ -1,6 +1,9 @@
 #include "../ui/window_material.h"
+#include "../ui/background_image_layout.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -11,6 +14,10 @@ namespace {
 
 using pulse::ui::Compositor;
 using pulse::ui::ComPtr;
+using pulse::ui::ImageDrawRect;
+using pulse::ui::ImageFit;
+using pulse::ui::ImagePlacementRect;
+using pulse::ui::SourceBakeKey;
 using pulse::ui::WindowMaterial;
 
 bool Report(const char* name, bool passed) {
@@ -184,6 +191,218 @@ bool HasVisiblePixels(ID2D1DeviceContext* dc, ID2D1Bitmap* source) {
     return visible;
 }
 
+bool Near(float a, float b, float tolerance = 0.001f) {
+    return a > b ? a - b <= tolerance : b - a <= tolerance;
+}
+
+bool RectNear(const D2D1_RECT_F& rect, float left, float top, float right, float bottom) {
+    return Near(rect.left, left) && Near(rect.top, top) &&
+           Near(rect.right, right) && Near(rect.bottom, bottom);
+}
+
+bool RectFinite(const D2D1_RECT_F& rect) {
+    return std::isfinite(rect.left) && std::isfinite(rect.top) &&
+           std::isfinite(rect.right) && std::isfinite(rect.bottom);
+}
+
+// The cover formula exactly as window_material.cpp computed it before the
+// layout module existed: the reference the shared code must match bit for bit.
+D2D1_RECT_F LegacyCoverRect(float img_w, float img_h, const D2D1_RECT_F& dest) {
+    const float dw = dest.right - dest.left;
+    const float dh = dest.bottom - dest.top;
+    if (img_w <= 0.0f || img_h <= 0.0f || dw <= 0.0f || dh <= 0.0f) return dest;
+    const float scale = (std::max)(dw / img_w, dh / img_h);
+    const float w = img_w * scale;
+    const float h = img_h * scale;
+    const float x = dest.left + (dw - w) * 0.5f;
+    const float y = dest.top + (dh - h) * 0.5f;
+    return D2D1::RectF(x, y, x + w, y + h);
+}
+
+// AC-01: the default wallpaper (position 4, cover) must land on the same
+// pixels as before, so this compares against the retired formula exactly.
+bool FullAreaCoverMatchesLegacy() {
+    const D2D1_RECT_F areas[] = {
+        D2D1::RectF(0.0f, 0.0f, 320.0f, 240.0f),
+        D2D1::RectF(10.5f, 20.25f, 1300.75f, 900.5f),
+        D2D1::RectF(-5.0f, -5.0f, 100.0f, 50.0f),
+        D2D1::RectF(0.0f, 0.0f, 1.0f, 1.0f),
+        D2D1::RectF(0.0f, 0.0f, 3840.0f, 2160.0f),
+    };
+    const D2D1_SIZE_F images[] = {
+        D2D1::SizeF(96.0f, 64.0f),    D2D1::SizeF(37.0f, 83.0f),
+        D2D1::SizeF(1600.0f, 900.0f), D2D1::SizeF(1.0f, 1.0f),
+        D2D1::SizeF(3000.0f, 7.0f),   D2D1::SizeF(1920.0f, 1080.0f),
+    };
+    for (const D2D1_RECT_F& area : areas) {
+        for (const D2D1_SIZE_F& image : images) {
+            const D2D1_RECT_F legacy = LegacyCoverRect(image.width, image.height, area);
+            const D2D1_RECT_F laid =
+                ImageDrawRect(image.width, image.height, area, 4, 50, ImageFit::Cover);
+            if (legacy.left != laid.left || legacy.top != laid.top ||
+                legacy.right != laid.right || legacy.bottom != laid.bottom) {
+                std::printf("[INFO] cover drifted for %gx%g in (%g,%g,%g,%g)\n",
+                            image.width, image.height, area.left, area.top, area.right,
+                            area.bottom);
+                return false;
+            }
+        }
+    }
+    // A non-default ratio used to be ignored on the full area; it still must be.
+    const D2D1_RECT_F dest = D2D1::RectF(0.0f, 0.0f, 320.0f, 240.0f);
+    const D2D1_RECT_F ignored =
+        ImageDrawRect(96.0f, 64.0f, dest, 4, 20, ImageFit::Cover);
+    const D2D1_RECT_F legacy = LegacyCoverRect(96.0f, 64.0f, dest);
+    return ignored.left == legacy.left && ignored.top == legacy.top &&
+           ignored.right == legacy.right && ignored.bottom == legacy.bottom;
+}
+
+bool FitAspectAndCentering() {
+    const D2D1_RECT_F area = D2D1::RectF(0.0f, 0.0f, 400.0f, 200.0f);
+    // 100x100: contain fits the height (200x200), cover fills the width (400x400).
+    if (!RectNear(ImageDrawRect(100.0f, 100.0f, area, 4, 50, ImageFit::Contain),
+                  100.0f, 0.0f, 300.0f, 200.0f)) return false;
+    if (!RectNear(ImageDrawRect(100.0f, 100.0f, area, 4, 50, ImageFit::Cover),
+                  0.0f, -100.0f, 400.0f, 300.0f)) return false;
+    if (!RectNear(ImageDrawRect(100.0f, 100.0f, area, 4, 50, ImageFit::Stretch),
+                  0.0f, 0.0f, 400.0f, 200.0f)) return false;
+    if (!RectNear(ImageDrawRect(100.0f, 100.0f, area, 4, 50, ImageFit::Original),
+                  150.0f, 50.0f, 250.0f, 150.0f)) return false;
+    // A wide image keeps its ratio and centres vertically.
+    if (!RectNear(ImageDrawRect(400.0f, 100.0f, area, 4, 50, ImageFit::Contain),
+                  0.0f, 50.0f, 400.0f, 150.0f)) return false;
+    // 16:9 inside a square contain box.
+    if (!RectNear(ImageDrawRect(16.0f, 9.0f, D2D1::RectF(0.0f, 0.0f, 200.0f, 200.0f),
+                                4, 50, ImageFit::Contain),
+                  0.0f, 43.75f, 200.0f, 156.25f)) return false;
+    // Original never scales: 300x100 stays 300x100, centred.
+    if (!RectNear(ImageDrawRect(300.0f, 100.0f, area, 4, 50, ImageFit::Original),
+                  -50.0f, 50.0f, 250.0f, 150.0f)) return false;
+    return true;
+}
+
+bool GridPlacement() {
+    const D2D1_RECT_F area = D2D1::RectF(0.0f, 0.0f, 400.0f, 300.0f);
+    struct Cell {
+        int position;
+        float left, top, right, bottom;
+    };
+    const Cell cells[] = {
+        {0, 0.0f, 0.0f, 200.0f, 150.0f},     {1, 100.0f, 0.0f, 300.0f, 150.0f},
+        {2, 200.0f, 0.0f, 400.0f, 150.0f},   {3, 0.0f, 75.0f, 200.0f, 225.0f},
+        {5, 200.0f, 75.0f, 400.0f, 225.0f},  {6, 0.0f, 150.0f, 200.0f, 300.0f},
+        {7, 100.0f, 150.0f, 300.0f, 300.0f}, {8, 200.0f, 150.0f, 400.0f, 300.0f},
+    };
+    for (const Cell& cell : cells) {
+        const D2D1_RECT_F placement = ImagePlacementRect(area, cell.position, 50);
+        if (!RectNear(placement, cell.left, cell.top, cell.right, cell.bottom)) {
+            std::printf("[INFO] cell %d misplaced\n", cell.position);
+            return false;
+        }
+        // The cell takes 50% of both axes, whatever the fit.
+        for (const ImageFit fit : {ImageFit::Contain, ImageFit::Cover, ImageFit::Stretch,
+                                   ImageFit::Original}) {
+            const D2D1_RECT_F draw = ImageDrawRect(100.0f, 100.0f, area, cell.position, 50, fit);
+            if (!RectFinite(draw)) return false;
+            // Cover fills the cell; the excess is clipped by the caller.
+            if (fit == ImageFit::Cover) {
+                if (draw.left > placement.left + 0.001f || draw.top > placement.top + 0.001f ||
+                    draw.right < placement.right - 0.001f ||
+                    draw.bottom < placement.bottom - 0.001f) {
+                    return false;
+                }
+            }
+        }
+    }
+    // The full area ignores the ratio, and so does an out-of-range position.
+    return RectNear(ImagePlacementRect(area, 4, 20), 0.0f, 0.0f, 400.0f, 300.0f) &&
+           RectNear(ImagePlacementRect(area, -1, 20), 0.0f, 0.0f, 400.0f, 300.0f) &&
+           RectNear(ImagePlacementRect(area, 9, 20), 0.0f, 0.0f, 400.0f, 300.0f);
+}
+
+bool DegenerateInputs() {
+    const D2D1_RECT_F area = D2D1::RectF(0.0f, 0.0f, 400.0f, 300.0f);
+    const D2D1_RECT_F empty = D2D1::RectF(50.0f, 50.0f, 50.0f, 80.0f);
+    for (const ImageFit fit : {ImageFit::Contain, ImageFit::Cover, ImageFit::Stretch,
+                               ImageFit::Original}) {
+        // No image pixels: the placement is the answer, never NaN.
+        const D2D1_RECT_F zero = ImageDrawRect(0.0f, 0.0f, area, 4, 50, fit);
+        if (!RectFinite(zero) || !RectNear(zero, 0.0f, 0.0f, 400.0f, 300.0f)) return false;
+        const D2D1_RECT_F negative = ImageDrawRect(-10.0f, -10.0f, area, 4, 50, fit);
+        if (!RectFinite(negative) || !RectNear(negative, 0.0f, 0.0f, 400.0f, 300.0f)) return false;
+        // Empty area: the placement and the draw rect stay at the area.
+        const D2D1_RECT_F none = ImageDrawRect(100.0f, 100.0f, empty, 4, 50, fit);
+        if (!RectFinite(none) || !RectNear(none, 50.0f, 50.0f, 50.0f, 80.0f)) return false;
+    }
+    // Ratio bounds from the preferences, plus out-of-range values a caller may
+    // still hand over.
+    for (const int ratio : {20, 100, -50, 0, 500}) {
+        const D2D1_RECT_F placement = ImagePlacementRect(area, 0, ratio);
+        const D2D1_RECT_F draw = ImageDrawRect(50.0f, 50.0f, area, 0, ratio, ImageFit::Cover);
+        if (!RectFinite(placement) || !RectFinite(draw)) return false;
+        if (placement.right < placement.left || placement.bottom < placement.top) return false;
+        if (draw.right < draw.left || draw.bottom < draw.top) return false;
+    }
+    if (!RectNear(ImagePlacementRect(area, 0, 20), 0.0f, 0.0f, 80.0f, 60.0f)) return false;
+    return RectNear(ImagePlacementRect(area, 0, 100), 0.0f, 0.0f, 400.0f, 300.0f);
+}
+
+// The GPU bake cannot be inspected here, so the key that decides "reuse or
+// rebake" is a pure value: a new version or placement must never match.
+bool BakeCacheKeys() {
+    SourceBakeKey base;
+    base.path = L"C:\\wallpaper\\a.png";
+    base.version = 7;
+    base.position = 4;
+    base.ratio_percent = 50;
+    base.fit = 1;
+    base.blur_px = 14.0f;
+    base.width = 400;
+    base.height = 300;
+
+    SourceBakeKey other = base;
+    bool ok = base.SameContent(other) && base.SizeWithin(other, 0, 0);
+
+    other.version = 8;  // a newly published image always rebakes
+    ok = ok && !base.SameContent(other);
+    other = base;
+    other.position = 0;
+    ok = ok && !base.SameContent(other);
+    other = base;
+    other.ratio_percent = 20;
+    ok = ok && !base.SameContent(other);
+    other = base;
+    other.fit = 0;
+    ok = ok && !base.SameContent(other);
+    other = base;
+    other.path = L"C:\\wallpaper\\b.png";
+    ok = ok && !base.SameContent(other);
+
+    other = base;
+    other.blur_px = 14.4f;  // sub-pixel radius drift keeps the bake
+    ok = ok && base.SameContent(other);
+    other.blur_px = 20.0f;
+    ok = ok && !base.SameContent(other);
+
+    other = base;
+    other.width = 420;
+    other.height = 310;
+    ok = ok && base.SameContent(other) && base.SizeWithin(other, 32, 32) &&
+         !base.SizeWithin(other, 8, 8);
+    other.width = 900;
+    ok = ok && !base.SizeWithin(other, 100, 100);
+    return ok;
+}
+
+bool PureLayoutTests() {
+    bool ok = Report("position 4 cover matches the pre-change formula", FullAreaCoverMatchesLegacy());
+    ok &= Report("fit modes keep their aspect ratio and centring", FitAspectAndCentering());
+    ok &= Report("nine-grid cells stick to their edge or corner", GridPlacement());
+    ok &= Report("degenerate areas and sizes stay finite", DegenerateInputs());
+    ok &= Report("bake cache key tracks version and placement", BakeCacheKeys());
+    return ok;
+}
+
 } // namespace
 
 int wmain() {
@@ -201,12 +420,13 @@ int wmain() {
     const std::wstring large = root + L"\\large.bmp";
     const std::wstring pattern = root + L"\\pattern.bmp";
 
-    bool passed = WriteBmp(image_a, 96, 64, 220, 40, 30) &&
-                  WriteBmp(image_b, 37, 83, 20, 180, 70) &&
-                  WriteCorrupt(corrupt) &&
-                  WriteBmp(large, 1600, 900, 60, 90, 200) &&
-                  WritePatternBmp(pattern, 1600, 900);
-    passed &= Report("create bitmap fixtures", passed);
+    bool passed = PureLayoutTests();
+    passed &= Report("create bitmap fixtures",
+                     WriteBmp(image_a, 96, 64, 220, 40, 30) &&
+                     WriteBmp(image_b, 37, 83, 20, 180, 70) &&
+                     WriteCorrupt(corrupt) &&
+                     WriteBmp(large, 1600, 900, 60, 90, 200) &&
+                     WritePatternBmp(pattern, 1600, 900));
 
     HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC",
                                 L"Pulse material test", WS_POPUP | WS_VISIBLE,

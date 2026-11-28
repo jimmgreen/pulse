@@ -1566,21 +1566,38 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
     painter_.BeginFrame(theme, IsHighContrast());
     PULSE_SCENE_MARK("scene_resources");
 
+    // The service publishes the resolved path; the legacy single-image value
+    // is the fallback when no service path is available yet.
+    const std::wstring bg_path = !vm.background_resolved_path.empty()
+        ? vm.background_resolved_path : vm.background_image;
+    SourceDrawParams bg_params;
+    bg_params.position = vm.background_position;
+    bg_params.ratio_percent = vm.background_ratio;
+    bg_params.fit = vm.background_fit;
+    bg_params.opacity =
+        static_cast<float>(std::clamp(vm.background_opacity, 0, 100)) / 100.0f;
+    bg_params.version = vm.background_image_version;
+
     // None effect + selected image: the (optionally blurred) wallpaper covers
     // the window base; the title scrim, one shared sheet and the pane cards
     // stack over it with the opacities from ComputeLayerAlphas.
     const bool image_mode = vm.window_effect == WindowEffect::None &&
-                            !vm.background_image.empty() && !IsHighContrast();
+                            vm.background_region == 0 && !bg_path.empty() &&
+                            vm.background_opacity > 0 && !IsHighContrast();
+    // List-only mode keeps the window on its plain material, so the sampled
+    // backdrop must not see the image either.
+    const std::wstring material_path =
+        (vm.window_effect == WindowEffect::None || vm.background_region != 0 ||
+         vm.background_opacity <= 0) ? std::wstring{} : bg_path;
     bool backdrop_drawn = false;
     if (embedded_) {
         // The host window owns the backdrop; only the shared sheet is tinted.
     } else if (image_mode) {
-        backdrop_drawn = material_.DrawSourceCover(dc, rect, vm.background_image,
+        backdrop_drawn = material_.DrawSourceCover(dc, rect, bg_path, bg_params,
                                                    WallpaperBlurDip(vm.wallpaper_blur) * scale_);
     } else {
-        backdrop_drawn = material_.DrawBackdrop(
-            dc, rect, vm.window_effect, vm.dark,
-            (vm.window_effect == WindowEffect::None) ? std::wstring{} : vm.background_image);
+        backdrop_drawn = material_.DrawBackdrop(dc, rect, vm.window_effect, vm.dark,
+                                                material_path, bg_params);
     }
     PULSE_SCENE_MARK("scene_backdrop");
     const LayerAlphas layers = ComputeLayerAlphas(image_mode, backdrop_drawn,

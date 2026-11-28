@@ -42,6 +42,8 @@ public:
     D2D1_RECT_F SettingsStoreField(int field) const;
     D2D1_RECT_F SettingsStoreQuickControlRect(int action) const;
     D2D1_RECT_F SettingsStoreClip() const;
+    // 设置 › 背景图's URL / API-pointer rows, cached while the settings page draws.
+    D2D1_RECT_F SettingsBackgroundFieldRect(int field) const;
     std::vector<int> HiddenTitleTabs(const WindowViewModel& vm, float width) const;
     // The title bar's tab-list button (⧉ N, or the strip's overflow button); empty when not shown.
     D2D1_RECT_F TitleTabListRect(const WindowViewModel& vm, float width) const;
@@ -1127,6 +1129,7 @@ private:
     void DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     D2D1_RECT_F settings_store_fields_[7]{};
     mutable std::map<int, D2D1_RECT_F> settings_store_quick_controls_;
+    D2D1_RECT_F settings_background_fields_[2]{};
     D2D1_RECT_F settings_store_clip_{};
     void DrawSettingsStore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawNativeSettingsHeader(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);

@@ -4617,6 +4617,22 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     }
     float listH = bottom - y;
     dc->PushAxisAlignedClip(D2D1::RectF(x, y, x + w, bottom), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    if (vm.background_region == 1 && vm.background_opacity > 0 && !IsHighContrast()) {
+        const std::wstring& list_bg = !vm.background_resolved_path.empty()
+            ? vm.background_resolved_path : vm.background_image;
+        if (!list_bg.empty()) {
+            // The layout is relative to this pane's list area, not the window.
+            SourceDrawParams bg_params;
+            bg_params.position = vm.background_position;
+            bg_params.ratio_percent = vm.background_ratio;
+            bg_params.fit = vm.background_fit;
+            bg_params.opacity =
+                static_cast<float>(std::clamp(vm.background_opacity, 0, 100)) / 100.0f;
+            bg_params.version = vm.background_image_version;
+            material_.DrawSourceCover(dc, D2D1::RectF(x, y, x + w, bottom), list_bg, bg_params,
+                                      WallpaperBlurDip(vm.wallpaper_blur) * scale_);
+        }
+    }
     if ((!pane.loading || pane.is_changes) && pane.EntryCount() == 0)
         DrawPaneEmptyState(vm, pane, D2D1::RectF(x, y, x + w, bottom), pane_index, pane_theme);
     else

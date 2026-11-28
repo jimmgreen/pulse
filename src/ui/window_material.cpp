@@ -155,16 +155,10 @@ DWORD BackdropTypeForEffect(WindowEffect effect) noexcept {
     }
 }
 
+// Full-area cover, expressed through the shared layout so the sharp path, the
+// blurred bake and the placement options cannot drift apart.
 D2D1_RECT_F CoverRect(float img_w, float img_h, const D2D1_RECT_F& dest) {
-    const float dw = dest.right - dest.left;
-    const float dh = dest.bottom - dest.top;
-    if (img_w <= 0.0f || img_h <= 0.0f || dw <= 0.0f || dh <= 0.0f) return dest;
-    const float scale = (std::max)(dw / img_w, dh / img_h);
-    const float w = img_w * scale;
-    const float h = img_h * scale;
-    const float x = dest.left + (dw - w) * 0.5f;
-    const float y = dest.top + (dh - h) * 0.5f;
-    return D2D1::RectF(x, y, x + w, y + h);
+    return ImageDrawRect(img_w, img_h, dest, 4, 100, ImageFit::Cover);
 }
 
 HRESULT CreateTargetBitmap(ID2D1DeviceContext* dc, UINT w, UINT h, ID2D1Bitmap1** out) {
@@ -799,15 +793,11 @@ void WindowMaterial::ResetGpuResources() {
     source_path_.clear();
     source_dc_ = nullptr;
     sampled_.reset();
-    sampled_path_.clear();
+    sampled_key_ = SourceBakeKey{};
     sampled_dc_ = nullptr;
-    sampled_w_ = 0;
-    sampled_h_ = 0;
     blurred_.reset();
-    blurred_path_.clear();
+    blurred_key_ = SourceBakeKey{};
     blurred_dc_ = nullptr;
-    blurred_w_ = 0;
-    blurred_h_ = 0;
 }
 
 void WindowMaterial::Invalidate() {
@@ -994,6 +984,24 @@ HRESULT WindowMaterial::BuildMicaImageWithProfile(ID2D1DeviceContext* dc, ID2D1I
     return *output ? S_OK : E_FAIL;
 }
 
+bool SourceBakeKey::SameContent(const SourceBakeKey& other) const noexcept {
+    if (version != other.version || position != other.position ||
+        ratio_percent != other.ratio_percent || fit != other.fit || path != other.path) {
+        return false;
+    }
+    // The blur radius reaches the bake as a DIP value scaled by the window DPI.
+    const float delta = blur_px > other.blur_px ? blur_px - other.blur_px
+                                                : other.blur_px - blur_px;
+    return delta < 0.5f;
+}
+
+bool SourceBakeKey::SizeWithin(const SourceBakeKey& other, int tolerance_w,
+                               int tolerance_h) const noexcept {
+    const int dw = width > other.width ? width - other.width : other.width - width;
+    const int dh = height > other.height ? height - other.height : other.height - height;
+    return dw <= tolerance_w && dh <= tolerance_h;
+}
+
 ID2D1Bitmap* WindowMaterial::SourceBitmap(const std::wstring& path) {
     return SourceBitmapAt(path, kMaxSource);
 }
@@ -1084,13 +1092,27 @@ bool WindowMaterial::DecodeFailedForTesting(const std::wstring& path) {
 
 bool WindowMaterial::DrawSourceCover(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                      const std::wstring& path, float blur_px) {
+    return DrawSourceCover(dc, dest, path, SourceDrawParams{}, blur_px);
+}
+
+bool WindowMaterial::DrawSourceCover(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
+                                     const std::wstring& path, const SourceDrawParams& params,
+                                     float blur_px) {
+    const float opacity = std::clamp(params.opacity, 0.0f, 1.0f);
+    // Fully transparent: report "not painted" so the caller keeps its own base
+    // instead of leaving an unpainted window.
+    if (opacity <= 0.0f) return false;
+
+    const D2D1_RECT_F placement = ImagePlacementRect(dest, params.position, params.ratio_percent);
     // The fallback asks for the same size as the blur: while the decode is
     // pending EnsureBlurred returns null, and a full-size request here would
     // decode 2048 px on the first frame.
     const UINT edge = SourceEdgeForBlur(blur_px);
     if (blur_px > 0.5f) {
-        if (ID2D1Bitmap* blurred = EnsureBlurred(dc, dest, path, blur_px)) {
-            dc->DrawBitmap(blurred, dest, 1.0f, D2D1_INTERPOLATION_MODE_LINEAR, nullptr, nullptr);
+        if (ID2D1Bitmap* blurred = EnsureBlurred(dc, dest, path, params, blur_px)) {
+            // The bake is exactly the placement region.
+            dc->DrawBitmap(blurred, placement, opacity, D2D1_INTERPOLATION_MODE_LINEAR,
+                           nullptr, nullptr);
             return true;
         }
         // Effect failure: fall through to the sharp cover rather than no wallpaper.
@@ -1098,34 +1120,48 @@ bool WindowMaterial::DrawSourceCover(ID2D1DeviceContext* dc, const D2D1_RECT_F& 
     ID2D1Bitmap* source = SourceBitmapAt(path, edge);
     if (!dc || !source) return false;
     const D2D1_SIZE_F size = source->GetSize();
-    const D2D1_RECT_F cover = CoverRect(size.width, size.height, dest);
-    dc->PushAxisAlignedClip(dest, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-    dc->DrawBitmap(source, cover, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+    const D2D1_RECT_F draw = ImageDrawRect(size.width, size.height, dest, params.position,
+                                           params.ratio_percent,
+                                           static_cast<ImageFit>(std::clamp(params.fit, 0, 3)));
+    dc->PushAxisAlignedClip(placement, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    dc->DrawBitmap(source, draw, opacity, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                    nullptr, nullptr);
     dc->PopAxisAlignedClip();
     return true;
 }
 
-// Blurred wallpaper for image mode. The cover crop is baked at sample size so
-// it matches the sharp cover exactly; Border(clamp) keeps the Gaussian from
-// pulling transparent pixels in at the window edges.
+// Blurred wallpaper for image mode. The placement region is baked at sample
+// size and the image is fitted inside it the same way the sharp path fits it
+// inside the placement, so turning the blur off does not move the image;
+// Border(clamp) keeps the Gaussian from pulling transparent pixels in at the
+// region edges.
 ID2D1Bitmap* WindowMaterial::EnsureBlurred(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
-                                           const std::wstring& path, float blur_px) {
+                                           const std::wstring& path,
+                                           const SourceDrawParams& params, float blur_px) {
     ID2D1Bitmap* source = SourceBitmapAt(path, SourceEdgeForBlur(blur_px));
     if (!dc || !source) return nullptr;
 
-    const float dw = dest.right - dest.left;
-    const float dh = dest.bottom - dest.top;
-    if (dw < 2.0f || dh < 2.0f) return nullptr;
-    const float scale = (std::min)(1.0f, kSampleLongEdge / (std::max)(dw, dh));
-    const int sw = (std::max)(2, static_cast<int>(dw * scale + 0.5f));
-    const int sh = (std::max)(2, static_cast<int>(dh * scale + 0.5f));
+    const D2D1_RECT_F placement = ImagePlacementRect(dest, params.position, params.ratio_percent);
+    const float pw = placement.right - placement.left;
+    const float ph = placement.bottom - placement.top;
+    if (pw < 2.0f || ph < 2.0f) return nullptr;
+    const float scale = (std::min)(1.0f, kSampleLongEdge / (std::max)(pw, ph));
+    const int sw = (std::max)(2, static_cast<int>(pw * scale + 0.5f));
+    const int sh = (std::max)(2, static_cast<int>(ph * scale + 0.5f));
 
-    if (blurred_.get() && blurred_dc_ == dc && blurred_path_ == path &&
-        std::abs(blurred_px_ - blur_px) < 0.5f) {
+    SourceBakeKey key;
+    key.path = path;
+    key.version = params.version;
+    key.position = params.position;
+    key.ratio_percent = params.ratio_percent;
+    key.fit = params.fit;
+    key.blur_px = blur_px;
+    key.width = sw;
+    key.height = sh;
+
+    if (blurred_.get() && blurred_dc_ == dc && blurred_key_.SameContent(key)) {
         // Same resize tolerance as EnsureSampled: skip rebakes on every WM_SIZE tick.
-        if (std::abs(blurred_w_ - sw) <= (std::max)(16, sw / 8) &&
-            std::abs(blurred_h_ - sh) <= (std::max)(16, sh / 8)) {
+        if (blurred_key_.SizeWithin(key, (std::max)(16, sw / 8), (std::max)(16, sh / 8))) {
             return blurred_.get();
         }
     }
@@ -1139,10 +1175,15 @@ ID2D1Bitmap* WindowMaterial::EnsureBlurred(ID2D1DeviceContext* dc, const D2D1_RE
         dc->SetTarget(cover_bitmap.get());
         dc->SetTransform(D2D1::Matrix3x2F::Identity());
         dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f));
+        // A blurred wallpaper always fills its region; contain, stretch and
+        // original size only apply to the sharp path. Fitting them here would
+        // leave a letterbox the bake clears to black, which the blur smears
+        // into the image edges.
         dc->DrawBitmap(source,
-                       CoverRect(size.width, size.height,
-                                 D2D1::RectF(0.0f, 0.0f, static_cast<float>(sw),
-                                             static_cast<float>(sh))),
+                       ImageDrawRect(size.width, size.height,
+                                     D2D1::RectF(0.0f, 0.0f, static_cast<float>(sw),
+                                                 static_cast<float>(sh)),
+                                     4, 100, ImageFit::Cover),
                        1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
     }
 
@@ -1176,17 +1217,20 @@ ID2D1Bitmap* WindowMaterial::EnsureBlurred(ID2D1DeviceContext* dc, const D2D1_RE
     blurred_.reset();
     blurred_.p = baked.get();
     if (blurred_.p) blurred_.p->AddRef();
-    blurred_path_ = path;
-    blurred_px_ = blur_px;
-    blurred_w_ = sw;
-    blurred_h_ = sh;
+    blurred_key_ = key;
     blurred_dc_ = dc;
     return blurred_.get();
 }
 
+// The material always covers the whole window: its placement and fit belong
+// to the direct-draw paths only. Sampling just the layer's placement region
+// leaves every other pixel at the bake target's cleared colour, which reads
+// as a black block on screen, so position/ratio/fit are deliberately unused
+// here and only params.version takes part in rebaking.
 ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                            WindowEffect effect, bool dark,
-                                           const std::wstring& path) {
+                                           const std::wstring& path,
+                                           const SourceDrawParams& params) {
     ID2D1Bitmap* source = SourceBitmapAt(path, kSoftSource);
     if (!dc || !source) return nullptr;
 
@@ -1198,15 +1242,25 @@ ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RE
     const int sw = (std::max)(2, static_cast<int>(dw * scale + 0.5f));
     const int sh = (std::max)(2, static_cast<int>(dh * scale + 0.5f));
 
-    if (sampled_.get() && sampled_dc_ == dc && sampled_path_ == path &&
+    // Only the image and the window size select a sample: the material fills
+    // the whole window and never takes part in the image layout, so position,
+    // ratio and fit are pinned to their defaults instead of letting a slider
+    // drag rebake the full-window blur.
+    SourceBakeKey key;
+    key.path = path;
+    key.version = params.version;
+    key.position = 4;
+    key.ratio_percent = 50;
+    key.fit = 1;
+    key.width = sw;
+    key.height = sh;
+
+    if (sampled_.get() && sampled_dc_ == dc && sampled_key_.SameContent(key) &&
         sampled_effect_ == effect && sampled_dark_ == dark) {
         // Interactive resize can deliver a WM_SIZE for every pixel. Reusing
         // a nearby sample avoids rebuilding the full blur graph on each tick;
         // a larger change still refreshes the cache for final quality.
-        const int tolerance_w = (std::max)(16, sw / 8);
-        const int tolerance_h = (std::max)(16, sh / 8);
-        if (std::abs(sampled_w_ - sw) <= tolerance_w &&
-            std::abs(sampled_h_ - sh) <= tolerance_h) {
+        if (sampled_key_.SizeWithin(key, (std::max)(16, sw / 8), (std::max)(16, sh / 8))) {
             return sampled_.get();
         }
     }
@@ -1214,6 +1268,8 @@ ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RE
     const Recipe recipe = RecipeFor(effect, dark);
     const float blur_std = recipe.blur_std * (static_cast<float>(sw) / dw);
     const D2D1_SIZE_F size = source->GetSize();
+    // Full-window cover, value for value: the material never follows the
+    // placement, so no DIP-to-sample mapping can drift in the last bit.
     const D2D1_RECT_F cover = CoverRect(size.width, size.height,
                                         D2D1::RectF(-1.0f, -1.0f,
                                                     static_cast<float>(sw) + 1.0f,
@@ -1258,24 +1314,43 @@ ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RE
     sampled_.reset();
     sampled_.p = baked.get();
     if (sampled_.p) sampled_.p->AddRef();
-    sampled_path_ = path;
+    sampled_key_ = key;
     sampled_effect_ = effect;
     sampled_dark_ = dark;
-    sampled_w_ = sw;
-    sampled_h_ = sh;
     sampled_dc_ = dc;
     return sampled_.get();
 }
 
 bool WindowMaterial::DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                   WindowEffect effect, bool dark, const std::wstring& path) {
+    return DrawBackdrop(dc, dest, effect, dark, path, SourceDrawParams{});
+}
+
+bool WindowMaterial::DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
+                                  WindowEffect effect, bool dark, const std::wstring& path,
+                                  const SourceDrawParams& params) {
     if (!dc || path.empty() || effect == WindowEffect::None || IsHighContrast() || !compat::ModernWindows()) {
         return false;
     }
-    ID2D1Bitmap* sampled = EnsureSampled(dc, dest, effect, dark, path);
+    const float opacity = std::clamp(params.opacity, 0.0f, 1.0f);
+    // The sample is opaque (the wallpaper already blurred and tinted into the
+    // material), so drawing it with alpha would make the whole window
+    // translucent and let the DWM backdrop - the real desktop wallpaper -
+    // show through. A lower opacity fades the material's own base tint over
+    // the sample instead: 1 leaves it untouched, 0 is the flat material.
+    ComPtr<ID2D1SolidColorBrush> base_tint;
+    if (opacity < 1.0f) {
+        const Recipe recipe = RecipeFor(effect, dark);
+        const D2D1_COLOR_F color = D2D1::ColorF(recipe.tint.r, recipe.tint.g,
+                                                recipe.tint.b, 1.0f - opacity);
+        if (FAILED(dc->CreateSolidColorBrush(color, &base_tint)) || !base_tint.get())
+            return false;
+    }
+    ID2D1Bitmap* sampled = EnsureSampled(dc, dest, effect, dark, path, params);
     if (!sampled) return false;
     dc->DrawBitmap(sampled, dest, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                    nullptr, nullptr);
+    if (base_tint.get()) dc->FillRectangle(dest, base_tint.get());
     return true;
 }
 

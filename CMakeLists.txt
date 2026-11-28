@@ -26,6 +26,13 @@ add_compile_options(/utf-8 /permissive- /W4 /EHsc)
 # Expose optional SDK COM interfaces; runtime calls are capability-checked.
 add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0603 WINVER=0x0603 _WIN32_IE=0x0A00 NTDDI_VERSION=NTDDI_WIN10_NI)
 
+# window_material.cpp paints the random background through ImagePlacementRect /
+# ImageDrawRect, which are non-inline, so every target that compiles the window
+# material must also compile the layout unit or it fails to link.
+set(PULSE_WINDOW_MATERIAL_SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/window_material.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/ui/background_image_layout.cpp")
+
 option(PULSE_WITH_LUMATEXT "Use LumaText for Pulse-owned single-line text" ON)
 set(LUMATEXT_SOURCE_DIR "" CACHE PATH
     "Optional LumaText source tree used for development builds")
@@ -469,7 +476,7 @@ target_link_libraries(pulse_dialogs_test PRIVATE uuid pulse_fs_watch pulse_runti
 
 # Conflict dialog: hovering a cut-off path shows it whole (#55).
 add_executable(pulse_conflict_dialog_test
-    src/ui/fluent_menu.cpp src/ui/native_menu_surface.cpp src/ui/edit_host.cpp src/ui/window_material.cpp
+    src/ui/fluent_menu.cpp src/ui/native_menu_surface.cpp src/ui/edit_host.cpp ${PULSE_WINDOW_MATERIAL_SOURCES}
     src/bench/conflict_dialog_test.cpp
     src/bench/localization_test.rc
     src/ui/file_operation_dialog.cpp
@@ -494,7 +501,7 @@ target_link_libraries(pulse_file_operation_authorization_dialog_test PRIVATE
 pulse_enable_lumatext(pulse_file_operation_authorization_dialog_test)
 # Progress card states rendered to PNG + immediate successful completion close.
 add_executable(pulse_ops_dialog_shots
-    src/bench/ops_dialog_shots.cpp ${PULSE_PERMISSION_UI_SOURCES} src/ui/window_material.cpp)
+    src/bench/ops_dialog_shots.cpp ${PULSE_PERMISSION_UI_SOURCES})
 target_link_libraries(pulse_ops_dialog_shots PRIVATE
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs comctl32 uxtheme gdiplus pulse_localization)
 pulse_enable_lumatext(pulse_ops_dialog_shots)
@@ -1205,6 +1212,7 @@ target_link_libraries(pulse_preview_handler_pan_test PRIVATE gdi32 user32)
 add_executable(pulse_material_test
     src/bench/window_material_test.cpp
     src/ui/window_material.cpp
+    src/ui/background_image_layout.cpp
     src/ui/typography.cpp
     src/ui/ui_compositor.cpp)
 target_compile_definitions(pulse_material_test PRIVATE
@@ -1213,6 +1221,16 @@ target_link_libraries(pulse_material_test PRIVATE
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32
     comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_material_test)
+
+# Random background image: layout math with the folder scan and network fetch.
+add_executable(pulse_background_image_test
+    src/bench/background_image_test.cpp
+    src/app/background_image_service.cpp
+    src/app/background_image_fetch.cpp
+    src/ui/background_image_layout.cpp)
+target_link_libraries(pulse_background_image_test PRIVATE
+    winhttp shlwapi ole32 user32 pulse_localization)
+pulse_enable_lumatext(pulse_background_image_test)
 
 # A swap chain that cannot be resized is rebuilt, never left without a target
 # (white window after the monitor it was on went away).
@@ -1901,7 +1919,7 @@ add_dependencies(pulse_transfer_audit_test pulse_elevated_test_host)
 add_executable(pulse_typography_policy_test src/bench/typography_policy_test.cpp src/bench/child_edit_test.rc
     src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/edit_host.cpp
     src/ui/fluent_components.cpp src/ui/fluent_menu.cpp src/ui/native_menu_surface.cpp src/ui/tab_shape.cpp
-    src/ui/window_material.cpp)
+    ${PULSE_WINDOW_MATERIAL_SOURCES})
 target_compile_definitions(pulse_typography_policy_test PRIVATE PULSE_TEST_LUMATEXT_PRESENT_FAILURE=1)
 target_link_options(pulse_typography_policy_test PRIVATE /MANIFEST:NO)
 target_link_libraries(pulse_typography_policy_test PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
@@ -1912,7 +1930,7 @@ pulse_enable_lumatext(pulse_typography_policy_test)
 add_executable(pulse_menu_mnemonic_test src/bench/menu_mnemonic_test.cpp src/bench/child_edit_test.rc
     src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/edit_host.cpp
     src/ui/fluent_components.cpp src/ui/fluent_menu.cpp src/ui/native_menu_surface.cpp src/ui/tab_shape.cpp
-    src/ui/window_material.cpp)
+    ${PULSE_WINDOW_MATERIAL_SOURCES})
 target_include_directories(pulse_menu_mnemonic_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_link_options(pulse_menu_mnemonic_test PRIVATE /MANIFEST:NO)
 target_link_libraries(pulse_menu_mnemonic_test PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
@@ -2660,7 +2678,7 @@ foreach(menu_frame_variant IN ITEMS test before)
     set(menu_frame_target pulse_menu_frame_${menu_frame_variant})
     add_executable(${menu_frame_target} EXCLUDE_FROM_ALL src/bench/menu_frame_test.cpp src/bench/child_edit_test.rc
         src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/edit_host.cpp src/ui/fluent_components.cpp
-        ${menu_frame_source} src/ui/tab_shape.cpp src/ui/window_material.cpp)
+        ${menu_frame_source} src/ui/tab_shape.cpp ${PULSE_WINDOW_MATERIAL_SOURCES})
     target_include_directories(${menu_frame_target} PRIVATE "${CMAKE_BINARY_DIR}/generated" src/ui)
     target_link_options(${menu_frame_target} PRIVATE /MANIFEST:NO)
     target_link_libraries(${menu_frame_target} PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
@@ -2931,7 +2949,7 @@ set(PULSE_EXTENSION_PANEL_RENDER_SOURCES
     src/ui/extension_data_accessibility.cpp
     src/ui/edit_host.cpp
     src/ui/fluent_menu.cpp src/ui/native_menu_surface.cpp
-    src/ui/window_material.cpp
+    ${PULSE_WINDOW_MATERIAL_SOURCES}
     src/ui/fluent_components.cpp
     src/ui/tab_shape.cpp
     src/ui/typography.cpp
@@ -3168,7 +3186,7 @@ target_link_libraries(pulse_extension_install_transaction_test PRIVATE bcrypt)
 
 add_executable(pulse_folder_grid_name_test
     src/bench/folder_grid_name_test.cpp src/ui/ui_compositor.cpp src/ui/typography.cpp
-    src/ui/view_layout.cpp src/ui/window_material.cpp)
+    src/ui/view_layout.cpp ${PULSE_WINDOW_MATERIAL_SOURCES})
 target_include_directories(pulse_folder_grid_name_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_compile_options(pulse_folder_grid_name_test PRIVATE /W4 /permissive- /utf-8 /Gy /Gw)
 target_link_options(pulse_folder_grid_name_test PRIVATE /OPT:REF /OPT:ICF)
@@ -3712,7 +3730,7 @@ target_link_libraries(pulse_picker_save_watch_test PRIVATE pulse_picker_save_wat
 get_target_property(_picker_saved_toast_sources pulse_file_picker_view_test SOURCES)
 list(REMOVE_ITEM _picker_saved_toast_sources src/bench/file_picker_view_test.cpp src/ui/folder_picker_view.cpp)
 add_executable(pulse_picker_saved_toast_test EXCLUDE_FROM_ALL src/bench/picker_saved_toast_test.cpp
-    src/ui/picker_saved_toast.cpp src/ui/notification_toast.cpp src/ui/snack_style.cpp src/ui/window_material.cpp ${_picker_saved_toast_sources})
+    src/ui/picker_saved_toast.cpp src/ui/notification_toast.cpp src/ui/snack_style.cpp ${PULSE_WINDOW_MATERIAL_SOURCES} ${_picker_saved_toast_sources})
 target_compile_definitions(pulse_picker_saved_toast_test PRIVATE PULSE_PICKER_SAVED_TOAST_TEST=1)
 get_target_property(_picker_saved_toast_libs pulse_file_picker_view_test LINK_LIBRARIES)
 target_link_libraries(pulse_picker_saved_toast_test PRIVATE ${_picker_saved_toast_libs})

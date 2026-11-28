@@ -1,5 +1,6 @@
 // window_material.h — DWM backdrop + custom-image sampling for Mica / Acrylic.
 #pragma once
+#include "background_image_layout.h"
 #include "ui_compositor.h"
 #include "window_effect_support.h"
 #include <cstdint>
@@ -50,6 +51,36 @@ bool BuildAcrylicPlate(ID2D1DeviceContext* dc, ID2D1Bitmap1* frame, POINT frame_
 int RunMaterialSelfTest();
 void LogWindowMaterial(const char* fmt, ...);
 
+// Layout, opacity and identity of a user image painted by DrawSourceCover.
+// The ints mirror the persisted background_* preferences; `version` changes
+// with every published image so a new one always rebakes.
+struct SourceDrawParams {
+    int position = 4;
+    int ratio_percent = 50;
+    int fit = 1;
+    float opacity = 1.0f;
+    uint64_t version = 0;
+};
+
+// Identity of a baked bitmap. The content fields must match to reuse a bake;
+// the size fields may drift within the rebake tolerance while the user drags
+// the window edge.
+struct SourceBakeKey {
+    std::wstring path;
+    uint64_t version = 0;
+    int position = 4;
+    int ratio_percent = 50;
+    int fit = 1;
+    float blur_px = 0.0f;
+    int width = 0;
+    int height = 0;
+
+    // path, version, position, ratio and fit equal and the blur radius within
+    // 0.5 px (the radius arrives as a scaled DIP value).
+    bool SameContent(const SourceBakeKey& other) const noexcept;
+    bool SizeWithin(const SourceBakeKey& other, int tolerance_w, int tolerance_h) const noexcept;
+};
+
 // Samples a user image with the WinUI homemade-Mica D2D graph (blur, then
 // luminosity blend, then color blend). DWM cannot retarget Mica at a bitmap.
 class WindowMaterial {
@@ -69,14 +100,30 @@ public:
     void Invalidate();
 
     ID2D1Bitmap* SourceBitmap(const std::wstring& path);
+    // Defaults to a full-window cover (position 4, fit cover, opaque), which is
+    // what every caller drew before the placement options existed.
     // blur_px > 0 paints a Gaussian-blurred cover baked once per path/size/radius.
     bool DrawSourceCover(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                          const std::wstring& path, float blur_px = 0.0f);
+    // Same, with the persisted placement/fit/opacity. The image is clipped to
+    // the placement region and the bake is cached per params.version.
+    bool DrawSourceCover(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
+                         const std::wstring& path, const SourceDrawParams& params, float blur_px);
 
     // Paints the sampled material. Returns false when there is nothing to sample
     // (no path, None, high contrast, or decode failure) so the caller can use DWM.
     bool DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                       WindowEffect effect, bool dark, const std::wstring& path);
+    // Same material, still over the whole window: only params.version selects
+    // the bake (a published image forces a rebake). position, ratio_percent
+    // and fit are ignored on purpose, because the material never follows the
+    // image placement; sampling a sub-rect would leave the rest of the bake
+    // at its cleared colour and show up as a black block. params.opacity fades
+    // the sample toward the material's base tint instead of drawing it
+    // translucent, so the window never opens onto the desktop.
+    bool DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
+                      WindowEffect effect, bool dark, const std::wstring& path,
+                      const SourceDrawParams& params);
 
 #ifdef PULSE_WINDOW_MATERIAL_TESTING
     void SetDecodeDelayForTesting(DWORD delay_ms);
@@ -103,9 +150,11 @@ private:
     void ResetGpuResources();
     static DWORD WINAPI DecodeWorkerMain(void* parameter);
     ID2D1Bitmap* EnsureBlurred(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
-                               const std::wstring& path, float blur_px);
+                               const std::wstring& path, const SourceDrawParams& params,
+                               float blur_px);
     ID2D1Bitmap* EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
-                               WindowEffect effect, bool dark, const std::wstring& path);
+                               WindowEffect effect, bool dark, const std::wstring& path,
+                               const SourceDrawParams& params);
 
     Compositor* compositor_ = nullptr;
     std::shared_ptr<DecodeWorker> decode_worker_;
@@ -122,17 +171,12 @@ private:
     std::wstring source_failed_;
     ID2D1DeviceContext* source_dc_ = nullptr;
     ComPtr<ID2D1Bitmap> sampled_;
-    std::wstring sampled_path_;
+    SourceBakeKey sampled_key_;
     WindowEffect sampled_effect_ = WindowEffect::None;
     bool sampled_dark_ = false;
-    int sampled_w_ = 0;
-    int sampled_h_ = 0;
     ID2D1DeviceContext* sampled_dc_ = nullptr;
     ComPtr<ID2D1Bitmap> blurred_;
-    std::wstring blurred_path_;
-    float blurred_px_ = 0.0f;
-    int blurred_w_ = 0;
-    int blurred_h_ = 0;
+    SourceBakeKey blurred_key_;
     ID2D1DeviceContext* blurred_dc_ = nullptr;
 };
 
