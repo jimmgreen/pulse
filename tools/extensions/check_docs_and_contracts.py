@@ -320,6 +320,9 @@ def check_all(root=ROOT):
             errors.append("manifest.schema.json is missing contributes.commands definition")
 
     # 4. examples/native/catalog.json & project_creator alignment
+    # Extracted SDK bundles ship only the ABI sample; the repository also carries
+    # the project-capsules example plugin.
+    is_extracted_sdk_bundle = (root / "native-sdk-manifest.json").is_file()
     examples_catalog_path = root / "examples/native/catalog.json"
     packable_templates = ()
     if not examples_catalog_path.is_file():
@@ -347,12 +350,12 @@ def check_all(root=ROOT):
             creator_mod = _load_module_from(root, "project_creator.py", "_check_creator")
             if creator_mod.templates(root) != packable_templates:
                 errors.append("project_creator.templates() does not match examples/native/catalog.json")
-            if creator_mod.abi_samples(root) != ("basic",):
-                errors.append(f"project_creator.abi_samples() expected ('basic',), got {creator_mod.abi_samples(root)}")
+            expected_abi_samples = ("basic",) if is_extracted_sdk_bundle else ("basic", "project-capsules")
+            if creator_mod.abi_samples(root) != expected_abi_samples:
+                errors.append(f"project_creator.abi_samples() expected {expected_abi_samples}, got {creator_mod.abi_samples(root)}")
 
     # 5. Optional native-sdk-manifest.json compatibility metadata check (inside extracted SDK bundles)
     sdk_manifest_path = root / "native-sdk-manifest.json"
-    is_extracted_sdk_bundle = sdk_manifest_path.is_file()
     if is_extracted_sdk_bundle:
         sdk_manifest = json.loads(sdk_manifest_path.read_text(encoding="utf-8"))
         compat = sdk_manifest.get("compatibility")

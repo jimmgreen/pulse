@@ -19,7 +19,7 @@ class ProjectCreatorTests(unittest.TestCase):
         self.assertNotIn("basic", expected)
         self.assertNotIn("dock-panel", expected)
         self.assertEqual(project_creator.templates(ROOT), expected)
-        self.assertEqual(project_creator.abi_samples(ROOT), ("basic",))
+        self.assertEqual(project_creator.abi_samples(ROOT), ("basic", "project-capsules"))
 
     def test_create_project_renders_all_eight_packable_templates(self):
         with tempfile.TemporaryDirectory() as directory:
